@@ -78,4 +78,4 @@ cargo install chit-cli
 cargo binstall chit-cli
 ```
 
-The `chit` command will be available on your PATH regardless of which method you use.
+The `chit` binary will be available on your PATH regardless of which method you use.
