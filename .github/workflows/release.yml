@@ -1,0 +1,322 @@
+name: Version & Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      skip_version_bump:
+        description: 'Skip version bumping for testing'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+        - 'true'
+        - 'false'
+
+concurrency:
+  group: version-release
+  cancel-in-progress: false
+
+jobs:
+  wait-for-ci:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch'
+    steps:
+      - name: Wait for CI
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'test'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
+
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    needs: [wait-for-ci]
+    if: always() && (needs.wait-for-ci.result == 'success' || github.event_name == 'workflow_dispatch')
+    outputs:
+      version_changed: ${{ steps.release.outputs.released }}
+      new_version: ${{ steps.release.outputs.version }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      pr_number: ${{ steps.detect.outputs.pr_number }}
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: write
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: Setup Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+        cache: true
+
+    - name: Build grubble
+      run: |
+        cargo install grubble
+
+    - name: Clean up stale tags
+      run: |
+        git fetch origin --tags
+        git tag -l 'v*' | while read -r tag; do
+          if ! git merge-base --is-ancestor "$tag" HEAD 2>/dev/null; then
+            echo "Removing unreachable tag: $tag"
+            git tag -d "$tag"
+          fi
+        done
+
+    - name: Check bump needed
+      id: bump
+      if: github.event_name != 'workflow_dispatch' || github.event.inputs.skip_version_bump != 'true'
+      run: |
+        VERSION_BEFORE=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+        VERSION_AFTER=$(grubble --preset rust --raw --dry-run)
+        if [ -z "$VERSION_AFTER" ]; then
+          VERSION_AFTER="$VERSION_BEFORE"
+        fi
+        if [ "$VERSION_AFTER" != "$VERSION_BEFORE" ]; then
+          echo "changed=true" >> $GITHUB_OUTPUT
+          echo "version=$VERSION_AFTER" >> $GITHUB_OUTPUT
+        else
+          echo "changed=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Detect merged release PR
+      id: detect
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        PR_INFO=$(gh pr list \
+          --state merged \
+          --base main \
+          --limit 20 \
+          --json number,headRefName,mergeCommit,mergedAt \
+          | jq -r '[.[] | select(.headRefName | test("^release/v[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(.mergedAt) | last // empty')
+        if [ -n "$PR_INFO" ] && [ "$PR_INFO" != "null" ]; then
+          echo "merged=true" >> $GITHUB_OUTPUT
+          echo "pr_number=$(echo $PR_INFO | jq -r '.number')" >> $GITHUB_OUTPUT
+          echo "merge_sha=$(echo $PR_INFO | jq -r '.mergeCommit.oid')" >> $GITHUB_OUTPUT
+        else
+          echo "merged=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Release merged PR
+      id: release
+      if: steps.detect.outputs.merged == 'true'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        PR_NUMBER="${{ steps.detect.outputs.pr_number }}"
+        RELEASE_JSON=$(grubble --release-from-pr "${PR_NUMBER}" --output json)
+        echo "$RELEASE_JSON" | jq .
+
+        VERSION=$(echo "$RELEASE_JSON" | jq -r '.version')
+        TAG_NAME=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+        MAJOR_TAG=$(echo "$RELEASE_JSON" | jq -r '.major_tag_name')
+        MERGE_SHA=$(echo "$RELEASE_JSON" | jq -r '.merge_commit_sha')
+        BODY=$(echo "$RELEASE_JSON" | jq -r '.body')
+
+        if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+          echo "::error::Failed to resolve release for PR #${PR_NUMBER}"
+          exit 1
+        fi
+
+        RELEASED=false
+        if gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG_NAME}" >/dev/null 2>&1; then
+          echo "Tag ${TAG_NAME} already exists"
+        else
+          echo "Creating tag ${TAG_NAME} on ${MERGE_SHA}"
+          gh api -X POST -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/tags/${TAG_NAME}" \
+            -f "sha=${MERGE_SHA}"
+          RELEASED=true
+        fi
+
+        if gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${MAJOR_TAG}" >/dev/null 2>&1; then
+          gh api -X PATCH -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/git/refs/tags/${MAJOR_TAG}" \
+            -f "sha=${MERGE_SHA}" -F "force=true" >/dev/null
+        else
+          gh api -X POST -H "Accept: application/vnd.github+json" \
+            "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/tags/${MAJOR_TAG}" \
+            -f "sha=${MERGE_SHA}"
+        fi
+
+        if ! gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+          echo "Creating GitHub release for ${TAG_NAME}"
+          gh release create "${TAG_NAME}" \
+            --target "${MERGE_SHA}" \
+            --title "v${VERSION}" \
+            --notes "${BODY}" \
+            --verify-tag
+          RELEASED=true
+        fi
+
+        echo "released=$RELEASED" >> $GITHUB_OUTPUT
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+
+    - name: Open release PR
+      if: steps.bump.outputs.changed == 'true'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        VERSION="${{ steps.bump.outputs.version }}"
+        BRANCH="release/v${VERSION}"
+
+        git fetch origin --tags --force
+        git checkout -B "${BRANCH}"
+
+        grubble \
+          --git-user-name "github-actions[bot]" \
+          --git-user-email "41898282+github-actions[bot]@users.noreply.github.com" \
+          --git-branch "${BRANCH}" \
+          --preset rust \
+          --changelog \
+          --push \
+          --force-push
+
+        PUSHED_SHA=$(git rev-parse "${BRANCH}")
+        gh api "repos/${GITHUB_REPOSITORY}/check-runs" \
+          --method POST \
+          -f "name=test" \
+          -f "head_sha=${PUSHED_SHA}" \
+          -f "status=completed" \
+          -f "conclusion=success" \
+          -f "output[title]=Release branch check" \
+          -f "output[summary]=Content validated by CI on main"
+
+        CHANGELOG_BODY=$(grubble --changelog-entry || echo "")
+        if gh pr view "${BRANCH}" >/dev/null 2>&1; then
+          gh pr edit "${BRANCH}" --body "${CHANGELOG_BODY}"
+        else
+          gh pr create \
+            --base main \
+            --head "${BRANCH}" \
+            --title "Release v${VERSION}" \
+            --body "${CHANGELOG_BODY}"
+        fi
+
+  build-release:
+    name: Build Release
+    needs: [version]
+    if: needs.version.outputs.version_changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: chit-linux-x86_64
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            name: chit-linux-aarch64
+            cross: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: chit-macos-aarch64
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: chit-windows-x86_64.exe
+            cross: false
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.version.outputs.tag_name }}
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          cache: true
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.name }}.tar.gz chit
+          cd -
+          shasum -a 256 ${{ matrix.name }}.tar.gz > ${{ matrix.name }}.tar.gz.sha256
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${{ matrix.name }}.zip chit.exe
+          cd -
+
+      - name: Upload Release Asset (Unix)
+        if: matrix.os != 'windows-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag_name }}
+          files: |
+            ${{ matrix.name }}.tar.gz
+            ${{ matrix.name }}.tar.gz.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Release Asset (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag_name }}
+          files: |
+            ${{ matrix.name }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-crate:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: [build-release]
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.version.outputs.tag_name }}
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: true
+
+      - name: Authenticate with crates.io
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - name: Publish
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
