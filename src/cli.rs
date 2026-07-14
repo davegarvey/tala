@@ -21,9 +21,6 @@ pub enum Commands {
         /// Custom project name
         #[arg(long)]
         name: Option<String>,
-        /// Generate opencode skill file
-        #[arg(long)]
-        opencode: bool,
     },
     /// Start daemon and create a new session
     Start {
@@ -76,7 +73,7 @@ pub enum Commands {
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Commands::Init { name, opencode } => cmd_init(name, opencode).await,
+        Commands::Init { name } => cmd_init(name).await,
         Commands::Start { message } => cmd_start(message).await,
         Commands::Chat {
             message,
@@ -151,7 +148,7 @@ async fn resolve_session_id(
     }
 }
 
-async fn cmd_init(name: Option<String>, opencode: bool) -> anyhow::Result<()> {
+async fn cmd_init(name: Option<String>) -> anyhow::Result<()> {
     let chit_dir = std::path::PathBuf::from(".chit");
     tokio::fs::create_dir_all(&chit_dir).await?;
 
@@ -170,9 +167,32 @@ async fn cmd_init(name: Option<String>, opencode: bool) -> anyhow::Result<()> {
         println!("Created ./.chit/config.json with name: {}", project_name);
     }
 
-    if opencode {
-        let skill_path = chit_dir.join("opencode-skill.md");
-        let skill = r#"# chit — Agent-to-Agent Messaging
+    install_opencode_skills().await?;
+
+    Ok(())
+}
+
+async fn install_opencode_skills() -> anyhow::Result<()> {
+    let opencode_dir = std::path::PathBuf::from(".opencode");
+    if !opencode_dir.exists() {
+        return Ok(());
+    }
+
+    let skill_dir = opencode_dir.join("skills").join("chit");
+    tokio::fs::create_dir_all(&skill_dir).await?;
+
+    let skill_path = skill_dir.join("SKILL.md");
+    let skill = r#"---
+name: chit
+description: Agent-to-agent messaging for AI coding tools. Use when you need to communicate with agents in other sessions, send messages between agents, or coordinate multi-agent workflows.
+license: MIT
+compatibility: Requires chit CLI (agent-to-agent messaging tool)
+metadata:
+  author: chit
+  version: "1.0"
+---
+
+# chit — Agent-to-Agent Messaging
 
 You have access to `chit`, a CLI tool for communicating with agents in other sessions.
 
@@ -191,9 +211,20 @@ You have access to `chit`, a CLI tool for communicating with agents in other ses
 - Use `chit chat` when you need to ask something or provide information to another agent.
 - Use `chit wait` when you're expecting a response.
 "#;
-        tokio::fs::write(&skill_path, skill).await?;
-        println!("Created ./.chit/opencode-skill.md");
-    }
+    tokio::fs::write(&skill_path, skill).await?;
+    println!("Created .opencode/skills/chit/SKILL.md");
+
+    let commands_dir = opencode_dir.join("commands");
+    tokio::fs::create_dir_all(&commands_dir).await?;
+    let command_path = commands_dir.join("chit.md");
+    let command = r#"---
+description: Use chit for agent-to-agent messaging - start sessions, send messages, wait for replies, and view transcripts.
+---
+
+Run chit commands for agent-to-agent messaging. Use `chit start` to create a session, `chit chat` to send a message, `chit wait` to wait for a reply, or `chit recap` to view a transcript.
+"#;
+    tokio::fs::write(&command_path, command).await?;
+    println!("Created .opencode/commands/chit.md");
 
     Ok(())
 }

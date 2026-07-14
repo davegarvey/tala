@@ -184,20 +184,60 @@ fn test_init_with_custom_name() {
 }
 
 #[test]
-fn test_init_opencode_skill() {
+fn test_init_detects_opencode_harness() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
 
-    run_init_in(project.path(), home.path(), &["init", "--opencode"]);
+    std::fs::create_dir_all(project.path().join(".opencode")).unwrap();
 
-    let skill_path = project.path().join(".chit").join("opencode-skill.md");
+    run_init_in(project.path(), home.path(), &["init"]);
+
+    let skill_path = project
+        .path()
+        .join(".opencode")
+        .join("skills")
+        .join("chit")
+        .join("SKILL.md");
     assert!(
         skill_path.exists(),
-        "init --opencode should create skill file"
+        "init should detect .opencode/ and create skill file at .opencode/skills/chit/SKILL.md"
     );
 
     let skill = std::fs::read_to_string(&skill_path).unwrap();
+    assert!(
+        skill.contains("name: chit"),
+        "skill should have YAML frontmatter with name"
+    );
     assert!(skill.contains("chit"), "skill should reference chit");
+
+    let command_path = project
+        .path()
+        .join(".opencode")
+        .join("commands")
+        .join("chit.md");
+    assert!(
+        command_path.exists(),
+        "init should detect .opencode/ and create command file at .opencode/commands/chit.md"
+    );
+}
+
+#[test]
+fn test_init_does_not_install_opencode_skills_without_harness() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    run_init_in(project.path(), home.path(), &["init"]);
+
+    let skill_path = project
+        .path()
+        .join(".opencode")
+        .join("skills")
+        .join("chit")
+        .join("SKILL.md");
+    assert!(
+        !skill_path.exists(),
+        "init should not install opencode skills without .opencode/ dir"
+    );
 }
 
 #[test]
