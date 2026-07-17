@@ -108,9 +108,8 @@ if __name__ == "__main__":
     main()
 PY
 
-  # Create results file
+  # Results are returned inline by Task agents
   mkdir -p "$RESULTS_DIR"
-  > "$RESULTS_DIR/cross-project-feedback.md"
 
   # Write task files for the coding agent
   mkdir -p "$AGENT_TASKS_DIR/cross-project"
@@ -132,8 +131,9 @@ what didn't. Your feedback directly shapes the product.
 
 The chit binary is at: $CHIT_BIN
 
-Before starting, export CHIT_HOME:
+First, change to your project directory — this ensures chit uses the right active session:
 \`\`\`
+cd $tmp_dir/project-alpha
 export CHIT_HOME=$tmp_dir/.chit
 \`\`\`
 
@@ -198,8 +198,9 @@ what didn't. Your feedback directly shapes the product.
 
 The chit binary is at: $CHIT_BIN
 
-Before starting, export CHIT_HOME:
+First, change to your project directory — this ensures chit uses the right active session:
 \`\`\`
+cd $tmp_dir/project-beta
 export CHIT_HOME=$tmp_dir/.chit
 \`\`\`
 
@@ -285,11 +286,16 @@ TASK
 }
 
 collect_cross_project() {
+  local results_file="$RESULTS_DIR/cross-project-feedback.md"
   echo "==========================================="
-  echo "  cross-project eval: COMPLETE"
+  echo "  cross-project eval: RESULTS"
   echo "==========================================="
-  echo "Feedback was returned inline by the Task agents."
-  echo "Check the Task results above for agent feedback."
+  if [ -f "$results_file" ]; then
+    cat "$results_file"
+  else
+    echo "Feedback was returned inline by the Task agents."
+    echo "Check the Task results above for agent feedback."
+  fi
   echo "==========================================="
   stop_daemon
 }
@@ -307,8 +313,8 @@ When done, send a chit status update.
 SEED
   done
 
+  # Results are returned inline by Task agents
   mkdir -p "$RESULTS_DIR"
-  > "$RESULTS_DIR/observe-feedback.md"
 
   mkdir -p "$AGENT_TASKS_DIR/observe"
 
@@ -318,15 +324,23 @@ SEED
 You are in project-alpha at: $tmp_dir/project-alpha
 
 ## Your Task
+
+First, change to your project directory — this ensures chit uses the right active session:
+\`\`\`
+cd $tmp_dir/project-alpha
+export CHIT_HOME=$tmp_dir/.chit
+\`\`\`
+
 Create \`src/server.py\` with a health-check endpoint that returns:
 \`\`\`python
 {"status": "ok", "version": "1.0.0"}
 \`\`\`
 
 Use chit to send status updates as you work (start, done, etc).
-Write feedback to $RESULTS_DIR/observe-feedback.md (append).
+All chit commands must be run from $tmp_dir/project-alpha.
 
-Feedback questions:
+### Feedback (return inline)
+After your task, return your feedback as part of your final message (not written to a file):
 - How easy was it to get started with chit?
 - How intuitive were the commands?
 - Was anything confusing or surprising?
@@ -342,11 +356,23 @@ TASK
 You are in project-beta at: $tmp_dir/project-beta
 
 ## Your Task
+
+First, change to your project directory — this ensures chit uses the right active session:
+\`\`\`
+cd $tmp_dir/project-beta
+export CHIT_HOME=$tmp_dir/.chit
+\`\`\`
+
 Create \`src/watch.py\` that watches a file path and prints changes.
 Use chit to send status updates.
-Write feedback to $RESULTS_DIR/observe-feedback.md (append).
+All chit commands must be run from $tmp_dir/project-beta.
 
-Same feedback questions as agent-alpha.
+### Feedback (return inline)
+After your task, return your feedback as part of your final message (not written to a file):
+- How easy was it to get started with chit?
+- How intuitive were the commands?
+- Was anything confusing or surprising?
+- What would you improve?
 
 Start with:
 ## Feedback from Agent Beta (project-beta)
@@ -358,12 +384,24 @@ TASK
 You are in project-gamma at: $tmp_dir/project-gamma
 
 ## Your Task
+
+First, change to your project directory — this ensures chit uses the right active session:
+\`\`\`
+cd $tmp_dir/project-gamma
+export CHIT_HOME=$tmp_dir/.chit
+\`\`\`
+
 Write documentation (README.md) for "ChitChat" — a fictional messaging API.
 Include title, description, and usage section.
 Use chit to send status updates.
-Write feedback to $RESULTS_DIR/observe-feedback.md (append).
+All chit commands must be run from $tmp_dir/project-gamma.
 
-Same feedback questions as agent-alpha.
+### Feedback (return inline)
+After your task, return your feedback as part of your final message (not written to a file):
+- How easy was it to get started with chit?
+- How intuitive were the commands?
+- Was anything confusing or surprising?
+- What would you improve?
 
 Start with:
 ## Feedback from Agent Gamma (project-gamma)
@@ -375,15 +413,24 @@ TASK
 You are the monitor, watching all agent activity.
 
 ## Your Task
-Run \`chit observe\` from $tmp_dir/monitor and watch the three agents work.
-Note what you can see — do you have enough context to understand each project?
-Write feedback to $RESULTS_DIR/observe-feedback.md (append).
 
-### Monitor-specific feedback
+First, change to the monitor directory — this ensures chit uses the right active session:
+\`\`\`
+cd $tmp_dir/monitor
+export CHIT_HOME=$tmp_dir/.chit
+\`\`\`
+
+Run \`chit observe\` and watch the three agents work.
+Note what you can see — do you have enough context to understand each project?
+
+### Feedback (return inline)
+After observing, return your feedback as part of your final message (not written to a file):
 - Did \`chit observe\` give you an accurate picture of what was happening?
 - Could you distinguish between the different sessions/agents?
 - What would make observe more useful?
 - How did you discover the observe command? Was it intuitive?
+- How easy was it to get started with chit?
+- How intuitive were the commands?
 
 Start with:
 ## Feedback from Monitor
@@ -429,15 +476,16 @@ TASK
 }
 
 collect_observe() {
-  local feedback_file="$RESULTS_DIR/observe-feedback.md"
-  if [ ! -f "$feedback_file" ]; then
-    echo "No feedback found at $feedback_file"
-    exit 1
-  fi
+  local results_file="$RESULTS_DIR/observe-feedback.md"
   echo "==========================================="
   echo "  observe eval: RESULTS"
   echo "==========================================="
-  cat "$feedback_file"
+  if [ -f "$results_file" ]; then
+    cat "$results_file"
+  else
+    echo "Feedback was returned inline by the Task agents."
+    echo "Check the Task results above for agent feedback."
+  fi
   echo "==========================================="
   stop_daemon
 }
