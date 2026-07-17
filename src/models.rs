@@ -118,6 +118,7 @@ pub enum DaemonEvent {
     NewMessage(Message),
     SessionClosed,
     SessionCreated(String),
+    SessionReopened(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

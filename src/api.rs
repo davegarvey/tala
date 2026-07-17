@@ -40,6 +40,7 @@ pub fn create_router(store: Arc<Store>) -> Router {
         .route("/api/sessions/:id/wait", get(wait_for_message))
         .route("/api/sessions/:id/recap", get(recap_session))
         .route("/api/sessions/:id/rename", post(rename_session))
+        .route("/api/sessions/:id/reopen", post(reopen_session))
         .route("/api/sessions/:id/events", get(stream_events))
         .route("/api/sessions/wait-new", get(wait_new_session))
         .route("/api/sessions/wait-all", get(wait_all))
@@ -310,7 +311,7 @@ async fn wait_for_message(
                 Ok(DaemonEvent::SessionClosed) => {
                     return wrap_wait(vec![], false, None, true);
                 }
-                Ok(DaemonEvent::SessionCreated(_)) => continue,
+                Ok(DaemonEvent::SessionCreated(_) | DaemonEvent::SessionReopened(_)) => continue,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => {
                     return wrap_wait(vec![], false, None, true);
@@ -358,6 +359,7 @@ async fn wait_new_session(
                     }
                 }
                 Ok((_sid, DaemonEvent::SessionClosed)) => continue,
+                Ok((_sid, DaemonEvent::SessionReopened(_))) => continue,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => {
                     return serde_json::json!({"error": "daemon shutting down"});
@@ -391,7 +393,9 @@ async fn wait_all(
                 Ok((_sid, DaemonEvent::NewMessage(msg))) => {
                     return wrap_wait(vec![msg], false, None, false);
                 }
-                Ok((_sid, DaemonEvent::SessionCreated(_))) => continue,
+                Ok((_sid, DaemonEvent::SessionCreated(_) | DaemonEvent::SessionReopened(_))) => {
+                    continue
+                }
                 Ok((_sid, DaemonEvent::SessionClosed)) => continue,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => {
@@ -486,6 +490,27 @@ struct EventsParams {
     limit: Option<usize>,
 }
 
+async fn reopen_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if state.store.reopen_session(&id).await {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"session_id": id, "status": "reopened"})),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("session '{}' not found", id),
+            }),
+        )
+            .into_response()
+    }
+}
+
 async fn stream_events(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -547,7 +572,7 @@ async fn stream_events(
             Ok(DaemonEvent::SessionClosed) => Some(Ok::<_, Infallible>(
                 Event::default().event("closed").data("{}"),
             )),
-            Ok(DaemonEvent::SessionCreated(_)) => None,
+            Ok(DaemonEvent::SessionCreated(_) | DaemonEvent::SessionReopened(_)) => None,
             Err(_) => None,
         }
     });
@@ -707,6 +732,21 @@ async fn observe_events(
                             Some(
                                 Event::default()
                                     .event("created")
+                                    .data(serde_json::to_string(&observe).unwrap()),
+                            )
+                        }
+                        DaemonEvent::SessionReopened(id) => {
+                            let session = state.store.get_session(&id).await;
+                            let name = session.and_then(|s| s.name);
+                            let observe = ObserveEvent {
+                                session_id: id,
+                                session_name: name,
+                                r#type: "reopened".to_string(),
+                                message: None,
+                            };
+                            Some(
+                                Event::default()
+                                    .event("reopened")
                                     .data(serde_json::to_string(&observe).unwrap()),
                             )
                         }

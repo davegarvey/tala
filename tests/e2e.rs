@@ -1577,3 +1577,167 @@ fn test_stdin_flag_piped() {
 
     chit_stop(home.path());
 }
+
+#[test]
+fn test_session_reopen() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    chit_ok(home.path(), &["close", &sess]);
+
+    let (stdout, _stderr, ok) = chit(home.path(), &["session", "reopen", &sess]);
+    assert!(ok, "reopen should succeed");
+    assert!(
+        stdout.contains("reopened"),
+        "should mention reopened: {}",
+        stdout
+    );
+
+    // Send to reopened session should work
+    chit_ok(
+        home.path(),
+        &["send", "--session", &sess, "post-reopen-msg"],
+    );
+
+    let recap = chit_ok(home.path(), &["recap", &sess]);
+    assert!(
+        recap.contains("post-reopen-msg"),
+        "recap should show post-reopen message"
+    );
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_session_reopen_already_open() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    let (_stdout, _stderr, ok) = chit(home.path(), &["session", "reopen", &sess]);
+    assert!(ok, "reopen on already open session should succeed");
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_session_reopen_nonexistent() {
+    let home = tempfile::tempdir().unwrap();
+    chit_start(home.path());
+
+    let (_stdout, _stderr, ok) = chit(home.path(), &["session", "reopen", "nonexistent"]);
+    assert!(!ok, "reopen nonexistent should fail");
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_session_reopen_json() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    chit_ok(home.path(), &["close", &sess]);
+
+    let (stdout, _stderr, ok) = chit(home.path(), &["session", "reopen", &sess, "--json"]);
+    assert!(ok, "reopen --json should succeed");
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(val["status"], "reopened", "json status should be reopened");
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_close_quiet() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    let (stdout, _stderr, ok) = chit(home.path(), &["close", &sess, "--quiet"]);
+    assert!(ok, "close --quiet should succeed");
+    assert!(
+        !stdout.contains("closed"),
+        "quiet close should not print confirmation: '{}'",
+        stdout
+    );
+
+    // Verify session is actually closed
+    let list = chit_ok(home.path(), &["list"]);
+    assert!(list.contains("closed"), "list should show closed");
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_close_quiet_json() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    let (stdout, _stderr, ok) = chit(home.path(), &["close", &sess, "--quiet", "--json"]);
+    assert!(ok, "close --quiet --json should succeed");
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(val["status"], "closed", "json should show closed status");
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_use_on_closed_session_shows_reopen_hint() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    chit_ok(home.path(), &["close", &sess]);
+
+    let (_stdout, stderr, ok) = chit_in(home.path(), Some(project.path()), &["use", &sess]);
+    assert!(!ok, "use on closed session should fail");
+    assert!(
+        stderr.contains("closed") && stderr.contains("reopen"),
+        "error should mention closed and reopen: {}",
+        stderr
+    );
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_stream_alias_works() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(chit_bin())
+        .env("HOME", home.path())
+        .args([
+            "stream",
+            "--session",
+            &sess,
+            "--since",
+            "0",
+            "--timeout",
+            "3",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start stream");
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    chit_ok(
+        home.path(),
+        &["send", "--session", &sess, "stream-alias-test"],
+    );
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let _ = child.kill();
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("stream-alias-test"),
+        "stream alias should show messages: {}",
+        stdout
+    );
+
+    chit_stop(home.path());
+}

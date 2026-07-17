@@ -246,6 +246,27 @@ impl Store {
         }
     }
 
+    pub async fn reopen_session(&self, session_id: &str) -> bool {
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(session_id) {
+            if !session.closed {
+                return true;
+            }
+            session.closed = false;
+            session.last_activity = Utc::now();
+            drop(sessions);
+
+            let event = DaemonEvent::SessionReopened(session_id.to_string());
+            if let Some(tx) = self.broadcast.read().await.get(session_id) {
+                let _ = tx.send(event.clone());
+            }
+            let _ = self.global_tx.send((session_id.to_string(), event));
+            true
+        } else {
+            false
+        }
+    }
+
     pub async fn has_recent_activity(&self, max_idle: Duration) -> bool {
         let sessions = self.sessions.read().await;
         let now = Utc::now();

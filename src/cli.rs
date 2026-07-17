@@ -131,6 +131,7 @@ pub enum Commands {
         r#new: bool,
     },
     /// Stream new messages as they arrive (SSE)
+    #[command(alias = "stream")]
     Follow {
         #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
@@ -208,6 +209,8 @@ pub enum Commands {
         session_arg: Option<String>,
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
+        #[arg(long, short = 'q', help = "Suppress confirmation output")]
+        quiet: bool,
     },
     /// Show daemon status
     Status {
@@ -256,6 +259,13 @@ pub enum SessionCommands {
         json: bool,
         #[arg(long, help = "Force rename even if session already has a name")]
         force: bool,
+    },
+    /// Reopen a closed session
+    Reopen {
+        #[arg(help = "Session ID to reopen")]
+        session_id: String,
+        #[arg(long, short = 'j', help = "Output in JSON format")]
+        json: bool,
     },
 }
 
@@ -362,13 +372,16 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             session,
             session_arg,
             json,
-        } => cmd_close(session.or(session_arg), json).await,
+            quiet,
+        } => cmd_close(session.or(session_arg), json, quiet).await,
         Commands::Status { json } => cmd_status(json).await,
         Commands::Stop => cmd_stop().await,
         Commands::Daemon => crate::daemon::run_daemon().await,
         Commands::Session { command } => match command {
             SessionCommands::List { json } => cmd_list(json).await,
-            SessionCommands::Close { session_id, json } => cmd_close(Some(session_id), json).await,
+            SessionCommands::Close { session_id, json } => {
+                cmd_close(Some(session_id), json, false).await
+            }
             SessionCommands::Show { session_id, json } => cmd_session_show(session_id, json).await,
             SessionCommands::Rename {
                 session_id,
@@ -376,6 +389,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 json,
                 force,
             } => cmd_session_rename(session_id, name, json, force).await,
+            SessionCommands::Reopen { session_id, json } => {
+                cmd_session_reopen(session_id, json).await
+            }
         },
     }
 }
@@ -600,6 +616,18 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
                 "Multiple sessions match '{}': {}. Use a more specific ID.",
                 input,
                 ids.join(", ")
+            );
+        }
+
+        // Check if input matches a closed session
+        let closed_match: Vec<&SessionSummary> = sessions
+            .iter()
+            .filter(|s| s.closed && (s.id == input || s.id.starts_with(&input)))
+            .collect();
+        if !closed_match.is_empty() {
+            bail!(
+                "Session '{}' is closed. Use `chit session reopen` to continue",
+                closed_match[0].id
             );
         }
 
@@ -1328,7 +1356,11 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_close(session_arg: Option<String>, json_output: bool) -> anyhow::Result<()> {
+async fn cmd_close(
+    session_arg: Option<String>,
+    json_output: bool,
+    quiet: bool,
+) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
     let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "close").await?;
 
@@ -1343,7 +1375,7 @@ async fn cmd_close(session_arg: Option<String>, json_output: bool) -> anyhow::Re
                 "{}",
                 serde_json::json!({"session_id": session_id, "status": result.status})
             );
-        } else {
+        } else if !quiet {
             println!("Session {}: {}", session_id, result.status);
         }
     } else {
@@ -1429,6 +1461,28 @@ async fn cmd_session_rename(
             session_id,
             result["name"].as_str().unwrap_or("")
         );
+    }
+    Ok(())
+}
+
+async fn cmd_session_reopen(session_id: String, json_output: bool) -> anyhow::Result<()> {
+    let (host, port) = ensure_daemon_running().await?;
+
+    let client = reqwest::Client::new();
+    let url = daemon_url(&host, port, &format!("/api/sessions/{}/reopen", session_id));
+    let resp = client.post(&url).send().await?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let err: ErrorResponse = resp.json().await?;
+        fail(json_output, &err.error, "SESSION_NOT_FOUND");
+    }
+
+    let result: serde_json::Value = resp.json().await?;
+    if json_output {
+        println!("{}", serde_json::to_string(&result).unwrap());
+    } else {
+        println!("Session {} reopened", session_id);
     }
     Ok(())
 }
