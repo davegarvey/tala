@@ -72,6 +72,8 @@ pub enum Commands {
         session_arg: Option<String>,
         #[arg(long)]
         since: Option<u64>,
+        #[arg(long)]
+        limit: Option<usize>,
         #[arg(long, short = 'j')]
         json: bool,
         #[arg(long)]
@@ -150,8 +152,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Wait { session, session_arg, timeout, since, limit, from, json } => {
             cmd_wait(session.or(session_arg), timeout, since, limit, from, json).await
         }
-        Commands::Follow { session, session_arg, since, json, timeout } => {
-            cmd_follow(session.or(session_arg), since, json, timeout).await
+        Commands::Follow { session, session_arg, since, limit, json, timeout } => {
+            cmd_follow(session.or(session_arg), since, limit, json, timeout).await
         }
         Commands::Recap { session, session_arg, since, cursor, from, limit, json } => {
             cmd_recap(session.or(session_arg), since.or(cursor), from, limit, json).await
@@ -353,7 +355,8 @@ async fn cmd_send(
 
     if !resp.status().is_success() {
         let err: ErrorResponse = resp.json().await?;
-        fail(json_output, &err.error, "SEND_ERROR");
+        let code = if err.error.contains("closed") { "SESSION_CLOSED" } else { "SESSION_NOT_FOUND" };
+        fail(json_output, &err.error, code);
     }
 
     let msg: SendMessageResponse = resp.json().await?;
@@ -419,7 +422,7 @@ async fn cmd_wait(
 
     if !resp.status().is_success() {
         let err: ErrorResponse = resp.json().await?;
-        fail(json_output, &err.error, "WAIT_ERROR");
+        fail(json_output, &err.error, "SESSION_NOT_FOUND");
     }
 
     let result: WaitResponse = resp.json().await?;
@@ -443,6 +446,7 @@ async fn cmd_wait(
 async fn cmd_follow(
     session_arg: Option<String>,
     since: Option<u64>,
+    limit: Option<usize>,
     json_output: bool,
     _timeout: Option<u64>,
 ) -> anyhow::Result<()> {
@@ -450,7 +454,10 @@ async fn cmd_follow(
     let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "follow").await?;
 
     let since_id = since.unwrap_or(0);
-    let path = format!("/api/sessions/{}/events?since={}", session_id, since_id);
+    let mut path = format!("/api/sessions/{}/events?since={}", session_id, since_id);
+    if let Some(l) = limit {
+        path = format!("{}&limit={}", path, l);
+    }
     let url = daemon_url(&host, port, &path);
 
     let client = reqwest::Client::new();
@@ -458,7 +465,7 @@ async fn cmd_follow(
 
     if !resp.status().is_success() {
         let err: ErrorResponse = resp.json().await?;
-        fail(json_output, &err.error, "FOLLOW_ERROR");
+        fail(json_output, &err.error, "SESSION_NOT_FOUND");
     }
 
     let mut buffer = String::new();
@@ -539,7 +546,7 @@ async fn cmd_recap(
 
     if !resp.status().is_success() {
         let err: ErrorResponse = resp.json().await?;
-        fail(json_output, &err.error, "RECAP_ERROR");
+        fail(json_output, &err.error, "SESSION_NOT_FOUND");
     }
 
     let recap: RecapResponse = resp.json().await?;
@@ -597,7 +604,8 @@ async fn cmd_close(session_arg: Option<String>, json_output: bool) -> anyhow::Re
         }
     } else {
         let err: ErrorResponse = resp.json().await?;
-        fail(json_output, &err.error, "CLOSE_ERROR");
+        let code = if err.error.contains("closed") { "SESSION_CLOSED" } else { "SESSION_NOT_FOUND" };
+        fail(json_output, &err.error, code);
     }
     Ok(())
 }
@@ -611,7 +619,7 @@ async fn cmd_session_show(session_id: String, json_output: bool) -> anyhow::Resu
 
     if !resp.status().is_success() {
         let err: ErrorResponse = resp.json().await?;
-        fail(json_output, &err.error, "SHOW_ERROR");
+        fail(json_output, &err.error, "SESSION_NOT_FOUND");
     }
 
     let session: Session = resp.json().await?;
@@ -639,7 +647,7 @@ async fn cmd_session_rename(session_id: String, name: String, json_output: bool)
 
     if !resp.status().is_success() {
         let err: ErrorResponse = resp.json().await?;
-        fail(json_output, &err.error, "RENAME_ERROR");
+        fail(json_output, &err.error, "SESSION_NOT_FOUND");
     }
 
     let result: serde_json::Value = resp.json().await?;

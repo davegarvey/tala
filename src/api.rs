@@ -335,6 +335,7 @@ async fn rename_session(
 #[derive(Deserialize)]
 struct EventsParams {
     since: Option<u64>,
+    limit: Option<usize>,
 }
 
 async fn stream_events(
@@ -375,10 +376,17 @@ async fn stream_events(
         }
     };
 
+    let max_count = params.limit.unwrap_or(usize::MAX);
+    let mut count = 0usize;
+
     let stream = BroadcastStream::new(rx).filter_map(move |result| {
+        if count >= max_count {
+            return None;
+        }
         match result {
             Ok(DaemonEvent::NewMessage(msg)) => {
                 if msg.id > since {
+                    count += 1;
                     let data = serde_json::to_string(&msg).unwrap_or_default();
                     Some(Ok::<_, Infallible>(Event::default().event("message").data(data)))
                 } else {
