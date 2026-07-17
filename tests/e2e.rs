@@ -87,7 +87,7 @@ fn test_send_and_recap() {
 
     chit_ok(
         home.path(),
-        &["send", "--session", &session, "--ff", "Hello from **test**"],
+        &["send", "--session", &session, "-n", "Hello from **test**"],
     );
 
     let recap = chit_ok(home.path(), &["recap", &session]);
@@ -106,7 +106,7 @@ fn test_auto_target_single_session() {
 
     chit_start(home.path());
 
-    chit_ok(home.path(), &["send", "--ff", "auto-target test"]);
+    chit_ok(home.path(), &["send", "-n", "auto-target test"]);
 
     let recap = chit_ok(home.path(), &["recap"]);
     assert!(
@@ -124,7 +124,7 @@ fn test_multiple_sessions_auto_target_error() {
     chit_start(home.path());
     chit_start(home.path());
 
-    let (_stdout, stderr, ok) = chit(home.path(), &["send", "--ff", "test"]);
+    let (_stdout, stderr, ok) = chit(home.path(), &["send", "-n", "test"]);
     assert!(!ok, "send should fail with multiple sessions");
     assert!(
         stderr.contains("Multiple active sessions"),
@@ -270,7 +270,7 @@ fn test_agent_to_agent_conversation() {
             "send",
             "--session",
             &session,
-            "--ff",
+            "-n",
             "Bug in grubble: fix scope commits",
         ],
     );
@@ -281,7 +281,7 @@ fn test_agent_to_agent_conversation() {
             "send",
             "--session",
             &session,
-            "--ff",
+            "-n",
             "--as",
             "grubble-agent",
             "Found it, fix pushed",
@@ -313,7 +313,7 @@ fn test_chit_start_with_message() {
 
     chit_ok(
         home.path(),
-        &["send", "--session", &sess, "--ff", "Starting message test"],
+        &["send", "--session", &sess, "-n", "Starting message test"],
     );
 
     let recap = chit_ok(home.path(), &["recap", &sess]);
@@ -348,7 +348,7 @@ fn test_wait_since_returns_existing_messages() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "existing-msg"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "existing-msg"]);
 
     let (stdout, _stderr, ok) = chit(home.path(), &[
         "wait", &sess, "--since", "0", "--timeout", "3", "--json",
@@ -365,8 +365,8 @@ fn test_wait_from_filter() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "--as", "alpha", "msg-alpha"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "--as", "beta", "msg-beta"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "--as", "alpha", "msg-alpha"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "--as", "beta", "msg-beta"]);
 
     let (stdout, _stderr, ok) = chit(home.path(), &[
         "wait", &sess, "--since", "0", "--from", "alpha", "--timeout", "3", "--json",
@@ -383,9 +383,9 @@ fn test_wait_limit_cap() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "--as", "t", "m1"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "--as", "t", "m2"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "--as", "t", "m3"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "--as", "t", "m1"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "--as", "t", "m2"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "--as", "t", "m3"]);
 
     let (stdout, _stderr, ok) = chit(home.path(), &[
         "wait", &sess, "--since", "0", "--from", "t", "--limit", "2", "--timeout", "3", "--json",
@@ -403,8 +403,8 @@ fn test_recap_from_filter() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "--as", "alpha", "only-alpha"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "--as", "beta", "only-beta"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "--as", "alpha", "only-alpha"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "--as", "beta", "only-beta"]);
 
     let (stdout, _stderr, ok) = chit(home.path(), &[
         "recap", &sess, "--json", "--from", "alpha",
@@ -421,8 +421,8 @@ fn test_recap_cursor() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "old-msg"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "new-msg"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "old-msg"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "new-msg"]);
 
     let (stdout, _stderr, ok) = chit(home.path(), &[
         "recap", &sess, "--json", "--cursor", "1",
@@ -439,9 +439,9 @@ fn test_recap_limit_cap() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "m1"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "m2"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "m3"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "m1"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "m2"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "m3"]);
 
     let (stdout, _stderr, ok) = chit(home.path(), &[
         "recap", &sess, "--json", "--limit", "2",
@@ -458,9 +458,9 @@ fn test_recap_limit_zero_is_unlimited() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "a"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "b"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "c"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "a"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "b"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "c"]);
 
     let (stdout, _stderr, ok) = chit(home.path(), &[
         "recap", &sess, "--json", "--limit", "0",
@@ -478,7 +478,7 @@ fn test_send_json_output() {
     let sess = chit_start(home.path());
 
     let (stdout, _stderr, ok) = chit(home.path(), &[
-        "send", "--session", &sess, "--ff", "--json", "json-test",
+        "send", "--session", &sess, "-n", "--json", "json-test",
     ]);
     assert!(ok, "send --json should succeed");
     assert!(stdout.contains("\"cursor\""), "should include cursor");
@@ -534,7 +534,7 @@ fn test_send_to_closed_session_fails() {
     chit_ok(home.path(), &["close", &sess]);
 
     let (_stdout, stderr, ok) = chit(home.path(), &[
-        "send", "--session", &sess, "--ff", "this should fail",
+        "send", "--session", &sess, "-n", "this should fail",
     ]);
     assert!(!ok, "send to closed should fail");
     assert!(stderr.contains("closed"), "error should mention closed");
@@ -559,7 +559,7 @@ fn test_wait_after_close_returns_messages_and_closed_true() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "pending-msg"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "pending-msg"]);
     chit_ok(home.path(), &["close", &sess]);
 
     let (stdout, _stderr, ok) = chit(home.path(), &[
@@ -594,7 +594,7 @@ fn test_empty_message_rejected() {
     let sess = chit_start(home.path());
 
     let (_stdout, _stderr, ok) = chit(home.path(), &[
-        "send", "--session", &sess, "--ff", "",
+        "send", "--session", &sess, "-n", "",
     ]);
     assert!(!ok, "empty message should be rejected");
 
@@ -681,18 +681,18 @@ fn test_no_wait_flag_instead_of_ff() {
 }
 
 #[test]
-fn test_ff_alias_still_works() {
+fn test_send_short_no_wait() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
     let (stdout, _stderr, ok) = chit(home.path(), &[
-        "send", "--session", &sess, "--ff", "sent with old --ff alias",
+        "send", "--session", &sess, "-n", "sent with -n short flag",
     ]);
-    assert!(ok, "--ff alias should still work");
+    assert!(ok, "-n should work");
     assert!(stdout.contains("Sent message"), "should show confirmation: {}", stdout);
 
     let recap = chit_ok(home.path(), &["recap", &sess]);
-    assert!(recap.contains("old --ff"), "message should be in recap");
+    assert!(recap.contains("-n short"), "message should be in recap");
 
     chit_stop(home.path());
 }
@@ -786,7 +786,6 @@ fn test_use_json_output() {
 #[test]
 fn test_observe_streams_all_sessions() {
     let home = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
     let sess1 = chit_start(home.path());
     let sess2 = chit_start(home.path());
 
@@ -820,7 +819,6 @@ fn test_observe_streams_all_sessions() {
 #[test]
 fn test_observe_channel_filter() {
     let home = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
     chit_ok(home.path(), &["session", "rename", &sess, "help:auth-module"]);
@@ -852,7 +850,6 @@ fn test_observe_channel_filter() {
 #[test]
 fn test_observe_from_filter() {
     let home = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
     let mut child = std::process::Command::new(chit_bin())
@@ -883,7 +880,6 @@ fn test_observe_from_filter() {
 #[test]
 fn test_observe_match_filter() {
     let home = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
     let mut child = std::process::Command::new(chit_bin())
@@ -953,7 +949,7 @@ fn test_follow_streams_messages() {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "--as", "streamer", "live-msg"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "--as", "streamer", "live-msg"]);
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -982,8 +978,8 @@ fn test_follow_limit_caps_messages() {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "limit-1-a"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "limit-1-b"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "limit-1-a"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "limit-1-b"]);
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -1011,8 +1007,8 @@ fn test_follow_limit_zero_is_unlimited() {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "unlim-a"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--ff", "unlim-b"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "unlim-a"]);
+    chit_ok(home.path(), &["send", "--session", &sess, "-n", "unlim-b"]);
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 

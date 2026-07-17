@@ -23,7 +23,12 @@ fn fail(json: bool, msg: impl std::fmt::Display, code: &str) -> ! {
 }
 
 #[derive(Parser)]
-#[command(name = "chit", about = "Agent-to-agent messaging", version)]
+#[command(
+    name = "chit",
+    about = "Agent-to-agent messaging for AI coding tools",
+    long_about = "chit is a lightweight messaging tool for AI agents working across projects.\n\nStart a session with `chit start`, send messages with `chit send`,\nwait for replies with `chit wait`, or watch all sessions with `chit observe`.\n\nEvery command supports --json for structured output.",
+    version,
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -31,113 +36,133 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Initialize chit configuration for this project
     Init {
-        #[arg(long)]
+        #[arg(long, help = "Agent name for this project (defaults to directory name)")]
         name: Option<String>,
     },
+    /// Start a new messaging session
     Start {
+        #[arg(help = "Optional initial message to send")]
         message: Option<String>,
     },
+    /// Set or show the active session for this project directory
     Use {
+        #[arg(help = "Session ID to set as active (omit to show current)")]
         session_id: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Clear the active session")]
         clear: bool,
-        #[arg(long, short = 'j')]
+        #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
+    /// Send a message (alias: send)
     #[command(alias = "send")]
     Chat {
+        #[arg(help = "Message content (use - to read from stdin)")]
         message: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Read message content from a file")]
         file: Option<String>,
-        #[arg(long, short)]
+        #[arg(long, short, help = "Session ID (uses active session if set)")]
         session: Option<String>,
-        #[arg(long = "no-wait", short = 'n', alias = "ff")]
+        #[arg(long = "no-wait", short = 'n', help = "Fire-and-forget: don't wait for a reply")]
         no_wait: bool,
-        #[arg(long = "as", name = "sender_name")]
+        #[arg(long = "as", name = "sender_name", help = "Override the sender name")]
         sender_name: Option<String>,
-        #[arg(long, short = 'j')]
+        #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
-        #[arg(long, short = 'q')]
+        #[arg(long, short = 'q', help = "Suppress confirmation output")]
         quiet: bool,
-        #[arg(long)]
+        #[arg(long, help = "Seconds to wait for a reply (default: 300)")]
         timeout: Option<u64>,
     },
+    /// Wait for new messages in a session
     Wait {
+        #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
-        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session")]
+        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session", help = "Session ID")]
         session_arg: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Seconds to wait before timing out (default: 300)")]
         timeout: Option<u64>,
-        #[arg(long)]
+        #[arg(long, help = "Only return messages with ID greater than this")]
         since: Option<u64>,
-        #[arg(long)]
+        #[arg(long, help = "Maximum number of messages to return (0 = unlimited)")]
         limit: Option<usize>,
-        #[arg(long)]
+        #[arg(long, help = "Only return messages from this sender")]
         from: Option<String>,
-        #[arg(long, short = 'j')]
+        #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
+    /// Stream new messages as they arrive (SSE)
     Follow {
+        #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
-        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session")]
+        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session", help = "Session ID")]
         session_arg: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Only stream messages with ID greater than this")]
         since: Option<u64>,
-        #[arg(long)]
+        #[arg(long, help = "Maximum number of messages to stream (0 = unlimited)")]
         limit: Option<usize>,
-        #[arg(long, short = 'j')]
+        #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
-        #[arg(long)]
+        #[arg(long, help = "Seconds to stay connected before disconnecting")]
         timeout: Option<u64>,
     },
+    /// View conversation transcript
     Recap {
+        #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
-        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session")]
+        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session", help = "Session ID")]
         session_arg: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Only show messages with ID greater than this")]
         since: Option<u64>,
-        #[arg(long)]
+        #[arg(long, help = "Alias for --since (last seen cursor)")]
         cursor: Option<u64>,
-        #[arg(long)]
+        #[arg(long, help = "Only show messages from this sender")]
         from: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Maximum number of messages to show (0 = unlimited)")]
         limit: Option<usize>,
-        #[arg(long, short = 'j')]
+        #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
+    /// Watch all sessions for interesting messages
     Observe {
-        #[arg(long)]
+        #[arg(long, help = "Only show messages with ID greater than this")]
         since: Option<u64>,
-        #[arg(long)]
+        #[arg(long, help = "Only show messages containing this text")]
         r#match: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Only show messages from this sender")]
         from: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Only show messages in sessions with matching name")]
         channel: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Seconds to stay connected before disconnecting")]
         timeout: Option<u64>,
-        #[arg(long, short = 'j')]
+        #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
+    /// List all sessions
     List {
-        #[arg(long, short = 'j')]
+        #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
+    /// Close a session
     Close {
+        #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
-        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session")]
+        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session", help = "Session ID")]
         session_arg: Option<String>,
-        #[arg(long, short = 'j')]
+        #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
+    /// Show daemon status
     Status {
-        #[arg(long, short = 'j')]
+        #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
+    /// Stop the daemon
     Stop,
     #[command(hide = true)]
     Daemon,
+    /// Manage sessions
     Session {
         #[command(subcommand)]
         command: SessionCommands,
@@ -146,24 +171,32 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum SessionCommands {
+    /// List all sessions
     List {
-        #[arg(long, short = 'j')]
+        #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
+    /// Close a session by ID
     Close {
+        #[arg(help = "Session ID to close")]
         session_id: String,
-        #[arg(long, short = 'j')]
+        #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
+    /// Show session details
     Show {
+        #[arg(help = "Session ID to show")]
         session_id: String,
-        #[arg(long, short = 'j')]
+        #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
+    /// Rename a session
     Rename {
+        #[arg(help = "Session ID to rename")]
         session_id: String,
+        #[arg(help = "New name for the session")]
         name: String,
-        #[arg(long, short = 'j')]
+        #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
 }
