@@ -39,28 +39,50 @@ Sub-agents use chit to communicate cross-project, then provide structured produc
 ## The Eval Loop
 
 ```
-1. Setup  →  ./eval/run.sh setup <scenario>
-               Creates temp dirs, starts daemon, writes task prompts.
-               Outputs ready-to-copy Task tool prompts.
+1. Setup     →  ./eval/run.sh setup <scenario>
+                 Creates temp dirs, starts daemon, writes task prompts.
+                 Outputs ready-to-copy Task tool prompts.
 
-2. Launch  →  Copy prompts from terminal into Task tool calls.
-               Launch agents in parallel (for cross-project) or
-               sequentially (observe: Alpha, Beta, Gamma, then Monitor).
+2. Launch    →  Copy prompts from terminal into Task tool calls.
+                 Launch all agents in parallel (workers + monitor).
 
-3. Collect →  ./eval/run.sh collect <scenario>
-               Stops daemon, prints agent feedback.
+3. Collect   →  ./eval/run.sh collect <scenario>
+                 Stops daemon, prints agent feedback.
 
-4. Analyze →  Read feedback carefully. Extract:
-               - P0 bugs (crashes, data loss, hangs)
-               - P1 friction (confusing UX, missing features)
-               - P2 wishes (nice-to-haves)
+4. Analyze   →  Read feedback carefully. Cross-reference agents. Extract:
+                 - P0 bugs (crashes, data loss, hangs)
+                 - P1 friction (confusing UX, missing features)
+                 - P2 wishes (nice-to-haves)
 
-5. Fix     →  Implement fixes, bump version, tag, release.
-               Run `cargo test -- --test-threads=1` before committing.
+5. Spec      →  Create an OpenSpec change for the issues:
+                 openspec new change "<kebab-case-name>"
+                 Follow proposal → specs → design → tasks
+                 Red team the spec before implementing
 
-6. Re-eval →  Go to step 1 to validate fixes landed.
-               Key question: did the fix address the agent's complaint?
+6. Implement →  Work through OpenSpec tasks. Keep changes minimal.
+                 Run tests after each task group:
+                 cargo test --test e2e -- --test-threads=1
+
+7. PR & CI   →  Commit, push, create PR, check CI passes.
+                 gh pr create --title "..." --body "..."
+                 gh pr checks --watch  # wait for CI
+                 If CI fails: fix errors, amend commit, re-push
+                 gh pr merge --squash --delete-branch
+
+8. Re-eval   →  Go to step 1 to validate fixes landed.
+                 Key question: did the fix address the agent's complaint?
+                 If new issues emerged from the fix, add them to the backlog.
 ```
+
+### CI Failure Patterns
+
+| Failure | Likely Cause | Fix |
+|---|---|---|
+| Compile error | Rust type mismatch, missing import | Fix locally, amend commit |
+| Test failure (e2e) | Shared `.chit/active-session` race | Rerun with `--test-threads=1` |
+| Test failure (unit) | Logic change broke invariant | Update test or fix logic |
+| Clippy warning | Style issue | `cargo clippy --fix` |
+| Integration flake | Daemon port conflict, timeout | Rerun the job |
 
 ## Lessons from Previous Eval Rounds
 
@@ -74,15 +96,15 @@ Sub-agents use chit to communicate cross-project, then provide structured produc
 - The eval runner does this automatically. Sub-agents must export it.
 
 ### Active session gotchas
-- `chit start` no longer auto-sets the active session. Use `chit use <id>` explicitly.
-- Stale `.chit/active-session` in CWD can confuse tests. Clean with:
-  `rm -f /Users/dave/code/chit/.chit/active-session`
+- `chit start` now sets the active session. Run `chit use <id>` to switch to a different one.
+- Stale `.chit/active-session` in CWD can confuse parallel tests. Always use:
+  `cargo test --test e2e -- --test-threads=1`
 
 ### Sub-agent tips
 - Give agents a specific suggested chit workflow (concrete commands, not just goals).
 - Include the exact CHIT_HOME path in the prompt.
-- For cross-project, launch both agents in parallel (they resolve themselves).
-- For observe, launch workers first, then Monitor (so there's activity to see).
+- Launch all agents in parallel — even for observe, the Monitor should start with the workers.
+- Agents self-resolve: Alpha sends, Beta waits/recaps/replies.
 
 ### Feedback analysis
 - Agents often report the same issue differently. Cross-reference.
@@ -95,6 +117,16 @@ Sub-agents use chit to communicate cross-project, then provide structured produc
 - `chit rename` isn't a top-level command — it's `chit session rename`. Double-check command structure in task docs.
 - `chit observe`'s scope (showing all sessions including the observer's own) can be surprising. Clarify in docs.
 - Collecting feedback via file writes is unreliable — agents may claim to write without actually doing so. Prefer inline feedback in Task results.
+
+### OpenSpec workflow
+- Always red team the spec before implementing. Find inaccurate claims (e.g. "endpoint already supports X" when it doesn't), contradictions, and missing edge cases.
+- Name resolution (`chit use <name>`) is client-side (fetch all, filter) to avoid daemon changes. Works because session count is small.
+- `chit send` vs `resolve_session_id` inconsistency is intentional: send is a write (misrouted messages are silently lost), recap/close/follow are reads (safe to auto-route).
+- Tests sharing CWD race on `.chit/active-session`. Isolate with `chit_in(..., Some(project_dir), ...)` or use `--test-threads=1`.
+
+### CI after eval changes
+- Always run `cargo test --test e2e -- --test-threads=1` before pushing — parallel test threads cause flaky active-session races.
+- If CI fails on a flaky test, rerun the job before debugging. If it fails consistently, check for active-session file pollution from other tests.
 
 ## Adding a New Scenario
 

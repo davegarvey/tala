@@ -2,19 +2,32 @@
 
 Evaluate chit by running sub-agents through realistic multi-agent scenarios. Sub-agents use chit to communicate cross-project and then provide structured product feedback.
 
+## The Eval Loop
+
+```
+1. Setup     →  ./eval/run.sh setup <scenario>
+2. Launch    →  All agents in parallel via Task tool
+3. Collect   →  ./eval/run.sh collect <scenario>
+4. Analyze   →  Extract P0/P1/P2 from feedback
+5. Spec      →  openspec new change "<name>"  (proposal → specs → design → tasks)
+6. Implement →  Work through tasks, test after each group
+7. PR & CI   →  Commit, PR, wait for CI, fix if needed, merge
+8. Re-eval   →  Go to step 1 to validate fixes landed
+```
+
 ## Quick Start
 
 ```bash
 ./eval/run.sh setup cross-project
 ```
 
-Follow the printed instructions to launch sub-agents. When they finish:
+Launch all agents in parallel (copy prompts from setup output). When they finish:
 
 ```bash
 ./eval/run.sh collect cross-project
 ```
 
-Run cleanup when done:
+Clean up when done:
 
 ```bash
 ./eval/run.sh cleanup
@@ -22,10 +35,10 @@ Run cleanup when done:
 
 ## Eval Scenarios
 
-| Scenario | Description |
-|---|---|
-| `cross-project` | Two agents collaborate across projects via chit |
-| `observe` | Multiple agents work; a monitor watches via `chit observe` |
+| Scenario | Agents | Description |
+|---|---|---|
+| `cross-project` | 2 (Alpha + Beta) | Two agents collaborate across projects via chit |
+| `observe` | 4 (Alpha + Beta + Gamma + Monitor) | Agents work independently; monitor watches via `chit observe` |
 
 ## Adding a Scenario
 
@@ -35,14 +48,6 @@ Run cleanup when done:
    - `## Agent Tasks` — one section per agent, describing their project context and goal
    - `## Feedback` — questions each agent should answer
 2. Add a `setup_<name>` and `collect_<name>` function in `eval/run.sh`.
-
-## How It Works
-
-1. `./eval/run.sh setup <scenario>` — creates temp project dirs, starts chit daemon, writes sub-agent task files to `eval/agent-tasks/<scenario>/`
-2. Coding agent reads task files and launches sub-agents via the Task tool
-3. Sub-agents carry out their tasks using chit for cross-project messaging, then write feedback to a results file
-4. `./eval/run.sh collect <scenario>` — reads feedback, stops daemon, prints summary
-5. `./eval/run.sh cleanup` — removes temp dirs
 
 ## Eval Skill
 
