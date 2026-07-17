@@ -203,7 +203,7 @@ async fn wait_for_message(
 ) -> impl IntoResponse {
     let since = params.since.unwrap_or(0);
     let wait_timeout = params.timeout_secs.unwrap_or(300);
-    let limit = params.limit;
+    let limit = params.limit.filter(|&l| l > 0);
     let from = params.from.as_deref();
 
     let session = state.store.get_session(&id).await;
@@ -264,7 +264,8 @@ async fn wait_for_message(
                                 continue;
                             }
                         }
-                        let msgs = if limit.unwrap_or(1) > 1 {
+                        let effective_limit = limit.filter(|&l| l > 0);
+                        let msgs = if effective_limit.unwrap_or(1) > 1 {
                             state
                                 .store
                                 .get_messages_filtered(&id, since, limit, from)
@@ -411,7 +412,7 @@ async fn stream_events(
         }
     };
 
-    let max_count = params.limit.unwrap_or(usize::MAX);
+    let max_count = params.limit.filter(|&l| l > 0).unwrap_or(usize::MAX);
     let mut count = 0usize;
 
     let stream = BroadcastStream::new(rx).filter_map(move |result| {

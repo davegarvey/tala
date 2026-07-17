@@ -409,7 +409,7 @@ async fn cmd_wait(
     let since_id = since.unwrap_or(0);
 
     let mut path = format!("/api/sessions/{}/wait?since={}&timeout_secs={}", session_id, since_id, wait_timeout);
-    if let Some(l) = limit {
+    if let Some(l) = limit.filter(|&l| l > 0) {
         path = format!("{}&limit={}", path, l);
     }
     if let Some(ref f) = from {
@@ -455,7 +455,7 @@ async fn cmd_follow(
 
     let since_id = since.unwrap_or(0);
     let mut path = format!("/api/sessions/{}/events?since={}", session_id, since_id);
-    if let Some(l) = limit {
+    if let Some(l) = limit.filter(|&l| l > 0) {
         path = format!("{}&limit={}", path, l);
     }
     let url = daemon_url(&host, port, &path);
@@ -536,7 +536,7 @@ async fn cmd_recap(
     if let Some(ref f) = from {
         path = format!("{}&from={}", path, f);
     }
-    if let Some(l) = limit {
+    if let Some(l) = limit.filter(|&l| l > 0) {
         path = format!("{}&limit={}", path, l);
     }
 
