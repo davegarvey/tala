@@ -78,20 +78,30 @@ async fn get_session(State(state): State<AppState>, Path(id): Path<String>) -> i
 }
 
 async fn close_session(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
-    if state.store.close_session(&id).await {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "closed"})),
-        )
-            .into_response()
-    } else {
-        (
-            StatusCode::NOT_FOUND,
+    let exists = state.store.get_session(&id).await;
+    match exists {
+        Some(s) if s.closed => (
+            StatusCode::CONFLICT,
             Json(ErrorResponse {
-                error: format!("session '{}' not found or already closed", id),
+                error: format!("session '{}' is already closed", id),
             }),
         )
-            .into_response()
+            .into_response(),
+        Some(_) => {
+            state.store.close_session(&id).await;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "closed"})),
+            )
+                .into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("session '{}' not found", id),
+            }),
+        )
+            .into_response(),
     }
 }
 
