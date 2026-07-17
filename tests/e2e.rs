@@ -129,12 +129,18 @@ fn test_multiple_sessions_auto_target_sends_to_active() {
     chit_ok(home.path(), &["use", &sess2]);
     chit_ok(home.path(), &["send", "test"]);
     let recap = chit_ok(home.path(), &["recap", &sess2]);
-    assert!(recap.contains("test"), "message should go to active session (sess2)");
+    assert!(
+        recap.contains("test"),
+        "message should go to active session (sess2)"
+    );
 
     // Explicit --session still works for other sessions
     chit_ok(home.path(), &["send", "--session", &sess1, "explicit send"]);
     let recap2 = chit_ok(home.path(), &["recap", &sess1]);
-    assert!(recap2.contains("explicit send"), "explicit send to sess1 should work");
+    assert!(
+        recap2.contains("explicit send"),
+        "explicit send to sess1 should work"
+    );
 
     chit_stop(home.path());
 }
@@ -352,11 +358,15 @@ fn test_wait_since_returns_existing_messages() {
 
     chit_ok(home.path(), &["send", "--session", &sess, "existing-msg"]);
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "wait", &sess, "--since", "0", "--timeout", "3", "--json",
-    ]);
+    let (stdout, _stderr, ok) = chit(
+        home.path(),
+        &["wait", &sess, "--since", "0", "--timeout", "3", "--json"],
+    );
     assert!(ok, "wait --since should succeed");
-    assert!(stdout.contains("existing-msg"), "should return existing msg");
+    assert!(
+        stdout.contains("existing-msg"),
+        "should return existing msg"
+    );
     assert!(stdout.contains("\"cursor\""), "should include cursor");
 
     chit_stop(home.path());
@@ -367,12 +377,29 @@ fn test_wait_from_filter() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--as", "alpha", "msg-alpha"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--as", "beta", "msg-beta"]);
+    chit_ok(
+        home.path(),
+        &["send", "--session", &sess, "--as", "alpha", "msg-alpha"],
+    );
+    chit_ok(
+        home.path(),
+        &["send", "--session", &sess, "--as", "beta", "msg-beta"],
+    );
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "wait", &sess, "--since", "0", "--from", "alpha", "--timeout", "3", "--json",
-    ]);
+    let (stdout, _stderr, ok) = chit(
+        home.path(),
+        &[
+            "wait",
+            &sess,
+            "--since",
+            "0",
+            "--from",
+            "alpha",
+            "--timeout",
+            "3",
+            "--json",
+        ],
+    );
     assert!(ok, "wait --from should succeed");
     assert!(stdout.contains("alpha"), "should include alpha");
     assert!(!stdout.contains("beta"), "should exclude beta");
@@ -385,13 +412,35 @@ fn test_wait_limit_cap() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--as", "t", "m1"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--as", "t", "m2"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--as", "t", "m3"]);
+    chit_ok(
+        home.path(),
+        &["send", "--session", &sess, "--as", "t", "m1"],
+    );
+    chit_ok(
+        home.path(),
+        &["send", "--session", &sess, "--as", "t", "m2"],
+    );
+    chit_ok(
+        home.path(),
+        &["send", "--session", &sess, "--as", "t", "m3"],
+    );
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "wait", &sess, "--since", "0", "--from", "t", "--limit", "2", "--timeout", "3", "--json",
-    ]);
+    let (stdout, _stderr, ok) = chit(
+        home.path(),
+        &[
+            "wait",
+            &sess,
+            "--since",
+            "0",
+            "--from",
+            "t",
+            "--limit",
+            "2",
+            "--timeout",
+            "3",
+            "--json",
+        ],
+    );
     assert!(ok, "wait --limit should succeed");
 
     let count = stdout.matches("\"content\"").count();
@@ -405,12 +454,16 @@ fn test_recap_from_filter() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--as", "alpha", "only-alpha"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--as", "beta", "only-beta"]);
+    chit_ok(
+        home.path(),
+        &["send", "--session", &sess, "--as", "alpha", "only-alpha"],
+    );
+    chit_ok(
+        home.path(),
+        &["send", "--session", &sess, "--as", "beta", "only-beta"],
+    );
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "recap", &sess, "--json", "--from", "alpha",
-    ]);
+    let (stdout, _stderr, ok) = chit(home.path(), &["recap", &sess, "--json", "--from", "alpha"]);
     assert!(ok, "recap --from should succeed");
     assert!(stdout.contains("only-alpha"), "should include alpha msg");
     assert!(!stdout.contains("only-beta"), "should exclude beta msg");
@@ -426,9 +479,7 @@ fn test_recap_cursor() {
     chit_ok(home.path(), &["send", "--session", &sess, "old-msg"]);
     chit_ok(home.path(), &["send", "--session", &sess, "new-msg"]);
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "recap", &sess, "--json", "--cursor", "1",
-    ]);
+    let (stdout, _stderr, ok) = chit(home.path(), &["recap", &sess, "--json", "--cursor", "1"]);
     assert!(ok, "recap --cursor should succeed");
     assert!(!stdout.contains("old-msg"), "should exclude old-msg");
     assert!(stdout.contains("new-msg"), "should include new-msg");
@@ -445,9 +496,7 @@ fn test_recap_limit_cap() {
     chit_ok(home.path(), &["send", "--session", &sess, "m2"]);
     chit_ok(home.path(), &["send", "--session", &sess, "m3"]);
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "recap", &sess, "--json", "--limit", "2",
-    ]);
+    let (stdout, _stderr, ok) = chit(home.path(), &["recap", &sess, "--json", "--limit", "2"]);
     assert!(ok, "recap --limit should succeed");
     let count = stdout.matches("\"content\"").count();
     assert_eq!(count, 2, "should cap at 2 messages");
@@ -464,12 +513,14 @@ fn test_recap_limit_zero_is_unlimited() {
     chit_ok(home.path(), &["send", "--session", &sess, "b"]);
     chit_ok(home.path(), &["send", "--session", &sess, "c"]);
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "recap", &sess, "--json", "--limit", "0",
-    ]);
+    let (stdout, _stderr, ok) = chit(home.path(), &["recap", &sess, "--json", "--limit", "0"]);
     assert!(ok, "recap --limit 0 should succeed");
     let count = stdout.matches("\"content\"").count();
-    assert!(count >= 3, "limit 0 should return all messages, got {}", count);
+    assert!(
+        count >= 3,
+        "limit 0 should return all messages, got {}",
+        count
+    );
 
     chit_stop(home.path());
 }
@@ -479,9 +530,10 @@ fn test_send_json_output() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "send", "--session", &sess, "--json", "json-test",
-    ]);
+    let (stdout, _stderr, ok) = chit(
+        home.path(),
+        &["send", "--session", &sess, "--json", "json-test"],
+    );
     assert!(ok, "send --json should succeed");
     assert!(stdout.contains("\"cursor\""), "should include cursor");
     assert!(stdout.contains("\"content\""), "should include content");
@@ -494,9 +546,7 @@ fn test_close_json_output() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "close", &sess, "--json",
-    ]);
+    let (stdout, _stderr, ok) = chit(home.path(), &["close", &sess, "--json"]);
     assert!(ok, "close --json should succeed");
     assert!(stdout.contains("\"status\""), "should include status");
     assert!(stdout.contains("closed"), "status should be closed");
@@ -523,7 +573,10 @@ fn test_list_json_output() {
 
     let (stdout, _stderr, ok) = chit(home.path(), &["list", "--json"]);
     assert!(ok, "list --json should succeed");
-    assert!(stdout.contains("\"session_id\""), "should include session_id");
+    assert!(
+        stdout.contains("\"session_id\""),
+        "should include session_id"
+    );
 
     chit_stop(home.path());
 }
@@ -535,9 +588,10 @@ fn test_send_to_closed_session_fails() {
 
     chit_ok(home.path(), &["close", &sess]);
 
-    let (_stdout, stderr, ok) = chit(home.path(), &[
-        "send", "--session", &sess, "this should fail",
-    ]);
+    let (_stdout, stderr, ok) = chit(
+        home.path(),
+        &["send", "--session", &sess, "this should fail"],
+    );
     assert!(!ok, "send to closed should fail");
     assert!(stderr.contains("closed"), "error should mention closed");
 
@@ -564,12 +618,19 @@ fn test_wait_after_close_returns_messages_and_closed_true() {
     chit_ok(home.path(), &["send", "--session", &sess, "pending-msg"]);
     chit_ok(home.path(), &["close", &sess]);
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "wait", &sess, "--since", "0", "--timeout", "3", "--json",
-    ]);
+    let (stdout, _stderr, ok) = chit(
+        home.path(),
+        &["wait", &sess, "--since", "0", "--timeout", "3", "--json"],
+    );
     assert!(ok, "wait after close should succeed");
-    assert!(stdout.contains("\"closed\":true"), "should report closed:true");
-    assert!(stdout.contains("pending-msg"), "should return pending messages");
+    assert!(
+        stdout.contains("\"closed\":true"),
+        "should report closed:true"
+    );
+    assert!(
+        stdout.contains("pending-msg"),
+        "should return pending messages"
+    );
 
     chit_stop(home.path());
 }
@@ -581,9 +642,19 @@ fn test_follow_after_close() {
 
     chit_ok(home.path(), &["close", &sess]);
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "follow", "--session", &sess, "--since", "0", "--timeout", "3", "--json",
-    ]);
+    let (stdout, _stderr, ok) = chit(
+        home.path(),
+        &[
+            "follow",
+            "--session",
+            &sess,
+            "--since",
+            "0",
+            "--timeout",
+            "3",
+            "--json",
+        ],
+    );
     assert!(ok, "follow after close should succeed");
     assert!(stdout.contains("closed"), "should emit closed event");
 
@@ -595,9 +666,7 @@ fn test_empty_message_rejected() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    let (_stdout, _stderr, ok) = chit(home.path(), &[
-        "send", "--session", &sess, "",
-    ]);
+    let (_stdout, _stderr, ok) = chit(home.path(), &["send", "--session", &sess, ""]);
     assert!(!ok, "empty message should be rejected");
 
     chit_stop(home.path());
@@ -608,9 +677,7 @@ fn test_empty_session_name_rejected() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    let (_stdout, _stderr, ok) = chit(home.path(), &[
-        "session", "rename", &sess, "",
-    ]);
+    let (_stdout, _stderr, ok) = chit(home.path(), &["session", "rename", &sess, ""]);
     assert!(!ok, "empty session name should be rejected");
 
     chit_stop(home.path());
@@ -657,9 +724,7 @@ fn test_nonexistent_session_wait_fails() {
     let home = tempfile::tempdir().unwrap();
     chit_start(home.path());
 
-    let (_stdout, _stderr, ok) = chit(home.path(), &[
-        "wait", "nonexistent", "--timeout", "2",
-    ]);
+    let (_stdout, _stderr, ok) = chit(home.path(), &["wait", "nonexistent", "--timeout", "2"]);
     assert!(!ok, "wait nonexistent should fail");
 
     chit_stop(home.path());
@@ -670,11 +735,16 @@ fn test_no_wait_flag_instead_of_ff() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "send", "--session", &sess, "sent with --no-wait",
-    ]);
+    let (stdout, _stderr, ok) = chit(
+        home.path(),
+        &["send", "--session", &sess, "sent with --no-wait"],
+    );
     assert!(ok, "--no-wait should work");
-    assert!(stdout.contains("Sent message"), "should show confirmation: {}", stdout);
+    assert!(
+        stdout.contains("Sent message"),
+        "should show confirmation: {}",
+        stdout
+    );
 
     let recap = chit_ok(home.path(), &["recap", &sess]);
     assert!(recap.contains("--no-wait"), "message should be in recap");
@@ -687,11 +757,16 @@ fn test_send_short_no_wait() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "send", "--session", &sess, "sent with -n short flag",
-    ]);
+    let (stdout, _stderr, ok) = chit(
+        home.path(),
+        &["send", "--session", &sess, "sent with -n short flag"],
+    );
     assert!(ok, "-n should work");
-    assert!(stdout.contains("Sent message"), "should show confirmation: {}", stdout);
+    assert!(
+        stdout.contains("Sent message"),
+        "should show confirmation: {}",
+        stdout
+    );
 
     let recap = chit_ok(home.path(), &["recap", &sess]);
     assert!(recap.contains("-n short"), "message should be in recap");
@@ -704,11 +779,16 @@ fn test_send_quiet_flag() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "send", "--session", &sess, "--quiet", "quiet message",
-    ]);
+    let (stdout, _stderr, ok) = chit(
+        home.path(),
+        &["send", "--session", &sess, "--quiet", "quiet message"],
+    );
     assert!(ok, "--quiet should still succeed");
-    assert!(!stdout.contains("Sent"), "should not print confirmation: {:?}", stdout);
+    assert!(
+        !stdout.contains("Sent"),
+        "should not print confirmation: {:?}",
+        stdout
+    );
 
     chit_stop(home.path());
 }
@@ -721,15 +801,24 @@ fn test_send_file_flag() {
     let msg_path = home.path().join("msg.txt");
     std::fs::write(&msg_path, "message from file with **markdown**").unwrap();
 
-    let (stdout, _stderr, ok) = chit(home.path(), &[
-        "send", "--session", &sess, "--file",
-        msg_path.to_str().unwrap(),
-    ]);
+    let (stdout, _stderr, ok) = chit(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--file",
+            msg_path.to_str().unwrap(),
+        ],
+    );
     assert!(ok, "--file should work");
     assert!(stdout.contains("Sent message"), "should show confirmation");
 
     let recap = chit_ok(home.path(), &["recap", &sess, "--json"]);
-    assert!(recap.contains("**markdown**"), "file content should be in recap");
+    assert!(
+        recap.contains("**markdown**"),
+        "file content should be in recap"
+    );
 
     chit_stop(home.path());
 }
@@ -742,17 +831,31 @@ fn test_use_set_and_clear() {
 
     // Set active session (in project dir so active-session is isolated)
     let out = chit_in(home.path(), Some(project.path()), &["use", &sess]).0;
-    assert!(out.contains("Active session set"), "should confirm: {}", out);
+    assert!(
+        out.contains("Active session set"),
+        "should confirm: {}",
+        out
+    );
 
     // Show active session
     let out = chit_in(home.path(), Some(project.path()), &["use"]).0;
     assert!(out.contains(&sess), "should show session: {}", out);
 
     // Send without --session should use active session
-    chit_in(home.path(), Some(project.path()), &["send", "sent via active session"]).2.then(|| ()).unwrap();
+    chit_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "sent via active session"],
+    )
+    .2
+    .then(|| ())
+    .unwrap();
 
     let recap = chit_ok(home.path(), &["recap", &sess]);
-    assert!(recap.contains("active session"), "message should be in session");
+    assert!(
+        recap.contains("active session"),
+        "message should be in session"
+    );
 
     // Clear
     let out = chit_in(home.path(), Some(project.path()), &["use", "--clear"]).0;
@@ -761,7 +864,10 @@ fn test_use_set_and_clear() {
     // Verify cleared
     let (stdout, _stderr, ok) = chit_in(home.path(), Some(project.path()), &["use"]);
     assert!(ok);
-    assert!(!stdout.contains(&sess), "should not show session after clear");
+    assert!(
+        !stdout.contains(&sess),
+        "should not show session after clear"
+    );
 
     chit_stop(home.path());
 }
@@ -773,13 +879,25 @@ fn test_use_json_output() {
     let sess = chit_start(home.path());
 
     let out = chit_in(home.path(), Some(project.path()), &["use", &sess, "--json"]).0;
-    assert!(out.contains("\"session_id\""), "json should have session_id: {}", out);
+    assert!(
+        out.contains("\"session_id\""),
+        "json should have session_id: {}",
+        out
+    );
     assert!(out.contains(&sess), "json should contain session id");
 
     let out = chit_in(home.path(), Some(project.path()), &["use", "--json"]).0;
-    assert!(out.contains("\"session_id\""), "json show should have session_id");
+    assert!(
+        out.contains("\"session_id\""),
+        "json show should have session_id"
+    );
 
-    let out = chit_in(home.path(), Some(project.path()), &["use", "--clear", "--json"]).0;
+    let out = chit_in(
+        home.path(),
+        Some(project.path()),
+        &["use", "--clear", "--json"],
+    )
+    .0;
     assert!(out.contains("\"status\""), "json clear should have status");
 
     chit_stop(home.path());
@@ -820,11 +938,21 @@ fn test_start_sets_active_session() {
     let project = tempfile::tempdir().unwrap();
 
     // Start session from project dir — sets active session there
-    let sess = chit_in(home.path(), Some(project.path()), &["start"]).0.trim().to_string();
+    let sess = chit_in(home.path(), Some(project.path()), &["start"])
+        .0
+        .trim()
+        .to_string();
     assert!(sess.starts_with("sess_"), "should return session ID");
 
     // Send from same project dir (no --session needed, active session is set)
-    chit_in(home.path(), Some(project.path()), &["send", "message via start"]).2.then(|| ()).unwrap();
+    chit_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "message via start"],
+    )
+    .2
+    .then(|| ())
+    .unwrap();
 
     let recap = chit_ok(home.path(), &["recap", &sess]);
     assert!(
@@ -841,7 +969,11 @@ fn test_send_no_active_session_fails() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
 
-    let (_stdout, stderr, ok) = chit_in(home.path(), Some(project.path()), &["send", "this should fail"]);
+    let (_stdout, stderr, ok) = chit_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "this should fail"],
+    );
     assert!(!ok, "send without active session should fail");
     assert!(
         stderr.contains("No active session"),
@@ -857,7 +989,11 @@ fn test_send_no_active_session_json_output() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
 
-    let (_stdout, stderr, ok) = chit_in(home.path(), Some(project.path()), &["send", "--json", "this should fail"]);
+    let (_stdout, stderr, ok) = chit_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "--json", "this should fail"],
+    );
     assert!(!ok, "send without active session should fail");
     assert!(
         stderr.contains("\"error\""),
@@ -885,7 +1021,14 @@ fn test_use_by_name() {
     );
 
     // Send should route to the named session
-    chit_in(home.path(), Some(project.path()), &["send", "sent via name"]).2.then(|| ()).unwrap();
+    chit_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "sent via name"],
+    )
+    .2
+    .then(|| ())
+    .unwrap();
     let recap = chit_ok(home.path(), &["recap", &sess]);
     assert!(
         recap.contains("sent via name"),
@@ -901,7 +1044,11 @@ fn test_use_by_nonexistent_name() {
     let project = tempfile::tempdir().unwrap();
     chit_start(home.path());
 
-    let (_stdout, stderr, ok) = chit_in(home.path(), Some(project.path()), &["use", "nonexistent-name"]);
+    let (_stdout, stderr, ok) = chit_in(
+        home.path(),
+        Some(project.path()),
+        &["use", "nonexistent-name"],
+    );
     assert!(!ok, "use by nonexistent name should fail");
     assert!(
         stderr.contains("nonexistent") || stderr.contains("No active"),
@@ -944,7 +1091,10 @@ fn test_observe_timeout() {
         .unwrap();
 
     // Send a message so observe has something to see
-    chit_ok(home.path(), &["send", "--session", &sess, "observe-timeout-test"]);
+    chit_ok(
+        home.path(),
+        &["send", "--session", &sess, "observe-timeout-test"],
+    );
 
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -978,8 +1128,21 @@ fn test_observe_streams_all_sessions() {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    chit_ok(home.path(), &["send", "--session", &sess1, "--as", "alpha", "observe-msg-1"]);
-    chit_ok(home.path(), &["send", "--session", &sess2, "--as", "beta", "observe-msg-2"]);
+    chit_ok(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess1,
+            "--as",
+            "alpha",
+            "observe-msg-1",
+        ],
+    );
+    chit_ok(
+        home.path(),
+        &["send", "--session", &sess2, "--as", "beta", "observe-msg-2"],
+    );
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -987,8 +1150,16 @@ fn test_observe_streams_all_sessions() {
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("observe-msg-1"), "observe should see msg from session 1: {}", stdout);
-    assert!(stdout.contains("observe-msg-2"), "observe should see msg from session 2: {}", stdout);
+    assert!(
+        stdout.contains("observe-msg-1"),
+        "observe should see msg from session 1: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("observe-msg-2"),
+        "observe should see msg from session 2: {}",
+        stdout
+    );
     assert!(stdout.contains("alpha"), "observe should show sender alpha");
     assert!(stdout.contains("beta"), "observe should show sender beta");
 
@@ -1000,7 +1171,10 @@ fn test_observe_channel_filter() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
-    chit_ok(home.path(), &["session", "rename", &sess, "help:auth-module"]);
+    chit_ok(
+        home.path(),
+        &["session", "rename", &sess, "help:auth-module"],
+    );
 
     let mut child = std::process::Command::new(chit_bin())
         .env("HOME", home.path())
@@ -1012,7 +1186,17 @@ fn test_observe_channel_filter() {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--as", "helper", "help-request-msg"]);
+    chit_ok(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--as",
+            "helper",
+            "help-request-msg",
+        ],
+    );
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -1020,8 +1204,15 @@ fn test_observe_channel_filter() {
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("help-request-msg"), "observe --channel should filter: {}", stdout);
-    assert!(stdout.contains("help:auth-module"), "should include session name");
+    assert!(
+        stdout.contains("help-request-msg"),
+        "observe --channel should filter: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("help:auth-module"),
+        "should include session name"
+    );
 
     chit_stop(home.path());
 }
@@ -1041,8 +1232,28 @@ fn test_observe_from_filter() {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--as", "monitor", "monitor-only-msg"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--as", "other", "should-be-filtered"]);
+    chit_ok(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--as",
+            "monitor",
+            "monitor-only-msg",
+        ],
+    );
+    chit_ok(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--as",
+            "other",
+            "should-be-filtered",
+        ],
+    );
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -1050,8 +1261,15 @@ fn test_observe_from_filter() {
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("monitor-only-msg"), "observe --from should include monitor msg: {}", stdout);
-    assert!(!stdout.contains("should-be-filtered"), "observe --from should exclude other senders");
+    assert!(
+        stdout.contains("monitor-only-msg"),
+        "observe --from should include monitor msg: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("should-be-filtered"),
+        "observe --from should exclude other senders"
+    );
 
     chit_stop(home.path());
 }
@@ -1071,8 +1289,28 @@ fn test_observe_match_filter() {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--as", "alert", "urgent: production issue"]);
-    chit_ok(home.path(), &["send", "--session", &sess, "--as", "chat", "just a normal update"]);
+    chit_ok(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--as",
+            "alert",
+            "urgent: production issue",
+        ],
+    );
+    chit_ok(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--as",
+            "chat",
+            "just a normal update",
+        ],
+    );
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -1080,8 +1318,15 @@ fn test_observe_match_filter() {
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("urgent"), "observe --match should match urgent: {}", stdout);
-    assert!(!stdout.contains("normal update"), "observe --match should exclude non-matching");
+    assert!(
+        stdout.contains("urgent"),
+        "observe --match should match urgent: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("normal update"),
+        "observe --match should exclude non-matching"
+    );
 
     chit_stop(home.path());
 }
@@ -1103,12 +1348,20 @@ fn test_send_stdin() {
         .spawn()
         .expect("failed to start chit");
 
-    child.stdin.take().unwrap().write_all(b"piped stdin message").unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"piped stdin message")
+        .unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "stdin send should succeed");
 
     let recap = chit_ok(home.path(), &["recap", &sess]);
-    assert!(recap.contains("piped stdin message"), "stdin message should be in recap");
+    assert!(
+        recap.contains("piped stdin message"),
+        "stdin message should be in recap"
+    );
 
     chit_stop(home.path());
 }
@@ -1128,7 +1381,10 @@ fn test_follow_streams_messages() {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    chit_ok(home.path(), &["send", "--session", &sess, "--as", "streamer", "live-msg"]);
+    chit_ok(
+        home.path(),
+        &["send", "--session", &sess, "--as", "streamer", "live-msg"],
+    );
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -1136,7 +1392,11 @@ fn test_follow_streams_messages() {
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert!(stdout.contains("live-msg"), "follow should stream msg: {}", stdout);
+    assert!(
+        stdout.contains("live-msg"),
+        "follow should stream msg: {}",
+        stdout
+    );
     assert!(stdout.contains("streamer"), "follow should show sender");
 
     chit_stop(home.path());
@@ -1149,7 +1409,16 @@ fn test_follow_limit_caps_messages() {
 
     let mut child = Command::new(chit_bin())
         .env("HOME", home.path())
-        .args(&["follow", "--session", &sess, "--since", "0", "--limit", "1", "--json"])
+        .args(&[
+            "follow",
+            "--session",
+            &sess,
+            "--since",
+            "0",
+            "--limit",
+            "1",
+            "--json",
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -1178,7 +1447,16 @@ fn test_follow_limit_zero_is_unlimited() {
 
     let mut child = Command::new(chit_bin())
         .env("HOME", home.path())
-        .args(&["follow", "--session", &sess, "--since", "0", "--limit", "0", "--json"])
+        .args(&[
+            "follow",
+            "--session",
+            &sess,
+            "--since",
+            "0",
+            "--limit",
+            "0",
+            "--json",
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()

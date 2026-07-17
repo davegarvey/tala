@@ -11,15 +11,15 @@ Two agents working on separate projects need to coordinate. Agent Alpha is fixin
 
 ### Agent Alpha (project-alpha)
 
-You are working in `{{ALPHA_DIR}}`. Review the project README, then use chit to send messages to the agent in the other project. Describe the bug clearly. When the other agent responds, apply their fix. Once the fix is verified, write feedback to `{{RESULTS_FILE}}`.
+You are working in `{{ALPHA_DIR}}`. Review the project README, then use chit to send messages to the agent in the other project. Describe the bug clearly. When the other agent responds, apply their fix. Once the fix is verified, return feedback inline as part of your final Task message.
 
 ### Agent Beta (project-beta)
 
-You are working in `{{BETA_DIR}}`. Review the project README. You know the data schema inside out. When an agent from the other project contacts you via chit, help them debug the issue. Point them to the exact line and fix. Once resolved, write feedback to `{{RESULTS_FILE}}`.
+You are working in `{{BETA_DIR}}`. Review the project README. You know the data schema inside out. When an agent from the other project contacts you via chit, help them debug the issue. Point them to the exact line and fix. Once resolved, return feedback inline as part of your final Task message.
 
 ## Feedback
 
-Each agent writes feedback to the results file answering:
+Each agent returns feedback inline answering:
 - How easy was it to start using chit?
 - How intuitive were send, wait, recap?
 - Was there any confusion about the API (flags, defaults, session management)?

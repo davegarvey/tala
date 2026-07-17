@@ -13,19 +13,19 @@ Three agents work on independent tasks in separate projects. A fourth agent (the
 
 ### Agent Alpha (project-alpha)
 
-You are building an API endpoint in `{{ALPHA_DIR}}`. Look at the README and implement the endpoint. Use chit to send status updates as you work (e.g., "starting implementation", "tests passing", "done"). Write feedback to `{{RESULTS_FILE}}` when done.
+You are building an API endpoint in `{{ALPHA_DIR}}`. Look at the README and implement the endpoint. Use chit to send status updates as you work (e.g., "starting implementation", "tests passing", "done"). Return feedback inline as part of your final Task message when done.
 
 ### Agent Beta (project-beta)
 
-You are building a CLI tool in `{{BETA_DIR}}`. Look at the README and implement it. Send chit updates about your progress. Write feedback to `{{RESULTS_FILE}}` when done.
+You are building a CLI tool in `{{BETA_DIR}}`. Look at the README and implement it. Send chit updates about your progress. Return feedback inline as part of your final Task message when done.
 
 ### Agent Gamma (project-gamma)
 
-You are writing docs in `{{GAMMA_DIR}}`. Look at the README and write documentation. Send chit updates. Write feedback to `{{RESULTS_FILE}}` when done.
+You are writing docs in `{{GAMMA_DIR}}`. Look at the README and write documentation. Send chit updates. Return feedback inline as part of your final Task message when done.
 
 ### Monitor (launch alongside the workers)
 
-You are watching all agent activity via `chit observe`. Run `chit observe` from `{{MONITOR_DIR}}` — start it at the same time as the workers so you see live activity. Note whether you can follow all three conversations. Then write feedback to `{{RESULTS_FILE}}` answering the evaluation questions.
+You are watching all agent activity via `chit observe`. Run `chit observe` from `{{MONITOR_DIR}}` — start it at the same time as the workers so you see live activity. Note whether you can follow all three conversations. Then return feedback inline as part of your final Task message answering the evaluation questions.
 
 ## Feedback (all agents)
 

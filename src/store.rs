@@ -52,7 +52,11 @@ impl Store {
         }
     }
 
-    pub async fn create_session(&self, initial_message: Option<(String, String)>, name: Option<String>) -> String {
+    pub async fn create_session(
+        &self,
+        initial_message: Option<(String, String)>,
+        name: Option<String>,
+    ) -> String {
         let id = loop {
             let candidate = generate_session_id();
             let sessions = self.sessions.read().await;
@@ -77,7 +81,9 @@ impl Store {
         self.broadcast.write().await.insert(id.clone(), tx);
         self.next_msg_id.write().await.insert(id.clone(), 1);
 
-        let _ = self.global_tx.send((id.clone(), DaemonEvent::SessionCreated(id.clone())));
+        let _ = self
+            .global_tx
+            .send((id.clone(), DaemonEvent::SessionCreated(id.clone())));
 
         if let Some((sender, content)) = initial_message {
             drop(sessions);
@@ -124,7 +130,9 @@ impl Store {
         if let Some(tx) = self.broadcast.read().await.get(session_id) {
             let _ = tx.send(DaemonEvent::NewMessage(msg.clone()));
         }
-        let _ = self.global_tx.send((session_id.to_string(), DaemonEvent::NewMessage(msg.clone())));
+        let _ = self
+            .global_tx
+            .send((session_id.to_string(), DaemonEvent::NewMessage(msg.clone())));
 
         Some(msg)
     }
@@ -213,7 +221,9 @@ impl Store {
             if let Some(tx) = self.broadcast.read().await.get(session_id) {
                 let _ = tx.send(DaemonEvent::SessionClosed);
             }
-            let _ = self.global_tx.send((session_id.to_string(), DaemonEvent::SessionClosed));
+            let _ = self
+                .global_tx
+                .send((session_id.to_string(), DaemonEvent::SessionClosed));
             true
         } else {
             false
@@ -236,7 +246,6 @@ impl Store {
     pub fn subscribe_global(&self) -> broadcast::Receiver<(String, DaemonEvent)> {
         self.global_tx.subscribe()
     }
-
 }
 
 pub async fn read_daemon_json() -> anyhow::Result<DaemonInfo> {
@@ -280,7 +289,11 @@ pub async fn read_active_session() -> Option<String> {
     match tokio::fs::read_to_string(&path).await {
         Ok(content) => {
             let s = content.trim().to_string();
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         }
         Err(_) => None,
     }

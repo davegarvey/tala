@@ -9,8 +9,7 @@ metadata:
 ---
 # chit Evaluation Workflow
 
-Evaluate chit by running sub-agents through realistic multi-agent scenarios.
-Sub-agents use chit to communicate cross-project, then provide structured product feedback.
+Evaluate chit by running sub-agents through realistic multi-agent scenarios. Sub-agents use chit to communicate cross-project and then provide structured product feedback. Agents act autonomously throughout the eval loop — no manual intervention.
 
 ## Quick Start
 
@@ -29,12 +28,12 @@ Sub-agents use chit to communicate cross-project, then provide structured produc
 ./eval/run.sh cleanup
 ```
 
-## Available Scenarios
+## Eval Scenarios
 
 | Scenario | Agents | Description |
 |---|---|---|
-| `cross-project` | 2 (Alpha + Beta) | Two agents collaborate across projects via chit. Alpha has a CSV parser bug, Beta has the schema docs. Tests: send, wait, recap, session management. |
-| `observe` | 4 (Alpha + Beta + Gamma + Monitor) | Three agents work independently while a Monitor watches via `chit observe`. Tests: observe, filtering, multi-session awareness. |
+| `cross-project` | 2 (Alpha + Beta) | Two agents collaborate across projects via chit |
+| `observe` | 4 (Alpha + Beta + Gamma + Monitor) | Agents work independently; monitor watches via `chit observe` |
 
 ## The Eval Loop
 
@@ -53,26 +52,21 @@ Sub-agents use chit to communicate cross-project, then provide structured produc
                  - P0 bugs (crashes, data loss, hangs)
                  - P1 friction (confusing UX, missing features)
                  - P2 wishes (nice-to-haves)
+                 ↓
+        Any items selected for spec?
+       /                          \
+      YES                          NO → STOP
+       │
+5. Spec      →  openspec new change "<name>"  (proposal → specs → design → tasks)
 
-5. Spec      →  Create an OpenSpec change for the issues:
-                 openspec new change "<kebab-case-name>"
-                 Follow proposal → specs → design → tasks
-                 Red team the spec before implementing
+6. Implement →  Work through tasks, test after each group
 
-6. Implement →  Work through OpenSpec tasks. Keep changes minimal.
-                 Run tests after each task group:
-                 cargo test --test e2e -- --test-threads=1
-
-7. PR & CI   →  Commit, push, create PR, check CI passes.
-                 gh pr create --title "..." --body "..."
-                 gh pr checks --watch  # wait for CI
-                 If CI fails: fix errors, amend commit, re-push
-                 gh pr merge --squash --delete-branch
-
-8. Re-eval   →  Go to step 1 to validate fixes landed.
-                 Key question: did the fix address the agent's complaint?
-                 If new issues emerged from the fix, add them to the backlog.
+7. PR & CI   →  Commit, PR, wait for CI, fix if needed, merge
+       │
+       └──→  Go to step 1 (full re-run)
 ```
+
+Keep iterating: implement the selected items, then re-run the eval (step 1) with the same scenario. Each round validates that previous fixes actually resolved the issues and surfaces any new ones. The loop exits only when step 4 produces zero items worth specifying. As long as feedback contains material improvements — P0 bugs, P1 friction, or strong P2 signals — carry on looping.
 
 ### CI Failure Patterns
 
@@ -133,9 +127,9 @@ Sub-agents use chit to communicate cross-project, then provide structured produc
 1. Create `eval/scenarios/<name>.md` with:
    - `## Scenario` — narrative description
    - `## Setup` — expected directory structure and seed files
-   - `## Agent Tasks` — one section per agent
+   - `## Agent Tasks` — one section per agent, describing their project context and goal
    - `## Feedback` — questions each agent should answer
-2. Add `setup_<name>` and `collect_<name>` functions in `eval/run.sh`.
+2. Add a `setup_<name>` and `collect_<name>` function in `eval/run.sh`.
 3. Register the scenario name in the `case` statement's help text.
 
 ## Reference

@@ -188,7 +188,12 @@ fn compute_cursor(messages: &[Message]) -> Option<u64> {
     messages.iter().map(|m| m.id).max()
 }
 
-fn wrap_wait(messages: Vec<Message>, timeout: bool, timeout_after: Option<u64>, closed: bool) -> WaitResponse {
+fn wrap_wait(
+    messages: Vec<Message>,
+    timeout: bool,
+    timeout_after: Option<u64>,
+    closed: bool,
+) -> WaitResponse {
     let cursor = compute_cursor(&messages);
     WaitResponse {
         messages,
@@ -220,16 +225,16 @@ async fn wait_for_message(
         .get_messages_filtered(&id, since, limit, from)
         .await;
     if !existing.is_empty() {
-        return (StatusCode::OK, Json(wrap_wait(existing, false, None, is_closed))).into_response();
+        return (
+            StatusCode::OK,
+            Json(wrap_wait(existing, false, None, is_closed)),
+        )
+            .into_response();
     }
 
     match session {
         Some(s) if s.closed => {
-            return (
-                StatusCode::OK,
-                Json(wrap_wait(vec![], false, None, true)),
-            )
-                .into_response();
+            return (StatusCode::OK, Json(wrap_wait(vec![], false, None, true))).into_response();
         }
         None => {
             return (
@@ -270,7 +275,11 @@ async fn wait_for_message(
         .get_messages_filtered(&id, since, limit, from)
         .await;
     if !existing.is_empty() {
-        return (StatusCode::OK, Json(wrap_wait(existing, false, None, is_closed))).into_response();
+        return (
+            StatusCode::OK,
+            Json(wrap_wait(existing, false, None, is_closed)),
+        )
+            .into_response();
     }
 
     let timeout_dur = Duration::from_secs(wait_timeout);
@@ -360,9 +369,11 @@ async fn wait_new_session(
 
     match result {
         Ok(json) => (StatusCode::OK, Json(json)).into_response(),
-        Err(_elapsed) => {
-            (StatusCode::OK, Json(serde_json::json!({"timeout": true, "timeout_after": timeout_secs}))).into_response()
-        }
+        Err(_elapsed) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"timeout": true, "timeout_after": timeout_secs})),
+        )
+            .into_response(),
     }
 }
 
@@ -393,9 +404,11 @@ async fn wait_all(
 
     match result {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-        Err(_elapsed) => {
-            (StatusCode::OK, Json(wrap_wait(vec![], true, Some(timeout_secs), false))).into_response()
-        }
+        Err(_elapsed) => (
+            StatusCode::OK,
+            Json(wrap_wait(vec![], true, Some(timeout_secs), false)),
+        )
+            .into_response(),
     }
 }
 
@@ -483,7 +496,8 @@ async fn stream_events(
     let session = state.store.get_session(&id).await;
     match session {
         Some(s) if s.closed => {
-            let event: Result<Event, Infallible> = Ok(Event::default().data("{\"event\":\"closed\"}"));
+            let event: Result<Event, Infallible> =
+                Ok(Event::default().data("{\"event\":\"closed\"}"));
             return (StatusCode::OK, Sse::new(stream::iter(vec![event]))).into_response();
         }
         None => {
@@ -523,14 +537,16 @@ async fn stream_events(
                 if msg.id > since {
                     count += 1;
                     let data = serde_json::to_string(&msg).unwrap_or_default();
-                    Some(Ok::<_, Infallible>(Event::default().event("message").data(data)))
+                    Some(Ok::<_, Infallible>(
+                        Event::default().event("message").data(data),
+                    ))
                 } else {
                     None
                 }
             }
-            Ok(DaemonEvent::SessionClosed) => {
-                Some(Ok::<_, Infallible>(Event::default().event("closed").data("{}")))
-            }
+            Ok(DaemonEvent::SessionClosed) => Some(Ok::<_, Infallible>(
+                Event::default().event("closed").data("{}"),
+            )),
             Ok(DaemonEvent::SessionCreated(_)) => None,
             Err(_) => None,
         }
@@ -572,10 +588,14 @@ async fn observe_events(
         let msgs = state.store.get_messages_since(&session.id, since).await;
         for msg in &msgs {
             if let Some(ref f) = from {
-                if msg.sender != *f { continue; }
+                if msg.sender != *f {
+                    continue;
+                }
             }
             if let Some(ref m) = match_str {
-                if !msg.content.contains(m.as_str()) { continue; }
+                if !msg.content.contains(m.as_str()) {
+                    continue;
+                }
             }
             let session_name = session.name.clone();
             let observe = ObserveEvent {
@@ -584,7 +604,9 @@ async fn observe_events(
                 r#type: "message".to_string(),
                 message: Some(msg.clone()),
             };
-            history.push(Ok(Event::default().event("message").data(serde_json::to_string(&observe).unwrap())));
+            history.push(Ok(Event::default()
+                .event("message")
+                .data(serde_json::to_string(&observe).unwrap())));
         }
     }
 
@@ -596,12 +618,19 @@ async fn observe_events(
     // Send historical messages first
     for event in history {
         if tx.send(event).await.is_err() {
-            return (StatusCode::OK, Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx_channel))).into_response();
+            return (
+                StatusCode::OK,
+                Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx_channel)),
+            )
+                .into_response();
         }
     }
 
     // Then stream new events
-    let timeout_dur = params.timeout_secs.filter(|&t| t > 0).map(Duration::from_secs);
+    let timeout_dur = params
+        .timeout_secs
+        .filter(|&t| t > 0)
+        .map(Duration::from_secs);
     tokio::spawn(async move {
         loop {
             let result = if let Some(dur) = timeout_dur {
@@ -628,12 +657,18 @@ async fn observe_events(
 
                     let opt = match event {
                         DaemonEvent::NewMessage(msg) => {
-                            if msg.id <= since { continue; }
+                            if msg.id <= since {
+                                continue;
+                            }
                             if let Some(ref f) = from {
-                                if msg.sender != *f { continue; }
+                                if msg.sender != *f {
+                                    continue;
+                                }
                             }
                             if let Some(ref m) = match_str {
-                                if !msg.content.contains(m.as_str()) { continue; }
+                                if !msg.content.contains(m.as_str()) {
+                                    continue;
+                                }
                             }
                             let observe = ObserveEvent {
                                 session_id,
@@ -641,7 +676,11 @@ async fn observe_events(
                                 r#type: "message".to_string(),
                                 message: Some(msg),
                             };
-                            Some(Event::default().event("message").data(serde_json::to_string(&observe).unwrap()))
+                            Some(
+                                Event::default()
+                                    .event("message")
+                                    .data(serde_json::to_string(&observe).unwrap()),
+                            )
                         }
                         DaemonEvent::SessionClosed => {
                             let observe = ObserveEvent {
@@ -650,7 +689,11 @@ async fn observe_events(
                                 r#type: "closed".to_string(),
                                 message: None,
                             };
-                            Some(Event::default().event("closed").data(serde_json::to_string(&observe).unwrap()))
+                            Some(
+                                Event::default()
+                                    .event("closed")
+                                    .data(serde_json::to_string(&observe).unwrap()),
+                            )
                         }
                         DaemonEvent::SessionCreated(id) => {
                             let session = state.store.get_session(&id).await;
@@ -661,7 +704,11 @@ async fn observe_events(
                                 r#type: "created".to_string(),
                                 message: None,
                             };
-                            Some(Event::default().event("created").data(serde_json::to_string(&observe).unwrap()))
+                            Some(
+                                Event::default()
+                                    .event("created")
+                                    .data(serde_json::to_string(&observe).unwrap()),
+                            )
                         }
                     };
 
