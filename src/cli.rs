@@ -38,6 +38,8 @@ pub struct Cli {
 pub enum Commands {
     /// Initialize chit configuration for this project
     Init {
+        #[arg(help = "Agent name for this project (defaults to directory name)", conflicts_with = "name")]
+        name_positional: Option<String>,
         #[arg(long, help = "Agent name for this project (defaults to directory name)")]
         name: Option<String>,
     },
@@ -209,7 +211,7 @@ pub enum SessionCommands {
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Commands::Init { name } => cmd_init(name).await,
+        Commands::Init { name_positional, name } => cmd_init(name_positional.or(name)).await,
         Commands::Start { message, name, json } => cmd_start(message, name, json).await,
         Commands::Use { session_id, clear, json } => cmd_use(session_id, clear, json).await,
         Commands::Chat { message, file, session, wait, sender_name, json, quiet, timeout } => {
@@ -406,14 +408,48 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
         return Ok(());
     }
 
-    if let Some(id) = session_id {
-        store::write_active_session(&id).await?;
-        if json_output {
-            println!("{}", serde_json::json!({"session_id": id, "status": "active"}));
-        } else {
-            println!("Active session set to {}", id);
+    if let Some(input) = session_id {
+        let (host, port) = ensure_daemon_running().await?;
+
+        // Try name match first (more meaningful to users)
+        let url = daemon_url(&host, port, "/api/sessions");
+        let resp = reqwest::get(&url).await?;
+        let sessions: Vec<SessionSummary> = resp.json().await?;
+        let active: Vec<_> = sessions.iter().filter(|s| !s.closed).collect();
+
+        let name_matches: Vec<&SessionSummary> = active.iter().filter(|s| s.name.as_deref() == Some(&input)).copied().collect();
+
+        if name_matches.len() == 1 {
+            let id = &name_matches[0].id;
+            store::write_active_session(id).await?;
+            if json_output {
+                println!("{}", serde_json::json!({"session_id": id, "status": "active"}));
+            } else {
+                println!("Active session set to {}", id);
+            }
+            return Ok(());
+        } else if name_matches.len() > 1 {
+            bail!("Multiple sessions named '{}'. Use session ID instead.", input);
         }
-        return Ok(());
+
+        // Fall back to ID match (exact or prefix)
+        let id_matches: Vec<&SessionSummary> = active.iter().filter(|s| s.id == input || s.id.starts_with(&input)).copied().collect();
+
+        if id_matches.len() == 1 {
+            let id = &id_matches[0].id;
+            store::write_active_session(id).await?;
+            if json_output {
+                println!("{}", serde_json::json!({"session_id": id, "status": "active"}));
+            } else {
+                println!("Active session set to {}", id);
+            }
+            return Ok(());
+        } else if id_matches.len() > 1 {
+            let ids: Vec<&str> = id_matches.iter().map(|s| s.id.as_str()).collect();
+            bail!("Multiple sessions match '{}': {}. Use a more specific ID.", input, ids.join(", "));
+        }
+
+        bail!("No active session named or matching '{}'", input);
     }
 
     match store::read_active_session().await {
@@ -440,14 +476,24 @@ async fn cmd_start(message: Option<String>, session_name: Option<String>, json_o
     let client = reqwest::Client::new();
     let url = daemon_url(&host, port, "/api/sessions");
 
+    let name = session_name.or_else(|| {
+        tokio::runtime::Handle::try_current()
+            .ok()
+            .and_then(|_| tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(store::read_project_config())
+            }))
+    });
+
     let req_body = CreateSessionRequest {
         message: message.clone(),
         sender: message.as_ref().map(|_| store::get_sender_name(None)),
-        name: session_name,
+        name,
     };
 
     let resp = client.post(&url).json(&req_body).send().await?;
     let session: CreateSessionResponse = resp.json().await?;
+
+    store::write_active_session(&session.id).await?;
 
     if json_output {
         println!("{}", serde_json::json!({"session_id": session.id}));
@@ -490,7 +536,7 @@ async fn cmd_send(
 
     let (host, port) = ensure_daemon_running().await?;
 
-    // Resolve session or auto-create if none exists
+    // Resolve session: explicit, active, stale-replace, or error
     let session_id = if let Some(id) = session_arg.clone() {
         id
     } else if let Some(id) = store::read_active_session().await {
@@ -500,11 +546,13 @@ async fn cmd_send(
         match check {
             Ok(r) if r.status().is_success() => id,
             _ => {
+                // Stale active session — replace with a new one
                 store::clear_active_session().await?;
                 let client = reqwest::Client::new();
                 let url = daemon_url(&host, port, "/api/sessions");
                 let sender = store::get_sender_name(sender_override);
-                let resp = client.post(&url).json(&CreateSessionRequest { message: None, sender: Some(sender), name: None }).send().await?;
+                let project_name = store::read_project_config().await;
+                let resp = client.post(&url).json(&CreateSessionRequest { message: None, sender: Some(sender), name: project_name }).send().await?;
                 let session: CreateSessionResponse = resp.json().await?;
                 store::write_active_session(&session.id).await?;
                 if !quiet && !json_output {
@@ -514,16 +562,22 @@ async fn cmd_send(
             }
         }
     } else {
+        // No active session — list available sessions and error
         let client = reqwest::Client::new();
         let url = daemon_url(&host, port, "/api/sessions");
-        let sender = store::get_sender_name(sender_override);
-        let resp = client.post(&url).json(&CreateSessionRequest { message: None, sender: Some(sender), name: None }).send().await?;
-        let session: CreateSessionResponse = resp.json().await?;
-        store::write_active_session(&session.id).await?;
-        if !quiet && !json_output {
-            println!("→ Created session {}", session.id);
+        let resp = client.get(&url).send().await?;
+        let sessions: Vec<SessionSummary> = resp.json().await?;
+        let active: Vec<_> = sessions.iter().filter(|s| !s.closed).collect();
+        if active.is_empty() {
+            fail(json_output, "No active sessions. Start one with `chit start`", "NO_ACTIVE_SESSION");
         }
-        session.id
+        let mut msg = "No active session set.".to_string();
+        for s in &active {
+            let name = s.name.as_deref().unwrap_or("-");
+            msg.push_str(&format!("\n  {}  {}", s.id, name));
+        }
+        msg.push_str("\nSet one with `chit use <id>`");
+        fail(json_output, &msg, "NO_ACTIVE_SESSION");
     };
 
     let sender = store::get_sender_name(sender_override);
@@ -796,7 +850,7 @@ async fn cmd_observe(
     match_str: Option<String>,
     from: Option<String>,
     channel: Option<String>,
-    _timeout: Option<u64>,
+    timeout: Option<u64>,
     json_output: bool,
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
@@ -811,6 +865,9 @@ async fn cmd_observe(
     }
     if let Some(ref ch) = channel {
         path = format!("{}&channel={}", path, ch);
+    }
+    if let Some(t) = timeout {
+        path = format!("{}&timeout_secs={}", path, t);
     }
     let url = daemon_url(&host, port, &path);
 
@@ -930,9 +987,15 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
     } else if sessions.is_empty() {
         println!("No active sessions");
     } else {
+        let name_width = sessions.iter()
+            .map(|s| s.name.as_deref().unwrap_or("-").len())
+            .max()
+            .unwrap_or(1)
+            .max(4);
         for s in &sessions {
             let status = if s.closed { "closed" } else { "active" };
-            println!("{}  {}  {} msgs", s.id, status, s.message_count);
+            let name = s.name.as_deref().unwrap_or("-");
+            println!("{}  {:width$}  {}  {} msgs", s.id, name, status, s.message_count, width = name_width);
         }
     }
     Ok(())
@@ -1005,7 +1068,7 @@ async fn cmd_session_rename(session_id: String, name: String, json_output: bool)
     if json_output {
         println!("{}", serde_json::to_string(&result).unwrap());
     } else {
-        println!("Session {} renamed to '{}'", session_id, result["name"]);
+        println!("Session {} renamed to '{}'", session_id, result["name"].as_str().unwrap_or(""));
     }
     Ok(())
 }

@@ -14,8 +14,8 @@ You have access to `chit`, a CLI tool for communicating with agents in other ses
 ## Quick Start
 
 ```bash
-# Send a message (auto-creates session, returns immediately)
-chit send "starting work on the API endpoint"
+# Start a session (sets active session for subsequent commands)
+chit start "starting work on the API endpoint"
 
 # Send more messages (uses active session)
 chit send "tests passing"
@@ -30,17 +30,20 @@ chit recap
 ## Command Reference
 
 | Command | What it does |
-|---|---|
-| `chit send <msg>` | Send a message. Auto-creates session if none exists. Returns immediately. |
+|---|---|---|
+| `chit start <msg>` | Create a session and set it active. |
+| `chit start --name "label"` | Create a named session (name appears in list/observe). |
+| `chit send <msg>` | Send a message to the active session. Specify `-s <id>` for a different session. |
 | `chit send -w <msg>` | Send and block for a reply (shows `⏎ Waiting for reply...`). |
 | `chit wait` | Block until a new message arrives in the active session. |
 | `chit wait --new` | Block until *another agent* creates a new session (for receiving side). |
 | `chit recap` | View the full conversation transcript for the active session. |
 | `chit observe` | Stream all messages from all sessions in real time. |
-| `chit start --name "label"` | Create a named session (name appears in list/observe). |
-| `chit list` | List all sessions with status and message count. |
+| `chit observe --timeout <secs>` | Stream for N seconds then exit. |
+| `chit list` | List all sessions with name, status, and message count. |
 | `chit close` | Close the active session. |
 | `chit use <id>` | Set active session for this project directory. |
+| `chit use <name>` | Set active session by session name. |
 | `chit session rename <id> <name>` | Name an existing session. |
 | `chit init <name>` | Initialize chit config for this project. |
 
@@ -59,13 +62,17 @@ chit recap
 | `--file <path>` | send (read message from file) |
 | `-n, --name <label>` | start (session name) |
 
-## Key Behaviors (v0.23+)
+## Key Behaviors
 
 - **Send returns immediately** by default. Messages are fire-and-forget.
-- **No `chit start` needed** — `chit send "msg"` auto-creates a session if none is active.
+- **`chit start` is required first** — `chit send` needs an active session. Use `chit start` to create one.
+- **`chit start` sets active session** automatically. Subsequent `chit send` calls route to it.
+- **`chit start` auto-names sessions** from your project name (set via `chit init`).
 - **`chit send` reads piped stdin** automatically: `echo "msg" | chit send`.
 - **`wait` without `--since`** only waits for new messages (no history replay).
-- **Active session** is auto-set after `chit send` or `chit start`. Saved per project directory (`.chit/active-session`).
+- **Active session** is saved per project directory (`.chit/active-session`).
+- **`chit use <name>`** accepts session names in addition to IDs.
+- **`chit observe --timeout <secs>`** terminates the stream after N seconds.
 - **`CHIT_HOME` env var** overrides `~/.chit` for isolated daemon instances.
 - **`chit start --name "proj"`** creates a named session for easier identification.
 
@@ -97,10 +104,11 @@ No polling needed. Blocks until another agent creates a session.
 ### Cross-project (multi-directory)
 ```bash
 # In project-alpha:
-chit send "bug in your code"                    # session auto-created
+chit start "bug in your code"                    # creates and sets active session
 # In project-beta (different CWD):
 chit list --json                                 # find the session
-chit use sess_abc12                              # set active
+chit use sess_abc12                              # set active by ID
+chit use "alpha-task"                            # or set active by name
 chit send "fix is in parse_row"                  # reply
 ```
 
@@ -114,7 +122,7 @@ chit observe --match "urgent"                    # watch for keywords
 
 ### Scripting (JSON output)
 ```bash
-sess=$(chit send --json "start task" | jq -r '.session_id')
+sess=$(chit start --json "start task" | jq -r '.session_id')
 chit wait --session "$sess" --since 0 --json | jq '.messages[]'
 ```
 
@@ -122,7 +130,7 @@ chit wait --session "$sess" --since 0 --json | jq '.messages[]'
 
 ### Single-agent, single session (most common)
 ```bash
-chit send "starting"          # auto-creates session
+chit start "starting"         # creates and sets active session
 chit send "progress update"   # uses active session
 chit send "done"              # uses active session
 ```

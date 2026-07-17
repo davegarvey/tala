@@ -786,6 +786,183 @@ fn test_use_json_output() {
 }
 
 #[test]
+fn test_init_positional_name() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    run_init_in(project.path(), home.path(), &["init", "my-custom-project"]);
+
+    let config_path = project.path().join(".chit").join("config.json");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        config.contains("my-custom-project"),
+        "positional name should be used: {}",
+        config
+    );
+}
+
+#[test]
+fn test_init_name_conflict() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let (_stdout, _stderr, ok) = chit_in(
+        home.path(),
+        Some(project.path()),
+        &["init", "positional-name", "--name", "flag-name"],
+    );
+    assert!(!ok, "both positional and --name should conflict");
+}
+
+#[test]
+fn test_start_sets_active_session() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    // Start session from project dir — sets active session there
+    let sess = chit_in(home.path(), Some(project.path()), &["start"]).0.trim().to_string();
+    assert!(sess.starts_with("sess_"), "should return session ID");
+
+    // Send from same project dir (no --session needed, active session is set)
+    chit_in(home.path(), Some(project.path()), &["send", "message via start"]).2.then(|| ()).unwrap();
+
+    let recap = chit_ok(home.path(), &["recap", &sess]);
+    assert!(
+        recap.contains("message via start"),
+        "message should reach session created by start: {}",
+        recap
+    );
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_send_no_active_session_fails() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr, ok) = chit_in(home.path(), Some(project.path()), &["send", "this should fail"]);
+    assert!(!ok, "send without active session should fail");
+    assert!(
+        stderr.contains("No active session"),
+        "error should mention no active session: {}",
+        stderr
+    );
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_send_no_active_session_json_output() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let (_stdout, stderr, ok) = chit_in(home.path(), Some(project.path()), &["send", "--json", "this should fail"]);
+    assert!(!ok, "send without active session should fail");
+    assert!(
+        stderr.contains("\"error\""),
+        "json output should contain error field: {}",
+        stderr
+    );
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_use_by_name() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let sess = chit_start(home.path());
+    chit_ok(home.path(), &["session", "rename", &sess, "test-session"]);
+
+    // Use by name from isolated project dir
+    let out = chit_in(home.path(), Some(project.path()), &["use", "test-session"]).0;
+    assert!(
+        out.contains("Active session set"),
+        "use by name should confirm: {}",
+        out
+    );
+
+    // Send should route to the named session
+    chit_in(home.path(), Some(project.path()), &["send", "sent via name"]).2.then(|| ()).unwrap();
+    let recap = chit_ok(home.path(), &["recap", &sess]);
+    assert!(
+        recap.contains("sent via name"),
+        "message should reach the named session"
+    );
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_use_by_nonexistent_name() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    chit_start(home.path());
+
+    let (_stdout, stderr, ok) = chit_in(home.path(), Some(project.path()), &["use", "nonexistent-name"]);
+    assert!(!ok, "use by nonexistent name should fail");
+    assert!(
+        stderr.contains("nonexistent") || stderr.contains("No active"),
+        "error should mention the name: {}",
+        stderr
+    );
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_list_shows_session_name() {
+    let home = tempfile::tempdir().unwrap();
+
+    let sess = chit_start(home.path());
+    chit_ok(home.path(), &["session", "rename", &sess, "visible-name"]);
+
+    let list = chit_ok(home.path(), &["list"]);
+    assert!(
+        list.contains("visible-name"),
+        "list should show session name: {}",
+        list
+    );
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_observe_timeout() {
+    let home = tempfile::tempdir().unwrap();
+
+    let sess = chit_start(home.path());
+
+    let child = std::process::Command::new(chit_bin())
+        .env("HOME", home.path())
+        .args(&["observe", "--since", "0", "--json", "--timeout", "3"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Send a message so observe has something to see
+    chit_ok(home.path(), &["send", "--session", &sess, "observe-timeout-test"]);
+
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "observe with timeout should exit successfully"
+    );
+    assert!(
+        stdout.contains("observe-timeout-test"),
+        "observe should capture the message: {}",
+        stdout
+    );
+
+    chit_stop(home.path());
+}
+
+#[test]
 fn test_observe_streams_all_sessions() {
     let home = tempfile::tempdir().unwrap();
     let sess1 = chit_start(home.path());

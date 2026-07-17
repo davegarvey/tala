@@ -399,7 +399,7 @@ TASK
   echo "  observe eval: READY"
   echo "==========================================="
   echo ""
-  echo "Launch in order: Alpha, Beta, Gamma, then Monitor"
+  echo "Launch all in parallel: Alpha, Beta, Gamma, and Monitor"
   echo ""
   echo "### Agent Alpha prompt"
   echo '```'

@@ -545,6 +545,7 @@ struct ObserveParams {
     r#match: Option<String>,
     from: Option<String>,
     channel: Option<String>,
+    timeout_secs: Option<u64>,
 }
 
 async fn observe_events(
@@ -600,9 +601,19 @@ async fn observe_events(
     }
 
     // Then stream new events
+    let timeout_dur = params.timeout_secs.filter(|&t| t > 0).map(Duration::from_secs);
     tokio::spawn(async move {
         loop {
-            match rx.recv().await {
+            let result = if let Some(dur) = timeout_dur {
+                match tokio::time::timeout(dur, rx.recv()).await {
+                    Ok(result) => result,
+                    Err(_) => break, // timeout expired
+                }
+            } else {
+                rx.recv().await
+            };
+
+            match result {
                 Ok((session_id, event)) => {
                     let session = sessions_clone.iter().find(|s| s.id == session_id);
                     let session_name = session.and_then(|s| s.name.clone());
