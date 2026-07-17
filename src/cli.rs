@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::process;
 use std::time::Duration;
 
@@ -453,7 +453,6 @@ async fn cmd_start(message: Option<String>, json_output: bool) -> anyhow::Result
         println!("{}", serde_json::json!({"session_id": session.id}));
     } else {
         println!("{}", session.id);
-        println!("Active session set to {}", session.id);
     }
     Ok(())
 }
@@ -476,16 +475,40 @@ async fn cmd_send(
         if msg == "-" {
             let mut buf = String::new();
             std::io::stdin().read_to_string(&mut buf)?;
+            if buf.trim().is_empty() && std::io::stdin().is_terminal() {
+                anyhow::bail!("No message provided. Use a positional argument, --file <path>, or pipe to stdin");
+            }
             buf.trim_end_matches('\n').to_string()
         } else {
             msg.clone()
         }
+    } else if !std::io::stdin().is_terminal() {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        buf.trim_end_matches('\n').to_string()
     } else {
-        anyhow::bail!("No message provided. Use a positional argument, --file <path>, or pipe to stdin with `-`");
+        anyhow::bail!("No message provided. Use a positional argument, --file <path>, or pipe to stdin");
     };
 
     let (host, port) = ensure_daemon_running().await?;
-    let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "send").await?;
+
+    // Resolve session or auto-create if none exists
+    let session_id = if let Some(id) = session_arg {
+        id.to_string()
+    } else if let Some(id) = store::read_active_session().await {
+        id
+    } else {
+        let client = reqwest::Client::new();
+        let url = daemon_url(&host, port, "/api/sessions");
+        let sender = store::get_sender_name(sender_override);
+        let resp = client.post(&url).json(&CreateSessionRequest { message: None, sender: Some(sender) }).send().await?;
+        let session: CreateSessionResponse = resp.json().await?;
+        store::write_active_session(&session.id).await?;
+        if !quiet {
+            eprintln!("Created session {}", session.id);
+        }
+        session.id
+    };
 
     let sender = store::get_sender_name(sender_override);
     let client = reqwest::Client::new();
