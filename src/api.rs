@@ -42,6 +42,7 @@ pub fn create_router(store: Arc<Store>) -> Router {
         .route("/api/sessions/:id/rename", post(rename_session))
         .route("/api/sessions/:id/events", get(stream_events))
         .route("/api/sessions/wait-new", get(wait_new_session))
+        .route("/api/sessions/wait-all", get(wait_all))
         .route("/api/observe", get(observe_events))
         .route("/api/status", get(status))
         .layer(tower_http::cors::CorsLayer::permissive())
@@ -361,6 +362,39 @@ async fn wait_new_session(
         Ok(json) => (StatusCode::OK, Json(json)).into_response(),
         Err(_elapsed) => {
             (StatusCode::OK, Json(serde_json::json!({"timeout": true, "timeout_after": timeout_secs}))).into_response()
+        }
+    }
+}
+
+async fn wait_all(
+    State(state): State<AppState>,
+    Query(params): Query<WaitNewParams>,
+) -> impl IntoResponse {
+    let timeout_secs = params.timeout_secs.unwrap_or(300);
+    let mut rx = state.store.subscribe_global();
+
+    let timeout_dur = Duration::from_secs(timeout_secs);
+    let result = timeout(timeout_dur, async {
+        loop {
+            match rx.recv().await {
+                Ok((_sid, DaemonEvent::NewMessage(msg))) => {
+                    return wrap_wait(vec![msg], false, None, false);
+                }
+                Ok((_sid, DaemonEvent::SessionCreated(_))) => continue,
+                Ok((_sid, DaemonEvent::SessionClosed)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => {
+                    return wrap_wait(vec![], false, None, true);
+                }
+            }
+        }
+    })
+    .await;
+
+    match result {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(_elapsed) => {
+            (StatusCode::OK, Json(wrap_wait(vec![], true, Some(timeout_secs), false))).into_response()
         }
     }
 }

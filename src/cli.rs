@@ -590,17 +590,86 @@ async fn cmd_wait(
     json_output: bool,
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
-    let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "wait").await?;
+    let client = reqwest::Client::new();
 
     let config = store::read_user_config().await;
     let default_timeout = config["default_timeout"].as_u64().unwrap_or(300);
     let wait_timeout = timeout_secs.unwrap_or(default_timeout);
 
+    let session_id = if let Some(id) = session_arg.clone() {
+        id
+    } else if let Some(id) = store::read_active_session().await {
+        id
+    } else {
+        let url = daemon_url(&host, port, "/api/sessions");
+        let resp = client.get(&url).send().await?;
+        let sessions: Vec<SessionSummary> = resp.json().await?;
+        let active: Vec<_> = sessions.iter().filter(|s| !s.closed).collect();
+
+        match active.len() {
+            0 => {
+                if !json_output {
+                    eprintln!("No active sessions. Waiting for a new session...");
+                }
+                let new_url = daemon_url(&host, port, &format!("/api/sessions/wait-new?timeout_secs={}", wait_timeout));
+                let resp = client.get(&new_url).send().await?;
+                let result: serde_json::Value = resp.json().await?;
+                if json_output {
+                    println!("{}", serde_json::to_string(&result).unwrap());
+                    if result.get("timeout") == Some(&serde_json::json!(true)) {
+                        process::exit(2);
+                    }
+                    return Ok(());
+                }
+                let sid = result.get("session_id").and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        if result.get("timeout") == Some(&serde_json::json!(true)) {
+                            anyhow::anyhow!("timed out after {}s, no new session", result["timeout_after"].as_u64().unwrap_or(wait_timeout))
+                        } else {
+                            anyhow::anyhow!("failed to wait for new session")
+                        }
+                    })?.to_string();
+                store::write_active_session(&sid).await?;
+                eprintln!("New session: {}", sid);
+                sid
+            }
+            1 => {
+                let sid = active[0].id.clone();
+                if !json_output {
+                    eprintln!("Waiting for new messages in session {}...", sid);
+                }
+                sid
+            }
+            _ => {
+                if !json_output {
+                    eprintln!("Waiting for new messages from any session...");
+                }
+                let wait_url = daemon_url(&host, port, &format!("/api/sessions/wait-all?timeout_secs={}", wait_timeout));
+                let resp = client.get(&wait_url).send().await?;
+                let result: WaitResponse = resp.json().await?;
+                if json_output {
+                    println!("{}", serde_json::to_string(&result).unwrap());
+                    if result.timeout { process::exit(2); }
+                    return Ok(());
+                }
+                if result.timeout {
+                    println!("timeout after {}s, no new messages", result.timeout_after.unwrap_or(0));
+                    process::exit(2);
+                }
+                let _ = store::write_active_session(&result.messages[0].session_id).await;
+                for msg in &result.messages {
+                    println!("[sess {}] [{}] {} ({}):\n    {}", msg.session_id, msg.id, msg.sender, msg.timestamp.format("%H:%M:%S"), msg.content);
+                }
+                return Ok(());
+            }
+        }
+    };
+
     let since_id = if let Some(s) = since {
         s
     } else {
         let msgs_url = daemon_url(&host, port, &format!("/api/sessions/{}/messages?since=0", session_id));
-        match reqwest::Client::new().get(&msgs_url).send().await {
+        match client.get(&msgs_url).send().await {
             Ok(resp) => {
                 let msgs: Vec<Message> = resp.json().await.unwrap_or_default();
                 msgs.iter().map(|m| m.id).max().unwrap_or(0)
@@ -617,7 +686,6 @@ async fn cmd_wait(
         path = format!("{}&from={}", path, f);
     }
 
-    let client = reqwest::Client::new();
     let url = daemon_url(&host, port, &path);
     let resp = client.get(&url).send().await?;
 
