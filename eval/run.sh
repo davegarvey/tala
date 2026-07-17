@@ -196,16 +196,30 @@ TASK
   echo "  cross-project eval: READY"
   echo "==========================================="
   echo ""
-  echo "Launch these sub-agents via the Task tool:"
+  echo "Copy these into parallel Task tool calls:"
   echo ""
-  echo "  1. Agent Alpha  →  $AGENT_TASKS_DIR/cross-project/agent-alpha.md"
-  echo "  2. Agent Beta   →  $AGENT_TASKS_DIR/cross-project/agent-beta.md"
+  while IFS= read -r line; do echo "$line"; done < "$AGENT_TASKS_DIR/cross-project/agent-alpha.md" | \
+    awk '/^# Agent Alpha/{p=1} p{print}'
+  echo '```'
+  echo 'task description="Eval Agent Alpha" subagent_type="general" prompt="'
+  cat "$AGENT_TASKS_DIR/cross-project/agent-alpha.md" | sed 's/"/\\"/g'
+  echo '"'
+  echo '```'
   echo ""
-  echo "Chit daemon running with CHIT_HOME=$tmp_dir/.chit"
-  echo "PID: $(cat $BASE_DIR/tmp/daemon.pid)"
+  echo "---"
   echo ""
-  echo "Once both agents finish, run:"
-  echo "  ./eval/run.sh collect cross-project"
+  while IFS= read -r line; do echo "$line"; done < "$AGENT_TASKS_DIR/cross-project/agent-beta.md" | \
+    awk '/^# Agent Beta/{p=1} p{print}'
+  echo '```'
+  echo 'task description="Eval Agent Beta" subagent_type="general" prompt="'
+  cat "$AGENT_TASKS_DIR/cross-project/agent-beta.md" | sed 's/"/\\"/g'
+  echo '"'
+  echo '```'
+  echo ""
+  echo "CHIT_HOME=$tmp_dir/.chit"
+  echo "Daemon PID: $(cat $BASE_DIR/tmp/daemon.pid)"
+  echo ""
+  echo "After both finish:  ./eval/run.sh collect cross-project"
   echo "==========================================="
 }
 
@@ -327,19 +341,32 @@ TASK
   echo "  observe eval: READY"
   echo "==========================================="
   echo ""
-  echo "Launch these sub-agents via the Task tool:"
+  echo "Launch in order: Alpha, Beta, Gamma, then Monitor"
   echo ""
-  echo "  1. Agent Alpha  →  $AGENT_TASKS_DIR/observe/agent-alpha.md"
-  echo "  2. Agent Beta   →  $AGENT_TASKS_DIR/observe/agent-beta.md"
-  echo "  3. Agent Gamma  →  $AGENT_TASKS_DIR/observe/agent-gamma.md"
-  echo "  4. Monitor      →  $AGENT_TASKS_DIR/observe/monitor.md"
+  echo "### Agent Alpha prompt"
+  echo '```'
+  cat "$AGENT_TASKS_DIR/observe/agent-alpha.md"
+  echo '```'
   echo ""
-  echo "Launch in order: Alpha, Beta, Gamma, then Monitor (so monitor has activity to see)"
-  echo "Chit daemon running with --home $tmp_dir/.chit"
-  echo "PID: $(cat $BASE_DIR/tmp/daemon.pid)"
+  echo "### Agent Beta prompt"
+  echo '```'
+  cat "$AGENT_TASKS_DIR/observe/agent-beta.md"
+  echo '```'
   echo ""
-  echo "Once all finish, run:"
-  echo "  ./eval/run.sh collect observe"
+  echo "### Agent Gamma prompt"
+  echo '```'
+  cat "$AGENT_TASKS_DIR/observe/agent-gamma.md"
+  echo '```'
+  echo ""
+  echo "### Monitor prompt (run last)"
+  echo '```'
+  cat "$AGENT_TASKS_DIR/observe/monitor.md"
+  echo '```'
+  echo ""
+  echo "CHIT_HOME=$tmp_dir/.chit"
+  echo "Daemon PID: $(cat $BASE_DIR/tmp/daemon.pid)"
+  echo ""
+  echo "After all finish:  ./eval/run.sh collect observe"
   echo "==========================================="
 }
 

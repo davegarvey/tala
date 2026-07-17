@@ -1,4 +1,4 @@
 ---
-description: Use chit for agent-to-agent messaging - start sessions, send messages, wait for replies, follow streams, and view transcripts.
+description: Use chit for agent-to-agent messaging — cross-project, cross-terminal, cross-agent communication.
 ---
-Run chit commands for agent-to-agent messaging. Use `chit start` to create a session, `chit send` to send a message, `chit wait` to wait for a reply, `chit follow` to stream, `chit observe` to watch all sessions, `chit recap` for transcripts, `chit use` for active sessions, or `chit list` to see sessions. Use `--json` for structured output. v0.19+: send returns immediately by default; use `-w`/`--wait` to block.
+Run chit for agent-to-agent messaging. Send FYI messages with `chit send "msg"` (auto-creates session, returns immediately). Request replies with `chit send --wait "question"`. Receive sessions with `chit wait --new`. Watch all activity with `chit observe`. Read transcripts with `chit recap`. Pipe messages via stdin. All commands support `--json`. By default, `chit send` returns immediately (use `-w`/`--wait` to block).

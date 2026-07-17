@@ -341,39 +341,43 @@ async fn install_opencode_skills() -> anyhow::Result<()> {
     let skill_path = skill_dir.join("SKILL.md");
     let skill = r#"---
 name: chit
-description: Agent-to-agent messaging for AI coding tools. Use when you need to communicate with agents in other sessions, send messages between agents, or coordinate multi-agent workflows.
+description: Agent-to-agent messaging for AI coding tools. Use to communicate with agents across projects, terminals, or sessions.
 license: MIT
-compatibility: Requires chit CLI (agent-to-agent messaging tool)
+compatibility: Requires chit CLI v0.23+
 metadata:
   author: chit
-  version: "1.0"
+  version: "2.0"
 ---
 # chit — Agent-to-Agent Messaging
 
-You have access to `chit`, a CLI tool for communicating with agents in other sessions.
+Send FYI messages with `chit send "msg"` (auto-creates session, returns immediately).
+Request replies with `chit send --wait "question"`. Receive sessions with `chit wait --new`.
+Pipe messages: `echo "msg" | chit send`. All commands support `--json`.
 
-## Commands
+## Common Patterns
 
-- `chit start [message]` — Start a new session (optionally with initial message). Outputs a session ID like `sess_abc12`.
-- `chit chat [session] <message>` — Send a message in markdown format. Returns immediately by default. Use `-w` or `--wait` to block for a reply.
-- `chit wait [session]` — Block until a new message arrives. Use `--timeout <secs>` to set a timeout. Use `--since <id>` for delta reads, `--from <sender>` to filter by sender, `--limit <n>` to cap results.
-- `chit follow [session]` — Stream new messages as they arrive (SSE). Use `--since <id>` to catch up, `--timeout <secs>` to auto-disconnect.
-- `chit recap [session]` — View the full conversation transcript. Use `--since <id>` and `--limit <n>` for pagination.
-- `chit close [session]` — Close a session.
-- `chit session list` — List all sessions (alias for chit list).
-- `chit session show <id>` — Show session details.
-- `chit session close <id>` — Close a session by ID.
-- `chit use [session-id]` — Set or show the active session for this project. Use `chit use --clear` to unset.
+| Task | Command |
+|---|---|
+| Broadcast FYI | `chit send "status: done"` |
+| Request + wait | `chit send --wait "need help" --timeout 300` |
+| Wait for incoming | `sess=$(chit wait --new --timeout 600)` |
+| Read transcript | `chit recap` |
+| Named session | `chit start --name "my-project"` |
+| Watch all | `chit observe` |
+| Filtered watch | `chit observe --from "alpha" --match "urgent"` |
 
-## JSON Output
-
-All commands support `--json` for structured output.
+## Key Behaviors (v0.23+)
+- Send returns immediately by default (fire-and-forget). Use `-w`/`--wait` to block.
+- `chit send "msg"` auto-creates session if none exists.
+- Active session is auto-set per project directory (`.chit/active-session`).
+- `chit wait` without `--since` only waits for new messages (no history replay).
+- `chit wait --new` blocks until another agent creates a session.
+- `CHIT_HOME` env var overrides `~/.chit` for isolated daemon instances.
 
 ## Guidelines
-
-- Format messages in **markdown** — use code blocks with language tags, file references as `path/file:line`, and links where useful.
-- Include relevant context: error messages, file paths, stack traces, code snippets.
-- JSON responses include a `cursor` field with the last message ID — use with `--since` for pagination.
+- Use **markdown** in messages — code blocks, file refs `path/file:line`.
+- Include relevant context: errors, stack traces, snippets.
+- Sessions are ephemeral (in-memory daemon).
 "#;
     tokio::fs::write(&skill_path, skill).await?;
     println!("Created .opencode/skills/chit/SKILL.md");
@@ -382,9 +386,9 @@ All commands support `--json` for structured output.
     tokio::fs::create_dir_all(&commands_dir).await?;
     let command_path = commands_dir.join("chit.md");
     let command = r#"---
-description: Use chit for agent-to-agent messaging - start sessions, send messages, wait for replies, follow streams, and view transcripts.
+description: Use chit for agent-to-agent messaging — cross-project, cross-terminal, cross-agent communication.
 ---
-Run chit commands for agent-to-agent messaging. Use `chit start` to create a session, `chit chat` to send a message (returns immediately by default; use `-w`/`--wait` to block for a reply), `chit wait` to wait for a reply, `chit follow` to stream messages, `chit recap` to view a transcript, `chit observe` to watch all sessions, or `chit use` to set the active session. Use `--json` for structured output.
+Run chit for agent-to-agent messaging. Send FYI with `chit send "msg"` (auto-creates session, returns immediately). Request replies with `chit send --wait "question"`. Receive with `chit wait --new`. Watch all with `chit observe`. Pipe messages via stdin. Use `--json` for structured output.
 "#;
     tokio::fs::write(&command_path, command).await?;
     println!("Created .opencode/commands/chit.md");

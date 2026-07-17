@@ -2,41 +2,154 @@
 name: chit
 description: Agent-to-agent messaging for AI coding tools. Use when you need to communicate with agents in other sessions, send messages between agents, or coordinate multi-agent workflows.
 license: MIT
-compatibility: Requires chit CLI (agent-to-agent messaging tool)
+compatibility: Requires chit CLI (agent-to-agent messaging tool) v0.23+
 metadata:
   author: chit
-  version: "1.1"
+  version: "2.0"
 ---
 # chit — Agent-to-Agent Messaging
 
-You have access to `chit`, a CLI tool for communicating with agents in other sessions.
+You have access to `chit`, a CLI tool for communicating with agents in other sessions (projects, terminals, or even machines running the same daemon).
 
-## Commands
+## Quick Start
 
-- `chit start [message]` — Start a new session (optionally with initial message). Outputs a session ID like `sess_abc12`.
-- `chit send [message]` — Send a message. Returns immediately by default. Use `-w`/`--wait` to block for a reply. Use `--session <id>` or set an active session with `chit use <id>`. Use `--file <path>` or `-` for stdin. Use `--as <name>` to override sender. Use `-q`/`--quiet` to suppress confirmation.
-- `chit wait [session]` — Block until a new message arrives. Use `--timeout <secs>` to set a timeout. Use `--since <id>` for delta reads, `--from <sender>` to filter by sender, `--limit <n>` to cap results (0 = unlimited).
-- `chit follow [session]` — Stream new messages as they arrive (SSE). Use `--since <id>` to catch up, `--timeout <secs>` to auto-disconnect, `--limit 0` for unlimited.
-- `chit recap [session]` — View the full conversation transcript. Use `--since <id>` and `--limit <n>` for pagination (0 = unlimited).
-- `chit close [session]` — Close a session.
-- `chit observe` — Watch **all sessions** globally. Use `--channel <id>` to watch a specific session, `--match <pattern>` to filter messages, `--from <sender>` to filter by sender, `--since <id>` to replay from a point.
-- `chit use <id>` — Set an active session for this project (saved per-directory). Use `chit use --clear` to unset.
-- `chit list` — List all sessions.
-- `chit init [name]` — Initialize chit in this project (creates `.chit/config.json`).
+```bash
+# Send a message (auto-creates session, returns immediately)
+chit send "starting work on the API endpoint"
 
-## Key Behaviors (v0.19+)
+# Send more messages (uses active session)
+chit send "tests passing"
 
-- **`chit send` returns immediately** by default (no-wait). Messages are fire-and-forget.
-- To block for a reply, use `-w` or `--wait`. You'll see `⏎ Waiting for reply...` while waiting.
-- Active session: use `chit use <id>` to avoid `--session` on every send. Saved per project directory.
-- `--file <path>` reads message from a file; use `-` as message to read from stdin.
+# Wait for a reply from another agent
+chit send --wait "need help with the CSV parser" --timeout 300
 
-## JSON Output
+# Read the conversation so far
+chit recap
+```
 
-All commands support `--json` for structured output. JSON responses include a `cursor` field with the last message ID — use with `--since` for pagination.
+## Command Reference
+
+| Command | What it does |
+|---|---|
+| `chit send <msg>` | Send a message. Auto-creates session if none exists. Returns immediately. |
+| `chit send -w <msg>` | Send and block for a reply (shows `⏎ Waiting for reply...`). |
+| `chit wait` | Block until a new message arrives in the active session. |
+| `chit wait --new` | Block until *another agent* creates a new session (for receiving side). |
+| `chit recap` | View the full conversation transcript for the active session. |
+| `chit observe` | Stream all messages from all sessions in real time. |
+| `chit start --name "label"` | Create a named session (name appears in list/observe). |
+| `chit list` | List all sessions with status and message count. |
+| `chit close` | Close the active session. |
+| `chit use <id>` | Set active session for this project directory. |
+| `chit session rename <id> <name>` | Name an existing session. |
+| `chit init <name>` | Initialize chit config for this project. |
+
+## Common Flags
+
+| Flag | Works on |
+|---|---|
+| `-s, --session <id>` | send, wait, recap, close, follow |
+| `-w, --wait` | send (block for reply) |
+| `--new` | wait (block for new session) |
+| `--as <name>` | send (override sender name) |
+| `--timeout <secs>` | send, wait (default 300) |
+| `--since <id>` | wait, recap, follow, observe (delta reads) |
+| `-j, --json` | all commands |
+| `-q, --quiet` | send (suppress confirmation) |
+| `--file <path>` | send (read message from file) |
+| `-n, --name <label>` | start (session name) |
+
+## Key Behaviors (v0.23+)
+
+- **Send returns immediately** by default. Messages are fire-and-forget.
+- **No `chit start` needed** — `chit send "msg"` auto-creates a session if none is active.
+- **`chit send` reads piped stdin** automatically: `echo "msg" | chit send`.
+- **`wait` without `--since`** only waits for new messages (no history replay).
+- **Active session** is auto-set after `chit send` or `chit start`. Saved per project directory (`.chit/active-session`).
+- **`CHIT_HOME` env var** overrides `~/.chit` for isolated daemon instances.
+- **`chit start --name "proj"`** creates a named session for easier identification.
+
+## Best Practices (from eval validation)
+
+### FYI messages (broadcast)
+```bash
+chit send "status: API endpoint done"
+chit send "found the bug in parse_row"
+```
+No reply needed. Other agents check when ready.
+
+### Request-reply (wait for answer)
+```bash
+chit send --wait "Help: CSV parser bug with quoted fields" --timeout 300
+```
+Blocks until the other agent replies. Shows `⏎ Waiting for reply...`.
+
+### Receiving side (wait for incoming work)
+```bash
+while true; do
+  sess=$(chit wait --new --timeout 600)
+  chit recap "$sess"
+  chit send "$sess" "here's the fix"
+done
+```
+No polling needed. Blocks until another agent creates a session.
+
+### Cross-project (multi-directory)
+```bash
+# In project-alpha:
+chit send "bug in your code"                    # session auto-created
+# In project-beta (different CWD):
+chit list --json                                 # find the session
+chit use sess_abc12                              # set active
+chit send "fix is in parse_row"                  # reply
+```
+
+### Monitoring (observe all sessions)
+```bash
+chit observe                                     # watch everything
+chit observe --channel sess_abc12                # watch one session
+chit observe --from "alpha"                      # watch one sender
+chit observe --match "urgent"                    # watch for keywords
+```
+
+### Scripting (JSON output)
+```bash
+sess=$(chit send --json "start task" | jq -r '.session_id')
+chit wait --session "$sess" --since 0 --json | jq '.messages[]'
+```
+
+## Standard Workflows
+
+### Single-agent, single session (most common)
+```bash
+chit send "starting"          # auto-creates session
+chit send "progress update"   # uses active session
+chit send "done"              # uses active session
+```
+
+### Two-agent collaboration (eval-validated)
+```bash
+# Agent A (sending request):
+chit send --wait "need help with X" --timeout 300
+
+# Agent B (receiving, could be in another terminal/project):
+sess=$(chit wait --new --timeout 600)
+chit recap "$sess"
+chit send "$sess" "here's the fix"
+```
+
+### Named sessions for multi-project awareness
+```bash
+chit start --name "alpha-api" "building endpoint"
+chit start --name "beta-schema" "reviewing data format"
+chit observe    # shows [alpha-api] and [beta-schema] instead of opaque IDs
+```
 
 ## Guidelines
 
-- Format messages in **markdown** — use code blocks with language tags, file references as `path/file:line`, and links where useful.
-- Include relevant context: error messages, file paths, stack traces, code snippets.
-- When using `chit send` without `--wait`, the other agent must actively check for messages using `chit wait` or `chit recaps`.
+- Use **markdown** in messages — code blocks with language tags, file refs as `path/file:line`.
+- Include relevant context: errors, file paths, stack traces, snippets.
+- For long messages, pipe from file: `cat report.md | chit send`.
+- Use `--as <name>` when you want a different sender identity.
+- Sessions are **ephemeral** (in-memory daemon). Restarting the daemon loses state.
+- `chit recap` shows history, `chit wait` shows only new messages.
