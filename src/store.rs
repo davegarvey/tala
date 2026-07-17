@@ -258,6 +258,36 @@ pub async fn remove_daemon_json() {
     let _ = tokio::fs::remove_file(&path).await;
 }
 
+pub fn local_active_session_path() -> PathBuf {
+    PathBuf::from(".chit").join("active-session")
+}
+
+pub async fn read_active_session() -> Option<String> {
+    let path = local_active_session_path();
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => {
+            let s = content.trim().to_string();
+            if s.is_empty() { None } else { Some(s) }
+        }
+        Err(_) => None,
+    }
+}
+
+pub async fn write_active_session(session_id: &str) -> anyhow::Result<()> {
+    let path = local_active_session_path();
+    tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+    tokio::fs::write(&path, session_id).await?;
+    Ok(())
+}
+
+pub async fn clear_active_session() -> anyhow::Result<()> {
+    let path = local_active_session_path();
+    if path.exists() {
+        tokio::fs::remove_file(&path).await?;
+    }
+    Ok(())
+}
+
 pub async fn read_project_config() -> Option<String> {
     let path = local_config_path();
     let content = tokio::fs::read_to_string(&path).await.ok()?;

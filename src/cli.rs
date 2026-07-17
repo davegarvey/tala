@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::process;
 use std::time::Duration;
 
@@ -37,17 +38,28 @@ pub enum Commands {
     Start {
         message: Option<String>,
     },
+    Use {
+        session_id: Option<String>,
+        #[arg(long)]
+        clear: bool,
+        #[arg(long, short = 'j')]
+        json: bool,
+    },
     #[command(alias = "send")]
     Chat {
-        message: String,
+        message: Option<String>,
+        #[arg(long)]
+        file: Option<String>,
         #[arg(long, short)]
         session: Option<String>,
-        #[arg(long, short)]
-        ff: bool,
+        #[arg(long = "no-wait", short = 'n', alias = "ff")]
+        no_wait: bool,
         #[arg(long = "as", name = "sender_name")]
         sender_name: Option<String>,
         #[arg(long, short = 'j')]
         json: bool,
+        #[arg(long, short = 'q')]
+        quiet: bool,
         #[arg(long)]
         timeout: Option<u64>,
     },
@@ -146,8 +158,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init { name } => cmd_init(name).await,
         Commands::Start { message } => cmd_start(message).await,
-        Commands::Chat { message, session, ff, sender_name, json, timeout } => {
-            cmd_send(session, &message, ff, sender_name.as_deref(), json, timeout).await
+        Commands::Use { session_id, clear, json } => cmd_use(session_id, clear, json).await,
+        Commands::Chat { message, file, session, no_wait, sender_name, json, quiet, timeout } => {
+            cmd_send(session, message, file, no_wait, sender_name.as_deref(), json, quiet, timeout).await
         }
         Commands::Wait { session, session_arg, timeout, since, limit, from, json } => {
             cmd_wait(session.or(session_arg), timeout, since, limit, from, json).await
@@ -210,6 +223,10 @@ async fn resolve_session_id(
         return Ok(id.to_string());
     }
 
+    if let Some(id) = store::read_active_session().await {
+        return Ok(id);
+    }
+
     let url = daemon_url(host, port, "/api/sessions");
     let resp = reqwest::get(&url).await?;
     let sessions: Vec<SessionSummary> = resp.json().await?;
@@ -221,7 +238,7 @@ async fn resolve_session_id(
         _ => {
             let ids: Vec<&str> = active.iter().map(|s| s.id.as_str()).collect();
             bail!(
-                "Multiple active sessions: {}. Specify one with `chit {} <session>`",
+                "Multiple active sessions: {}. Specify one with `chit {} <session>` or set one with `chit use <session>`",
                 ids.join(", "),
                 cmd_name
             );
@@ -278,7 +295,7 @@ You have access to `chit`, a CLI tool for communicating with agents in other ses
 ## Commands
 
 - `chit start [message]` — Start a new session (optionally with initial message). Outputs a session ID like `sess_abc12`.
-- `chit chat [session] <message>` — Send a message in markdown format. Blocks for a reply by default. Use `--ff` to fire-and-forget.
+- `chit chat [session] <message>` — Send a message in markdown format. Blocks for a reply by default. Use `--no-wait` (`-n`, or `--ff`) to fire-and-forget.
 - `chit wait [session]` — Block until a new message arrives. Use `--timeout <secs>` to set a timeout. Use `--since <id>` for delta reads, `--from <sender>` to filter by sender, `--limit <n>` to cap results.
 - `chit follow [session]` — Stream new messages as they arrive (SSE). Use `--since <id>` to catch up, `--timeout <secs>` to auto-disconnect.
 - `chit recap [session]` — View the full conversation transcript. Use `--since <id>` and `--limit <n>` for pagination.
@@ -286,6 +303,7 @@ You have access to `chit`, a CLI tool for communicating with agents in other ses
 - `chit session list` — List all sessions (alias for chit list).
 - `chit session show <id>` — Show session details.
 - `chit session close <id>` — Close a session by ID.
+- `chit use [session-id]` — Set or show the active session for this project. Use `chit use --clear` to unset.
 
 ## JSON Output
 
@@ -306,10 +324,50 @@ All commands support `--json` for structured output.
     let command = r#"---
 description: Use chit for agent-to-agent messaging - start sessions, send messages, wait for replies, follow streams, and view transcripts.
 ---
-Run chit commands for agent-to-agent messaging. Use `chit start` to create a session, `chit chat` to send a message, `chit wait` to wait for a reply, `chit follow` to stream messages, or `chit recap` to view a transcript. Use `--json` for structured output.
+Run chit commands for agent-to-agent messaging. Use `chit start` to create a session, `chit chat` to send a message (use `--no-wait`/`-n` to fire-and-forget, `--file` to read from file), `chit wait` to wait for a reply, `chit follow` to stream messages, `chit recap` to view a transcript, or `chit use` to set the active session. Use `--json` for structured output.
 "#;
     tokio::fs::write(&command_path, command).await?;
     println!("Created .opencode/commands/chit.md");
+    Ok(())
+}
+
+async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> anyhow::Result<()> {
+    if clear {
+        store::clear_active_session().await?;
+        if json_output {
+            println!("{}", serde_json::json!({"status": "cleared"}));
+        } else {
+            println!("Active session cleared");
+        }
+        return Ok(());
+    }
+
+    if let Some(id) = session_id {
+        store::write_active_session(&id).await?;
+        if json_output {
+            println!("{}", serde_json::json!({"session_id": id, "status": "active"}));
+        } else {
+            println!("Active session set to {}", id);
+        }
+        return Ok(());
+    }
+
+    match store::read_active_session().await {
+        Some(id) => {
+            if json_output {
+                println!("{}", serde_json::json!({"session_id": id}));
+            } else {
+                println!("Active session: {}", id);
+            }
+        }
+        None => {
+            if json_output {
+                println!("{}", serde_json::json!({"session_id": null}));
+            } else {
+                println!("No active session set. Use `chit use <session-id>` to set one.");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -337,12 +395,30 @@ async fn cmd_start(message: Option<String>) -> anyhow::Result<()> {
 
 async fn cmd_send(
     session_arg: Option<String>,
-    content: &str,
+    message: Option<String>,
+    file: Option<String>,
     fire_and_forget: bool,
     sender_override: Option<&str>,
     json_output: bool,
+    quiet: bool,
     chat_timeout: Option<u64>,
 ) -> anyhow::Result<()> {
+    let content = if let Some(f) = file {
+        tokio::fs::read_to_string(&f).await?
+            .trim_end_matches('\n')
+            .to_string()
+    } else if let Some(msg) = &message {
+        if msg == "-" {
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf.trim_end_matches('\n').to_string()
+        } else {
+            msg.clone()
+        }
+    } else {
+        anyhow::bail!("No message provided. Use a positional argument, --file <path>, or pipe to stdin with `-`");
+    };
+
     let (host, port) = ensure_daemon_running().await?;
     let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "send").await?;
 
@@ -364,6 +440,8 @@ async fn cmd_send(
     if fire_and_forget {
         if json_output {
             println!("{}", serde_json::to_string(&msg).unwrap());
+        } else if !quiet {
+            println!("✓ Sent message {} to session {}", msg.id, msg.session_id);
         }
         return Ok(());
     }

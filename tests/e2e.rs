@@ -664,6 +664,151 @@ fn test_nonexistent_session_wait_fails() {
 }
 
 #[test]
+fn test_no_wait_flag_instead_of_ff() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    let (stdout, _stderr, ok) = chit(home.path(), &[
+        "send", "--session", &sess, "--no-wait", "sent with --no-wait",
+    ]);
+    assert!(ok, "--no-wait should work");
+    assert!(stdout.contains("Sent message"), "should show confirmation: {}", stdout);
+
+    let recap = chit_ok(home.path(), &["recap", &sess]);
+    assert!(recap.contains("--no-wait"), "message should be in recap");
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_ff_alias_still_works() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    let (stdout, _stderr, ok) = chit(home.path(), &[
+        "send", "--session", &sess, "--ff", "sent with old --ff alias",
+    ]);
+    assert!(ok, "--ff alias should still work");
+    assert!(stdout.contains("Sent message"), "should show confirmation: {}", stdout);
+
+    let recap = chit_ok(home.path(), &["recap", &sess]);
+    assert!(recap.contains("old --ff"), "message should be in recap");
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_send_quiet_flag() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    let (stdout, _stderr, ok) = chit(home.path(), &[
+        "send", "--session", &sess, "--no-wait", "--quiet", "quiet message",
+    ]);
+    assert!(ok, "--quiet should still succeed");
+    assert!(!stdout.contains("Sent"), "should not print confirmation: {:?}", stdout);
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_send_file_flag() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    let msg_path = home.path().join("msg.txt");
+    std::fs::write(&msg_path, "message from file with **markdown**").unwrap();
+
+    let (stdout, _stderr, ok) = chit(home.path(), &[
+        "send", "--session", &sess, "--no-wait", "--file",
+        msg_path.to_str().unwrap(),
+    ]);
+    assert!(ok, "--file should work");
+    assert!(stdout.contains("Sent message"), "should show confirmation");
+
+    let recap = chit_ok(home.path(), &["recap", &sess, "--json"]);
+    assert!(recap.contains("**markdown**"), "file content should be in recap");
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_use_set_and_clear() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    // Set active session
+    let out = chit_ok(home.path(), &["use", &sess]);
+    assert!(out.contains("Active session set"), "should confirm: {}", out);
+
+    // Show active session
+    let out = chit_ok(home.path(), &["use"]);
+    assert!(out.contains(&sess), "should show session: {}", out);
+
+    // Send without --session should use active session
+    chit_ok(home.path(), &["send", "--no-wait", "sent via active session"]);
+
+    let recap = chit_ok(home.path(), &["recap", &sess]);
+    assert!(recap.contains("active session"), "message should be in session");
+
+    // Clear
+    let out = chit_ok(home.path(), &["use", "--clear"]);
+    assert!(out.contains("cleared"), "should confirm clear: {}", out);
+
+    // Verify cleared
+    let (stdout, _stderr, ok) = chit(home.path(), &["use"]);
+    assert!(ok);
+    assert!(!stdout.contains(&sess), "should not show session after clear");
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_use_json_output() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    let out = chit_ok(home.path(), &["use", &sess, "--json"]);
+    assert!(out.contains("\"session_id\""), "json should have session_id: {}", out);
+    assert!(out.contains(&sess), "json should contain session id");
+
+    let out = chit_ok(home.path(), &["use", "--json"]);
+    assert!(out.contains("\"session_id\""), "json show should have session_id");
+
+    let out = chit_ok(home.path(), &["use", "--clear", "--json"]);
+    assert!(out.contains("\"status\""), "json clear should have status");
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_send_stdin() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(chit_bin())
+        .env("HOME", home.path())
+        .args(&["send", "--session", &sess, "--no-wait", "--quiet", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start chit");
+
+    child.stdin.take().unwrap().write_all(b"piped stdin message").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "stdin send should succeed");
+
+    let recap = chit_ok(home.path(), &["recap", &sess]);
+    assert!(recap.contains("piped stdin message"), "stdin message should be in recap");
+
+    chit_stop(home.path());
+}
+
+#[test]
 fn test_follow_streams_messages() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
