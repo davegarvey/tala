@@ -64,8 +64,8 @@ pub enum Commands {
         file: Option<String>,
         #[arg(long, short, help = "Session ID (uses active session if set)")]
         session: Option<String>,
-        #[arg(long = "no-wait", short = 'n', help = "Fire-and-forget: don't wait for a reply")]
-        no_wait: bool,
+        #[arg(long, short = 'w', help = "Wait for a reply after sending (default: return immediately)")]
+        wait: bool,
         #[arg(long = "as", name = "sender_name", help = "Override the sender name")]
         sender_name: Option<String>,
         #[arg(long, short = 'j', help = "Output in JSON format")]
@@ -158,7 +158,7 @@ pub enum Commands {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
-    /// Stop the daemon
+    /// Stop the background daemon process
     Stop,
     #[command(hide = true)]
     Daemon,
@@ -206,8 +206,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Init { name } => cmd_init(name).await,
         Commands::Start { message } => cmd_start(message).await,
         Commands::Use { session_id, clear, json } => cmd_use(session_id, clear, json).await,
-        Commands::Chat { message, file, session, no_wait, sender_name, json, quiet, timeout } => {
-            cmd_send(session, message, file, no_wait, sender_name.as_deref(), json, quiet, timeout).await
+        Commands::Chat { message, file, session, wait, sender_name, json, quiet, timeout } => {
+            cmd_send(session, message, file, wait, sender_name.as_deref(), json, quiet, timeout).await
         }
         Commands::Wait { session, session_arg, timeout, since, limit, from, json } => {
             cmd_wait(session.or(session_arg), timeout, since, limit, from, json).await
@@ -345,7 +345,7 @@ You have access to `chit`, a CLI tool for communicating with agents in other ses
 ## Commands
 
 - `chit start [message]` — Start a new session (optionally with initial message). Outputs a session ID like `sess_abc12`.
-- `chit chat [session] <message>` — Send a message in markdown format. Blocks for a reply by default. Use `--no-wait` (`-n`, or `--ff`) to fire-and-forget.
+- `chit chat [session] <message>` — Send a message in markdown format. Returns immediately by default. Use `-w` or `--wait` to block for a reply.
 - `chit wait [session]` — Block until a new message arrives. Use `--timeout <secs>` to set a timeout. Use `--since <id>` for delta reads, `--from <sender>` to filter by sender, `--limit <n>` to cap results.
 - `chit follow [session]` — Stream new messages as they arrive (SSE). Use `--since <id>` to catch up, `--timeout <secs>` to auto-disconnect.
 - `chit recap [session]` — View the full conversation transcript. Use `--since <id>` and `--limit <n>` for pagination.
@@ -374,7 +374,7 @@ All commands support `--json` for structured output.
     let command = r#"---
 description: Use chit for agent-to-agent messaging - start sessions, send messages, wait for replies, follow streams, and view transcripts.
 ---
-Run chit commands for agent-to-agent messaging. Use `chit start` to create a session, `chit chat` to send a message (use `--no-wait`/`-n` to fire-and-forget, `--file` to read from file), `chit wait` to wait for a reply, `chit follow` to stream messages, `chit recap` to view a transcript, or `chit use` to set the active session. Use `--json` for structured output.
+Run chit commands for agent-to-agent messaging. Use `chit start` to create a session, `chit chat` to send a message (returns immediately by default; use `-w`/`--wait` to block for a reply), `chit wait` to wait for a reply, `chit follow` to stream messages, `chit recap` to view a transcript, `chit observe` to watch all sessions, or `chit use` to set the active session. Use `--json` for structured output.
 "#;
     tokio::fs::write(&command_path, command).await?;
     println!("Created .opencode/commands/chit.md");
@@ -447,7 +447,7 @@ async fn cmd_send(
     session_arg: Option<String>,
     message: Option<String>,
     file: Option<String>,
-    fire_and_forget: bool,
+    should_wait: bool,
     sender_override: Option<&str>,
     json_output: bool,
     quiet: bool,
@@ -487,7 +487,7 @@ async fn cmd_send(
 
     let msg: SendMessageResponse = resp.json().await?;
 
-    if fire_and_forget {
+    if !should_wait {
         if json_output {
             println!("{}", serde_json::to_string(&msg).unwrap());
         } else if !quiet {
@@ -496,6 +496,10 @@ async fn cmd_send(
         return Ok(());
     }
 
+    if !json_output && !quiet {
+        eprint!("⏎ Waiting for reply...");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+    }
     let mut wait_url = format!("/api/sessions/{}/wait?since={}", session_id, msg.id);
     if let Some(to) = chat_timeout {
         wait_url = format!("{}&timeout_secs={}", wait_url, to);
@@ -504,6 +508,9 @@ async fn cmd_send(
     let wait_resp = client.get(&wait_url).send().await?;
     let result: WaitResponse = wait_resp.json().await?;
 
+    if !json_output && !quiet {
+        eprintln!(); // clear the "Waiting for reply..." line
+    }
     if json_output {
         println!("{}", serde_json::to_string(&result).unwrap());
         if result.timeout { process::exit(2); }
