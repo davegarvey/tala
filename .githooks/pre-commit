@@ -1,0 +1,5 @@
+#!/bin/sh
+# Pre-commit hook — reject unformatted Rust code.
+set -e
+
+cargo fmt --all -- --check
