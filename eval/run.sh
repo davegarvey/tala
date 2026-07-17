@@ -120,32 +120,62 @@ PY
 
 You are in project-alpha at: $tmp_dir/project-alpha
 
-## Context
-You have a CSV parser bug to fix. A data-schema expert (project-beta) can help.
-Use chit to communicate with them. The chit binary is at: $CHIT_BIN
+## Your Role
+You're a developer maintaining project-alpha. Your code depends on a library
+maintained by the agent in project-beta. You've noticed a CSV parsing bug
+and need to coordinate with them to get it fixed.
 
-Before starting, make sure chit is on your PATH or use the full path above.
+## This Is an Eval!
+Your real job is to evaluate the **chit tool itself**. chit is an agent-to-agent
+messaging tool. Try it out, explore its features, and report what worked and
+what didn't. Your feedback directly shapes the product.
 
-## Your Task
-1. Read README.md and process.py to understand the bug
-2. Use chit to start a session and send a message to the other agent describing the bug
-3. Wait for their reply, apply the fix, verify it works
-4. Write feedback to $RESULTS_DIR/cross-project-feedback.md (append, don't overwrite)
+The chit binary is at: $CHIT_BIN
 
-### Suggested chit workflow
+Before starting, export CHIT_HOME:
 \`\`\`
-chit start "Help: CSV parser bug with quoted fields"
-chit send --session <id> "row.split(',') breaks on 'New York, NY'"
-chit wait --session <id>
+export CHIT_HOME=$tmp_dir/.chit
 \`\`\`
 
-### Feedback questions to answer
-- How easy was it to start using chit?
-- How intuitive were send, wait, recap?
-- Was there any confusion about the API (flags, defaults, session management)?
-- What was the most frustrating part?
-- What would you change or improve?
-- Did the tool help or hinder collaboration?
+## Scenario
+1. Read README.md and process.py to understand the CSV parsing bug
+2. Use chit to collaborate with the expert in project-beta
+3. Apply the fix and verify it works
+
+**But don't just follow a script** — explore chit's commands and see what you
+discover. Try things like starting sessions, sending with and without flags,
+checking session status, listing sessions, renaming, closing, using recap,
+sending files, JSON output, timeout options, etc. This is your chance to kick
+the tires.
+
+### chit commands to explore
+\`\`\`
+chit start <message>          Start a new session
+chit send <message>           Send a message (uses active session by default)
+chit wait                     Wait for new messages (sets active session)
+chit recap                    Read the full conversation
+chit list                     List all sessions
+chit status                   Show session status
+chit use <id>                 Set the active session
+chit close <id>               Close a session
+chit session rename <id> <name>  Give a session a name
+chit follow                   Stream new messages live
+chit observe                  Watch all sessions (multi-agent)
+\`\`\`
+
+Try as many as you can. You don't need to use them all, but the more you
+try, the better the feedback.
+
+### Feedback (return inline)
+After your collaboration, return your feedback as part of your final message
+(not written to a file). Answer honestly:
+
+- What commands and features did you try?
+- Which were intuitive? Which were confusing?
+- What was the most frustrating moment?
+- What surprised you (good or bad)?
+- If you could change one thing, what would it be?
+- Did using chit feel natural for agent-to-agent collaboration?
 
 Start your feedback with:
 ## Feedback from Agent Alpha (project-alpha)
@@ -156,39 +186,70 @@ TASK
 
 You are in project-beta at: $tmp_dir/project-beta
 
-## Context
-You are a data-schema expert. An agent in project-alpha will contact you via chit
-about a CSV parsing bug. Help them fix it.
+## Your Role
+You're a domain expert on the CSV schema used across projects. The agent in
+project-alpha maintains a library that depends on your project, and they've
+found a bug they need your help with.
+
+## This Is an Eval!
+Your real job is to evaluate the **chit tool itself**. chit is an agent-to-agent
+messaging tool. Try it out, explore its features, and report what worked and
+what didn't. Your feedback directly shapes the product.
 
 The chit binary is at: $CHIT_BIN
 
-## Your Task
+Before starting, export CHIT_HOME:
+\`\`\`
+export CHIT_HOME=$tmp_dir/.chit
+\`\`\`
+
+## Scenario
 1. Read README.md to understand the CSV data format
-2. Wait for a message from project-alpha via chit (use \`chit wait\` or check for messages)
-3. Diagnose the bug and tell them the exact fix
-4. Write feedback to $RESULTS_DIR/cross-project-feedback.md (append, don't overwrite)
+2. Watch for a message from project-alpha via chit
+3. Diagnose the bug and help them fix it
 
-### Suggested chit workflow
+**But don't just follow a script** — explore chit's commands and see what you
+discover. Try things like waiting for messages with options, checking session
+status, listing active sessions, sending files, using recap to review the full
+conversation, renaming sessions, JSON output, etc. This is your chance to
+kick the tires.
+
+### chit commands to explore
 \`\`\`
-# Wait for someone to contact you (they'll start a session first)
-chit list --json   # see what sessions exist
-chit recap --session <id>   # read the messages
-chit send --session <id> "The fix is to remove parse_row and use csv.reader directly"
+chit wait                     Wait for new messages (sets active session)
+chit send <message>           Send a message (uses active session by default)
+chit recap                    Read the full conversation
+chit list                     List all sessions
+chit status                   Show session status
+chit use <id>                 Set the active session
+chit close <id>               Close a session
+chit session rename <id> <name>  Give a session a name
+chit follow                   Stream new messages live
+chit start <message>          Start a new session
+chit observe                  Watch all sessions (multi-agent)
 \`\`\`
 
-### Feedback questions to answer
-- How easy was it to receive and reply to messages?
-- How intuitive were the commands?
-- Was anything confusing or surprising?
-- What would you improve?
-- Did the tool help or hinder collaboration?
+Try as many as you can. You don't need to use them all, but the more you
+try, the better the feedback.
+
+### Feedback (return inline)
+After your collaboration, return your feedback as part of your final message
+(not written to a file). Answer honestly:
+
+- What commands and features did you try?
+- Which were intuitive? Which were confusing?
+- What was the most frustrating moment?
+- What surprised you (good or bad)?
+- If you could change one thing, what would it be?
+- Did using chit feel natural for agent-to-agent collaboration?
 
 Start your feedback with:
 ## Feedback from Agent Beta (project-beta)
 TASK
 
-  # Start the daemon
-  CHIT_HOME="$tmp_dir/.chit" $CHIT_BIN daemon 2>/dev/null &
+  # Start the daemon (nohup + disown so the bash tool doesn't kill it on timeout)
+  CHIT_HOME="$tmp_dir/.chit" nohup "$CHIT_BIN" daemon > /dev/null 2>&1 &
+  disown
   echo $! > "$BASE_DIR/tmp/daemon.pid"
   sleep 1
 
@@ -224,15 +285,11 @@ TASK
 }
 
 collect_cross_project() {
-  local feedback_file="$RESULTS_DIR/cross-project-feedback.md"
-  if [ ! -f "$feedback_file" ]; then
-    echo "No feedback found at $feedback_file"
-    exit 1
-  fi
   echo "==========================================="
-  echo "  cross-project eval: RESULTS"
+  echo "  cross-project eval: COMPLETE"
   echo "==========================================="
-  cat "$feedback_file"
+  echo "Feedback was returned inline by the Task agents."
+  echo "Check the Task results above for agent feedback."
   echo "==========================================="
   stop_daemon
 }
@@ -332,8 +389,9 @@ Start with:
 ## Feedback from Monitor
 TASK
 
-  # Start daemon
-  CHIT_HOME="$tmp_dir/.chit" $CHIT_BIN daemon 2>/dev/null &
+  # Start daemon (nohup + disown so the bash tool doesn't kill it on timeout)
+  CHIT_HOME="$tmp_dir/.chit" nohup "$CHIT_BIN" daemon > /dev/null 2>&1 &
+  disown
   echo $! > "$BASE_DIR/tmp/daemon.pid"
   sleep 1
 

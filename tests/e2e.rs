@@ -104,11 +104,12 @@ fn test_send_and_recap() {
 fn test_auto_target_single_session() {
     let home = tempfile::tempdir().unwrap();
 
-    chit_start(home.path());
+    let sess = chit_start(home.path());
+    chit_ok(home.path(), &["use", &sess]);
 
     chit_ok(home.path(), &["send", "auto-target test"]);
 
-    let recap = chit_ok(home.path(), &["recap"]);
+    let recap = chit_ok(home.path(), &["recap", &sess]);
     assert!(
         recap.contains("auto-target test"),
         "recap should contain message via auto-target"
@@ -124,10 +125,11 @@ fn test_multiple_sessions_auto_target_sends_to_active() {
     let sess1 = chit_start(home.path());
     let sess2 = chit_start(home.path());
 
-    // Auto-set active session means the last start wins — send to active works
+    // Explicitly set sess2 as active, then send without --session
+    chit_ok(home.path(), &["use", &sess2]);
     chit_ok(home.path(), &["send", "test"]);
     let recap = chit_ok(home.path(), &["recap", &sess2]);
-    assert!(recap.contains("test"), "message should go to last started session");
+    assert!(recap.contains("test"), "message should go to active session (sess2)");
 
     // Explicit --session still works for other sessions
     chit_ok(home.path(), &["send", "--session", &sess1, "explicit send"]);

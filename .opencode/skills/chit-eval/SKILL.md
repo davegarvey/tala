@@ -65,7 +65,8 @@ Sub-agents use chit to communicate cross-project, then provide structured produc
 ## Lessons from Previous Eval Rounds
 
 ### Daemon lifecycle
-- Daemons die when the bash tool times out. Use `nohup` + `disown` to keep them alive.
+- Daemons die when the bash tool times out if not properly detached. Use `nohup` + `disown` to keep them alive.
+- `eval/run.sh` now uses `nohup` + `disown` so setup exits cleanly even from the bash tool.
 - Before re-running, kill stale daemons: `pkill -f "chit daemon"`
 
 ### CHIT_HOME
@@ -73,7 +74,7 @@ Sub-agents use chit to communicate cross-project, then provide structured produc
 - The eval runner does this automatically. Sub-agents must export it.
 
 ### Active session gotchas
-- `chit send` reuses the active session. To force a new session (e.g. for `wait --new` testing), use `chit start`.
+- `chit start` no longer auto-sets the active session. Use `chit use <id>` explicitly.
 - Stale `.chit/active-session` in CWD can confuse tests. Clean with:
   `rm -f /Users/dave/code/chit/.chit/active-session`
 
@@ -88,6 +89,12 @@ Sub-agents use chit to communicate cross-project, then provide structured produc
 - "Frustrating" = P0. "Would be nice" = P2. 
 - If an agent says `wait` didn't work, it's likely a race condition in the broadcast channel.
 - If an agent couldn't discover a feature (e.g. `chit use`, session rename), the UX needs work.
+- If both agents independently request the same thing (e.g. `-s` short flag for `--session`), it's a strong signal.
+- If `chit wait` doesn't show the session ID on receipt, agents have to run `chit list`/`recap` separately to reply — a clear friction point.
+- `chit start` silently switching the active session is confusing when agents experiment. Better to keep it scoped: create only, use `chit use` to activate.
+- `chit rename` isn't a top-level command — it's `chit session rename`. Double-check command structure in task docs.
+- `chit observe`'s scope (showing all sessions including the observer's own) can be surprising. Clarify in docs.
+- Collecting feedback via file writes is unreliable — agents may claim to write without actually doing so. Prefer inline feedback in Task results.
 
 ## Adding a New Scenario
 

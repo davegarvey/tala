@@ -449,17 +449,6 @@ async fn cmd_start(message: Option<String>, session_name: Option<String>, json_o
     let resp = client.post(&url).json(&req_body).send().await?;
     let session: CreateSessionResponse = resp.json().await?;
 
-    // Auto-set as active session
-    store::write_active_session(&session.id).await?;
-
-    // Send initial message if provided (without waiting)
-    if let Some(ref msg) = message {
-        let sender = store::get_sender_name(None);
-        let msg_url = daemon_url(&host, port, &format!("/api/sessions/{}/messages", session.id));
-        let req = SendMessageRequest { sender, content: msg.to_string() };
-        let _ = client.post(&msg_url).json(&req).send().await;
-    }
-
     if json_output {
         println!("{}", serde_json::json!({"session_id": session.id}));
     } else {
@@ -518,8 +507,8 @@ async fn cmd_send(
                 let resp = client.post(&url).json(&CreateSessionRequest { message: None, sender: Some(sender), name: None }).send().await?;
                 let session: CreateSessionResponse = resp.json().await?;
                 store::write_active_session(&session.id).await?;
-                if !quiet {
-                    eprintln!("Created session {}", session.id);
+                if !quiet && !json_output {
+                    println!("→ Created session {}", session.id);
                 }
                 session.id
             }
@@ -531,8 +520,8 @@ async fn cmd_send(
         let resp = client.post(&url).json(&CreateSessionRequest { message: None, sender: Some(sender), name: None }).send().await?;
         let session: CreateSessionResponse = resp.json().await?;
         store::write_active_session(&session.id).await?;
-        if !quiet {
-            eprintln!("Created session {}", session.id);
+        if !quiet && !json_output {
+            println!("→ Created session {}", session.id);
         }
         session.id
     };
@@ -648,8 +637,9 @@ async fn cmd_wait(
         println!("timeout after {}s, no new messages", result.timeout_after.unwrap_or(0));
         process::exit(2);
     } else {
+        let _ = store::write_active_session(&session_id).await;
         for msg in &result.messages {
-            println!("[{}] {} ({}):\n    {}", msg.id, msg.sender, msg.timestamp.format("%H:%M:%S"), msg.content);
+            println!("[sess {}] [{}] {} ({}):\n    {}", session_id, msg.id, msg.sender, msg.timestamp.format("%H:%M:%S"), msg.content);
         }
     }
     Ok(())
