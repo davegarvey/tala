@@ -27,7 +27,7 @@ fn fail(json: bool, msg: impl std::fmt::Display, code: &str) -> ! {
     name = "chit",
     about = "Agent-to-agent messaging for AI coding tools",
     long_about = "chit is a lightweight messaging tool for AI agents working across projects.\n\nStart a session with `chit start`, send messages with `chit send`,\nwait for replies with `chit wait`, or watch all sessions with `chit observe`.\n\nEvery command supports --json for structured output.",
-    version,
+    version
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -38,16 +38,26 @@ pub struct Cli {
 pub enum Commands {
     /// Initialize chit configuration for this project
     Init {
-        #[arg(help = "Agent name for this project (defaults to directory name)", conflicts_with = "name")]
+        #[arg(
+            help = "Agent name for this project (defaults to directory name)",
+            conflicts_with = "name"
+        )]
         name_positional: Option<String>,
-        #[arg(long, help = "Agent name for this project (defaults to directory name)")]
+        #[arg(
+            long,
+            help = "Agent name for this project (defaults to directory name)"
+        )]
         name: Option<String>,
     },
     /// Start a new messaging session
     Start {
         #[arg(help = "Optional initial message to send")]
         message: Option<String>,
-        #[arg(long, short = 'n', help = "Session name (shown in list and observe output)")]
+        #[arg(
+            long,
+            short = 'n',
+            help = "Session name (shown in list and observe output)"
+        )]
         name: Option<String>,
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
@@ -70,7 +80,11 @@ pub enum Commands {
         file: Option<String>,
         #[arg(long, short, help = "Session ID (uses active session if set)")]
         session: Option<String>,
-        #[arg(long, short = 'w', help = "Wait for a reply after sending (default: return immediately)")]
+        #[arg(
+            long,
+            short = 'w',
+            help = "Wait for a reply after sending (default: return immediately)"
+        )]
         wait: bool,
         #[arg(long = "as", name = "sender_name", help = "Override the sender name")]
         sender_name: Option<String>,
@@ -85,7 +99,13 @@ pub enum Commands {
     Wait {
         #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
-        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session", help = "Session ID")]
+        #[arg(
+            long = "session",
+            short,
+            alias = "session-id",
+            conflicts_with = "session",
+            help = "Session ID"
+        )]
         session_arg: Option<String>,
         #[arg(long, help = "Seconds to wait before timing out (default: 300)")]
         timeout: Option<u64>,
@@ -97,14 +117,23 @@ pub enum Commands {
         from: Option<String>,
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
-        #[arg(long, help = "Wait for a new session to be created (ignores other args)")]
+        #[arg(
+            long,
+            help = "Wait for a new session to be created (ignores other args)"
+        )]
         r#new: bool,
     },
     /// Stream new messages as they arrive (SSE)
     Follow {
         #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
-        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session", help = "Session ID")]
+        #[arg(
+            long = "session",
+            short,
+            alias = "session-id",
+            conflicts_with = "session",
+            help = "Session ID"
+        )]
         session_arg: Option<String>,
         #[arg(long, help = "Only stream messages with ID greater than this")]
         since: Option<u64>,
@@ -119,7 +148,13 @@ pub enum Commands {
     Recap {
         #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
-        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session", help = "Session ID")]
+        #[arg(
+            long = "session",
+            short,
+            alias = "session-id",
+            conflicts_with = "session",
+            help = "Session ID"
+        )]
         session_arg: Option<String>,
         #[arg(long, help = "Only show messages with ID greater than this")]
         since: Option<u64>,
@@ -156,7 +191,13 @@ pub enum Commands {
     Close {
         #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
-        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session", help = "Session ID")]
+        #[arg(
+            long = "session",
+            short,
+            alias = "session-id",
+            conflicts_with = "session",
+            help = "Session ID"
+        )]
         session_arg: Option<String>,
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
@@ -211,30 +252,89 @@ pub enum SessionCommands {
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Commands::Init { name_positional, name } => cmd_init(name_positional.or(name)).await,
-        Commands::Start { message, name, json } => cmd_start(message, name, json).await,
-        Commands::Use { session_id, clear, json } => cmd_use(session_id, clear, json).await,
-        Commands::Chat { message, file, session, wait, sender_name, json, quiet, timeout } => {
-            cmd_send(session, message, file, wait, sender_name.as_deref(), json, quiet, timeout).await
+        Commands::Init {
+            name_positional,
+            name,
+        } => cmd_init(name_positional.or(name)).await,
+        Commands::Start {
+            message,
+            name,
+            json,
+        } => cmd_start(message, name, json).await,
+        Commands::Use {
+            session_id,
+            clear,
+            json,
+        } => cmd_use(session_id, clear, json).await,
+        Commands::Chat {
+            message,
+            file,
+            session,
+            wait,
+            sender_name,
+            json,
+            quiet,
+            timeout,
+        } => {
+            cmd_send(
+                session,
+                message,
+                file,
+                wait,
+                sender_name.as_deref(),
+                json,
+                quiet,
+                timeout,
+            )
+            .await
         }
-        Commands::Wait { session, session_arg, timeout, since, limit, from, json, r#new } => {
+        Commands::Wait {
+            session,
+            session_arg,
+            timeout,
+            since,
+            limit,
+            from,
+            json,
+            r#new,
+        } => {
             if r#new {
                 cmd_wait_new(timeout, json).await
             } else {
                 cmd_wait(session.or(session_arg), timeout, since, limit, from, json).await
             }
         }
-        Commands::Follow { session, session_arg, since, limit, json, timeout } => {
-            cmd_follow(session.or(session_arg), since, limit, json, timeout).await
-        }
-        Commands::Recap { session, session_arg, since, cursor, from, limit, json } => {
-            cmd_recap(session.or(session_arg), since.or(cursor), from, limit, json).await
-        }
-        Commands::Observe { since, r#match, from, channel, timeout, json } => {
-            cmd_observe(since, r#match, from, channel, timeout, json).await
-        }
+        Commands::Follow {
+            session,
+            session_arg,
+            since,
+            limit,
+            json,
+            timeout,
+        } => cmd_follow(session.or(session_arg), since, limit, json, timeout).await,
+        Commands::Recap {
+            session,
+            session_arg,
+            since,
+            cursor,
+            from,
+            limit,
+            json,
+        } => cmd_recap(session.or(session_arg), since.or(cursor), from, limit, json).await,
+        Commands::Observe {
+            since,
+            r#match,
+            from,
+            channel,
+            timeout,
+            json,
+        } => cmd_observe(since, r#match, from, channel, timeout, json).await,
         Commands::List { json } => cmd_list(json).await,
-        Commands::Close { session, session_arg, json } => cmd_close(session.or(session_arg), json).await,
+        Commands::Close {
+            session,
+            session_arg,
+            json,
+        } => cmd_close(session.or(session_arg), json).await,
         Commands::Status { json } => cmd_status(json).await,
         Commands::Stop => cmd_stop().await,
         Commands::Daemon => crate::daemon::run_daemon().await,
@@ -242,7 +342,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             SessionCommands::List { json } => cmd_list(json).await,
             SessionCommands::Close { session_id, json } => cmd_close(Some(session_id), json).await,
             SessionCommands::Show { session_id, json } => cmd_session_show(session_id, json).await,
-            SessionCommands::Rename { session_id, name, json } => cmd_session_rename(session_id, name, json).await,
+            SessionCommands::Rename {
+                session_id,
+                name,
+                json,
+            } => cmd_session_rename(session_id, name, json).await,
         },
     }
 }
@@ -352,7 +456,7 @@ metadata:
 ---
 # chit — Agent-to-Agent Messaging
 
-Send FYI messages with `chit send "msg"` (auto-creates session, returns immediately).
+Send FYI messages with `chit send "msg"` (uses active session, returns immediately). Requires `chit start` first.
 Request replies with `chit send --wait "question"`. Receive sessions with `chit wait --new`.
 Pipe messages: `echo "msg" | chit send`. All commands support `--json`.
 
@@ -370,7 +474,7 @@ Pipe messages: `echo "msg" | chit send`. All commands support `--json`.
 
 ## Key Behaviors (v0.23+)
 - Send returns immediately by default (fire-and-forget). Use `-w`/`--wait` to block.
-- `chit send "msg"` auto-creates session if none exists.
+- `chit start` is required first — `chit send` needs an active session.
 - Active session is auto-set per project directory (`.chit/active-session`).
 - `chit wait` without `--since` only waits for new messages (no history replay).
 - `chit wait --new` blocks until another agent creates a session.
@@ -390,7 +494,7 @@ Pipe messages: `echo "msg" | chit send`. All commands support `--json`.
     let command = r#"---
 description: Use chit for agent-to-agent messaging — cross-project, cross-terminal, cross-agent communication.
 ---
-Run chit for agent-to-agent messaging. Send FYI with `chit send "msg"` (auto-creates session, returns immediately). Request replies with `chit send --wait "question"`. Receive with `chit wait --new`. Watch all with `chit observe`. Pipe messages via stdin. Use `--json` for structured output.
+Run chit for agent-to-agent messaging. Start a session with `chit start "msg"`, then send messages with `chit send "msg"`. Request replies with `chit send --wait "question"`. Receive with `chit wait --new`. Watch all with `chit observe`. Pipe messages via stdin. Use `--json` for structured output.
 "#;
     tokio::fs::write(&command_path, command).await?;
     println!("Created .opencode/commands/chit.md");
@@ -417,36 +521,57 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
         let sessions: Vec<SessionSummary> = resp.json().await?;
         let active: Vec<_> = sessions.iter().filter(|s| !s.closed).collect();
 
-        let name_matches: Vec<&SessionSummary> = active.iter().filter(|s| s.name.as_deref() == Some(&input)).copied().collect();
+        let name_matches: Vec<&SessionSummary> = active
+            .iter()
+            .filter(|s| s.name.as_deref() == Some(&input))
+            .copied()
+            .collect();
 
         if name_matches.len() == 1 {
             let id = &name_matches[0].id;
             store::write_active_session(id).await?;
             if json_output {
-                println!("{}", serde_json::json!({"session_id": id, "status": "active"}));
+                println!(
+                    "{}",
+                    serde_json::json!({"session_id": id, "status": "active"})
+                );
             } else {
                 println!("Active session set to {}", id);
             }
             return Ok(());
         } else if name_matches.len() > 1 {
-            bail!("Multiple sessions named '{}'. Use session ID instead.", input);
+            bail!(
+                "Multiple sessions named '{}'. Use session ID instead.",
+                input
+            );
         }
 
         // Fall back to ID match (exact or prefix)
-        let id_matches: Vec<&SessionSummary> = active.iter().filter(|s| s.id == input || s.id.starts_with(&input)).copied().collect();
+        let id_matches: Vec<&SessionSummary> = active
+            .iter()
+            .filter(|s| s.id == input || s.id.starts_with(&input))
+            .copied()
+            .collect();
 
         if id_matches.len() == 1 {
             let id = &id_matches[0].id;
             store::write_active_session(id).await?;
             if json_output {
-                println!("{}", serde_json::json!({"session_id": id, "status": "active"}));
+                println!(
+                    "{}",
+                    serde_json::json!({"session_id": id, "status": "active"})
+                );
             } else {
                 println!("Active session set to {}", id);
             }
             return Ok(());
         } else if id_matches.len() > 1 {
             let ids: Vec<&str> = id_matches.iter().map(|s| s.id.as_str()).collect();
-            bail!("Multiple sessions match '{}': {}. Use a more specific ID.", input, ids.join(", "));
+            bail!(
+                "Multiple sessions match '{}': {}. Use a more specific ID.",
+                input,
+                ids.join(", ")
+            );
         }
 
         bail!("No active session named or matching '{}'", input);
@@ -471,17 +596,21 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
     Ok(())
 }
 
-async fn cmd_start(message: Option<String>, session_name: Option<String>, json_output: bool) -> anyhow::Result<()> {
+async fn cmd_start(
+    message: Option<String>,
+    session_name: Option<String>,
+    json_output: bool,
+) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
     let client = reqwest::Client::new();
     let url = daemon_url(&host, port, "/api/sessions");
 
     let name = session_name.or_else(|| {
-        tokio::runtime::Handle::try_current()
-            .ok()
-            .and_then(|_| tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::try_current().ok().and_then(|_| {
+            tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(store::read_project_config())
-            }))
+            })
+        })
     });
 
     let req_body = CreateSessionRequest {
@@ -514,7 +643,8 @@ async fn cmd_send(
     chat_timeout: Option<u64>,
 ) -> anyhow::Result<()> {
     let content = if let Some(f) = file {
-        tokio::fs::read_to_string(&f).await?
+        tokio::fs::read_to_string(&f)
+            .await?
             .trim_end_matches('\n')
             .to_string()
     } else if let Some(msg) = &message {
@@ -524,14 +654,22 @@ async fn cmd_send(
             let mut buf = String::new();
             std::io::stdin().read_to_string(&mut buf).ok()?;
             let trimmed = buf.trim_end_matches('\n').to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         });
         match tokio::time::timeout(Duration::from_millis(500), read).await {
             Ok(Ok(Some(content))) => content,
-            _ => anyhow::bail!("No message provided. Use a positional argument, --file <path>, or pipe to stdin"),
+            _ => anyhow::bail!(
+                "No message provided. Use a positional argument, --file <path>, or pipe to stdin"
+            ),
         }
     } else {
-        anyhow::bail!("No message provided. Use a positional argument, --file <path>, or pipe to stdin");
+        anyhow::bail!(
+            "No message provided. Use a positional argument, --file <path>, or pipe to stdin"
+        );
     };
 
     let (host, port) = ensure_daemon_running().await?;
@@ -552,7 +690,15 @@ async fn cmd_send(
                 let url = daemon_url(&host, port, "/api/sessions");
                 let sender = store::get_sender_name(sender_override);
                 let project_name = store::read_project_config().await;
-                let resp = client.post(&url).json(&CreateSessionRequest { message: None, sender: Some(sender), name: project_name }).send().await?;
+                let resp = client
+                    .post(&url)
+                    .json(&CreateSessionRequest {
+                        message: None,
+                        sender: Some(sender),
+                        name: project_name,
+                    })
+                    .send()
+                    .await?;
                 let session: CreateSessionResponse = resp.json().await?;
                 store::write_active_session(&session.id).await?;
                 if !quiet && !json_output {
@@ -569,7 +715,11 @@ async fn cmd_send(
         let sessions: Vec<SessionSummary> = resp.json().await?;
         let active: Vec<_> = sessions.iter().filter(|s| !s.closed).collect();
         if active.is_empty() {
-            fail(json_output, "No active sessions. Start one with `chit start`", "NO_ACTIVE_SESSION");
+            fail(
+                json_output,
+                "No active sessions. Start one with `chit start`",
+                "NO_ACTIVE_SESSION",
+            );
         }
         let mut msg = "No active session set.".to_string();
         for s in &active {
@@ -582,14 +732,25 @@ async fn cmd_send(
 
     let sender = store::get_sender_name(sender_override);
     let client = reqwest::Client::new();
-    let url = daemon_url(&host, port, &format!("/api/sessions/{}/messages", session_id));
+    let url = daemon_url(
+        &host,
+        port,
+        &format!("/api/sessions/{}/messages", session_id),
+    );
 
-    let req = SendMessageRequest { sender, content: content.to_string() };
+    let req = SendMessageRequest {
+        sender,
+        content: content.to_string(),
+    };
     let resp = client.post(&url).json(&req).send().await?;
 
     if !resp.status().is_success() {
         let err: ErrorResponse = resp.json().await?;
-        let code = if err.error.contains("closed") { "SESSION_CLOSED" } else { "SESSION_NOT_FOUND" };
+        let code = if err.error.contains("closed") {
+            "SESSION_CLOSED"
+        } else {
+            "SESSION_NOT_FOUND"
+        };
         fail(json_output, &err.error, code);
     }
 
@@ -621,11 +782,16 @@ async fn cmd_send(
     }
     if json_output {
         println!("{}", serde_json::to_string(&result).unwrap());
-        if result.timeout { process::exit(2); }
+        if result.timeout {
+            process::exit(2);
+        }
     } else if result.closed {
         println!("[session closed]");
     } else if result.timeout {
-        println!("[timeout after {}s, no reply]", result.timeout_after.unwrap_or(0));
+        println!(
+            "[timeout after {}s, no reply]",
+            result.timeout_after.unwrap_or(0)
+        );
         process::exit(2);
     } else {
         for m in &result.messages {
@@ -665,7 +831,11 @@ async fn cmd_wait(
                 if !json_output {
                     eprintln!("No active sessions. Waiting for a new session...");
                 }
-                let new_url = daemon_url(&host, port, &format!("/api/sessions/wait-new?timeout_secs={}", wait_timeout));
+                let new_url = daemon_url(
+                    &host,
+                    port,
+                    &format!("/api/sessions/wait-new?timeout_secs={}", wait_timeout),
+                );
                 let resp = client.get(&new_url).send().await?;
                 let result: serde_json::Value = resp.json().await?;
                 if json_output {
@@ -675,14 +845,20 @@ async fn cmd_wait(
                     }
                     return Ok(());
                 }
-                let sid = result.get("session_id").and_then(|v| v.as_str())
+                let sid = result
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
                     .ok_or_else(|| {
                         if result.get("timeout") == Some(&serde_json::json!(true)) {
-                            anyhow::anyhow!("timed out after {}s, no new session", result["timeout_after"].as_u64().unwrap_or(wait_timeout))
+                            anyhow::anyhow!(
+                                "timed out after {}s, no new session",
+                                result["timeout_after"].as_u64().unwrap_or(wait_timeout)
+                            )
                         } else {
                             anyhow::anyhow!("failed to wait for new session")
                         }
-                    })?.to_string();
+                    })?
+                    .to_string();
                 store::write_active_session(&sid).await?;
                 eprintln!("New session: {}", sid);
                 sid
@@ -698,21 +874,37 @@ async fn cmd_wait(
                 if !json_output {
                     eprintln!("Waiting for new messages from any session...");
                 }
-                let wait_url = daemon_url(&host, port, &format!("/api/sessions/wait-all?timeout_secs={}", wait_timeout));
+                let wait_url = daemon_url(
+                    &host,
+                    port,
+                    &format!("/api/sessions/wait-all?timeout_secs={}", wait_timeout),
+                );
                 let resp = client.get(&wait_url).send().await?;
                 let result: WaitResponse = resp.json().await?;
                 if json_output {
                     println!("{}", serde_json::to_string(&result).unwrap());
-                    if result.timeout { process::exit(2); }
+                    if result.timeout {
+                        process::exit(2);
+                    }
                     return Ok(());
                 }
                 if result.timeout {
-                    println!("timeout after {}s, no new messages", result.timeout_after.unwrap_or(0));
+                    println!(
+                        "timeout after {}s, no new messages",
+                        result.timeout_after.unwrap_or(0)
+                    );
                     process::exit(2);
                 }
                 let _ = store::write_active_session(&result.messages[0].session_id).await;
                 for msg in &result.messages {
-                    println!("[sess {}] [{}] {} ({}):\n    {}", msg.session_id, msg.id, msg.sender, msg.timestamp.format("%H:%M:%S"), msg.content);
+                    println!(
+                        "[sess {}] [{}] {} ({}):\n    {}",
+                        msg.session_id,
+                        msg.id,
+                        msg.sender,
+                        msg.timestamp.format("%H:%M:%S"),
+                        msg.content
+                    );
                 }
                 return Ok(());
             }
@@ -722,7 +914,11 @@ async fn cmd_wait(
     let since_id = if let Some(s) = since {
         s
     } else {
-        let msgs_url = daemon_url(&host, port, &format!("/api/sessions/{}/messages?since=0", session_id));
+        let msgs_url = daemon_url(
+            &host,
+            port,
+            &format!("/api/sessions/{}/messages?since=0", session_id),
+        );
         match client.get(&msgs_url).send().await {
             Ok(resp) => {
                 let msgs: Vec<Message> = resp.json().await.unwrap_or_default();
@@ -732,7 +928,10 @@ async fn cmd_wait(
         }
     };
 
-    let mut path = format!("/api/sessions/{}/wait?since={}&timeout_secs={}", session_id, since_id, wait_timeout);
+    let mut path = format!(
+        "/api/sessions/{}/wait?since={}&timeout_secs={}",
+        session_id, since_id, wait_timeout
+    );
     if let Some(l) = limit.filter(|&l| l > 0) {
         path = format!("{}&limit={}", path, l);
     }
@@ -752,16 +951,28 @@ async fn cmd_wait(
 
     if json_output {
         println!("{}", serde_json::to_string(&result).unwrap());
-        if result.timeout { process::exit(2); }
+        if result.timeout {
+            process::exit(2);
+        }
     } else if result.closed {
         println!("[session closed]");
     } else if result.timeout {
-        println!("timeout after {}s, no new messages", result.timeout_after.unwrap_or(0));
+        println!(
+            "timeout after {}s, no new messages",
+            result.timeout_after.unwrap_or(0)
+        );
         process::exit(2);
     } else {
         let _ = store::write_active_session(&session_id).await;
         for msg in &result.messages {
-            println!("[sess {}] [{}] {} ({}):\n    {}", session_id, msg.id, msg.sender, msg.timestamp.format("%H:%M:%S"), msg.content);
+            println!(
+                "[sess {}] [{}] {} ({}):\n    {}",
+                session_id,
+                msg.id,
+                msg.sender,
+                msg.timestamp.format("%H:%M:%S"),
+                msg.content
+            );
         }
     }
     Ok(())
@@ -803,7 +1014,8 @@ async fn cmd_follow(
             let event_block = buffer[..pos].to_string();
             buffer = buffer[pos + 2..].to_string();
 
-            let event_type = event_block.lines()
+            let event_type = event_block
+                .lines()
                 .find_map(|line| line.strip_prefix("event: "))
                 .unwrap_or("message");
             let mut data = String::new();
@@ -834,7 +1046,13 @@ async fn cmd_follow(
                             println!("{}", data);
                         }
                     } else if let Ok(msg) = serde_json::from_str::<Message>(&data) {
-                        println!("[{}] {} ({}):\n    {}", msg.id, msg.sender, msg.timestamp.format("%H:%M:%S"), msg.content);
+                        println!(
+                            "[{}] {} ({}):\n    {}",
+                            msg.id,
+                            msg.sender,
+                            msg.timestamp.format("%H:%M:%S"),
+                            msg.content
+                        );
                     }
                 }
                 _ => {}
@@ -905,7 +1123,13 @@ async fn cmd_observe(
                     "message" => {
                         if let Some(msg) = evt.message {
                             let session_label = evt.session_name.unwrap_or(evt.session_id);
-                            println!("[{}] {} ({}):\n    {}", session_label, msg.sender, msg.timestamp.format("%H:%M:%S"), msg.content);
+                            println!(
+                                "[{}] {} ({}):\n    {}",
+                                session_label,
+                                msg.sender,
+                                msg.timestamp.format("%H:%M:%S"),
+                                msg.content
+                            );
                         }
                     }
                     "closed" => {
@@ -923,10 +1147,10 @@ async fn cmd_observe(
 
 fn urlencoding(s: &str) -> String {
     s.replace(' ', "%20")
-     .replace('#', "%23")
-     .replace('&', "%26")
-     .replace('=', "%3D")
-     .replace('+', "%2B")
+        .replace('#', "%23")
+        .replace('&', "%26")
+        .replace('=', "%3D")
+        .replace('+', "%2B")
 }
 
 async fn cmd_recap(
@@ -962,13 +1186,24 @@ async fn cmd_recap(
     if json_output {
         println!("{}", serde_json::to_string(&recap).unwrap());
     } else {
-        println!("session: {}  |  created: {}  |  closed: {}", recap.session.id, recap.session.created_at.format("%Y-%m-%d %H:%M:%S"), recap.session.closed);
+        println!(
+            "session: {}  |  created: {}  |  closed: {}",
+            recap.session.id,
+            recap.session.created_at.format("%Y-%m-%d %H:%M:%S"),
+            recap.session.closed
+        );
         if let Some(c) = recap.cursor {
             println!("cursor: {}", c);
         }
         println!();
         for msg in &recap.messages {
-            println!("[{}] {} ({}):\n    {}\n", msg.id, msg.sender, msg.timestamp.format("%H:%M:%S"), msg.content);
+            println!(
+                "[{}] {} ({}):\n    {}\n",
+                msg.id,
+                msg.sender,
+                msg.timestamp.format("%H:%M:%S"),
+                msg.content
+            );
         }
     }
     Ok(())
@@ -987,7 +1222,8 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
     } else if sessions.is_empty() {
         println!("No active sessions");
     } else {
-        let name_width = sessions.iter()
+        let name_width = sessions
+            .iter()
             .map(|s| s.name.as_deref().unwrap_or("-").len())
             .max()
             .unwrap_or(1)
@@ -995,7 +1231,14 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
         for s in &sessions {
             let status = if s.closed { "closed" } else { "active" };
             let name = s.name.as_deref().unwrap_or("-");
-            println!("{}  {:width$}  {}  {} msgs", s.id, name, status, s.message_count, width = name_width);
+            println!(
+                "{}  {:width$}  {}  {} msgs",
+                s.id,
+                name,
+                status,
+                s.message_count,
+                width = name_width
+            );
         }
     }
     Ok(())
@@ -1012,13 +1255,20 @@ async fn cmd_close(session_arg: Option<String>, json_output: bool) -> anyhow::Re
     if resp.status().is_success() {
         let result: CloseSessionResponse = resp.json().await?;
         if json_output {
-            println!("{}", serde_json::json!({"session_id": session_id, "status": result.status}));
+            println!(
+                "{}",
+                serde_json::json!({"session_id": session_id, "status": result.status})
+            );
         } else {
             println!("Session {}: {}", session_id, result.status);
         }
     } else {
         let err: ErrorResponse = resp.json().await?;
-        let code = if err.error.contains("closed") { "SESSION_CLOSED" } else { "SESSION_NOT_FOUND" };
+        let code = if err.error.contains("closed") {
+            "SESSION_CLOSED"
+        } else {
+            "SESSION_NOT_FOUND"
+        };
         fail(json_output, &err.error, code);
     }
     Ok(())
@@ -1045,19 +1295,36 @@ async fn cmd_session_show(session_id: String, json_output: bool) -> anyhow::Resu
         if let Some(ref n) = session.name {
             println!("  Name: {}", n);
         }
-        println!("  Created: {}", session.created_at.format("%Y-%m-%d %H:%M:%S"));
-        println!("  Last activity: {}", session.last_activity.format("%Y-%m-%d %H:%M:%S"));
-        println!("  Status: {}", if session.closed { "closed" } else { "active" });
+        println!(
+            "  Created: {}",
+            session.created_at.format("%Y-%m-%d %H:%M:%S")
+        );
+        println!(
+            "  Last activity: {}",
+            session.last_activity.format("%Y-%m-%d %H:%M:%S")
+        );
+        println!(
+            "  Status: {}",
+            if session.closed { "closed" } else { "active" }
+        );
     }
     Ok(())
 }
 
-async fn cmd_session_rename(session_id: String, name: String, json_output: bool) -> anyhow::Result<()> {
+async fn cmd_session_rename(
+    session_id: String,
+    name: String,
+    json_output: bool,
+) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
 
     let client = reqwest::Client::new();
     let url = daemon_url(&host, port, &format!("/api/sessions/{}/rename", session_id));
-    let resp = client.post(&url).json(&json!({"name": name})).send().await?;
+    let resp = client
+        .post(&url)
+        .json(&json!({"name": name}))
+        .send()
+        .await?;
 
     if !resp.status().is_success() {
         let err: ErrorResponse = resp.json().await?;
@@ -1068,7 +1335,11 @@ async fn cmd_session_rename(session_id: String, name: String, json_output: bool)
     if json_output {
         println!("{}", serde_json::to_string(&result).unwrap());
     } else {
-        println!("Session {} renamed to '{}'", session_id, result["name"].as_str().unwrap_or(""));
+        println!(
+            "Session {} renamed to '{}'",
+            session_id,
+            result["name"].as_str().unwrap_or("")
+        );
     }
     Ok(())
 }
@@ -1076,7 +1347,11 @@ async fn cmd_session_rename(session_id: String, name: String, json_output: bool)
 async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
     let timeout = timeout_secs.unwrap_or(300);
-    let url = daemon_url(&host, port, &format!("/api/sessions/wait-new?timeout_secs={}", timeout));
+    let url = daemon_url(
+        &host,
+        port,
+        &format!("/api/sessions/wait-new?timeout_secs={}", timeout),
+    );
     let client = reqwest::Client::new();
     let resp = client.get(&url).send().await?;
     let result: serde_json::Value = resp.json().await?;
@@ -1086,7 +1361,10 @@ async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::R
     } else if let Some(sid) = result.get("session_id").and_then(|v| v.as_str()) {
         println!("{}", sid);
     } else if result.get("timeout") == Some(&serde_json::json!(true)) {
-        eprintln!("timeout after {}s, no new session", result["timeout_after"].as_u64().unwrap_or(timeout));
+        eprintln!(
+            "timeout after {}s, no new session",
+            result["timeout_after"].as_u64().unwrap_or(timeout)
+        );
         process::exit(2);
     } else if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
         fail(json_output, err, "WAIT_NEW_ERROR");
