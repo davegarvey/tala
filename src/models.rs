@@ -38,6 +38,8 @@ pub struct Message {
 pub struct CreateSessionRequest {
     pub message: Option<String>,
     pub sender: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +194,7 @@ mod tests {
         let req = CreateSessionRequest {
             message: Some("hello".into()),
             sender: Some("agent".into()),
+            name: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let deserialized: CreateSessionRequest = serde_json::from_str(&json).unwrap();

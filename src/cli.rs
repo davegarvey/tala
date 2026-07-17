@@ -45,6 +45,8 @@ pub enum Commands {
     Start {
         #[arg(help = "Optional initial message to send")]
         message: Option<String>,
+        #[arg(long, short = 'n', help = "Session name (shown in list and observe output)")]
+        name: Option<String>,
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
@@ -206,7 +208,7 @@ pub enum SessionCommands {
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init { name } => cmd_init(name).await,
-        Commands::Start { message, json } => cmd_start(message, json).await,
+        Commands::Start { message, name, json } => cmd_start(message, name, json).await,
         Commands::Use { session_id, clear, json } => cmd_use(session_id, clear, json).await,
         Commands::Chat { message, file, session, wait, sender_name, json, quiet, timeout } => {
             cmd_send(session, message, file, wait, sender_name.as_deref(), json, quiet, timeout).await
@@ -423,16 +425,15 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
     Ok(())
 }
 
-async fn cmd_start(message: Option<String>, json_output: bool) -> anyhow::Result<()> {
+async fn cmd_start(message: Option<String>, session_name: Option<String>, json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
     let client = reqwest::Client::new();
     let url = daemon_url(&host, port, "/api/sessions");
 
-    let req_body = if let Some(ref msg) = message {
-        let sender = store::get_sender_name(None);
-        CreateSessionRequest { message: Some(msg.clone()), sender: Some(sender) }
-    } else {
-        CreateSessionRequest { message: None, sender: None }
+    let req_body = CreateSessionRequest {
+        message: message.clone(),
+        sender: message.as_ref().map(|_| store::get_sender_name(None)),
+        name: session_name,
     };
 
     let resp = client.post(&url).json(&req_body).send().await?;
@@ -491,15 +492,33 @@ async fn cmd_send(
     let (host, port) = ensure_daemon_running().await?;
 
     // Resolve session or auto-create if none exists
-    let session_id = if let Some(id) = session_arg {
-        id.to_string()
-    } else if let Some(id) = store::read_active_session().await {
+    let session_id = if let Some(id) = session_arg.clone() {
         id
+    } else if let Some(id) = store::read_active_session().await {
+        // Validate active session still exists
+        let check_url = daemon_url(&host, port, &format!("/api/sessions/{}", id));
+        let check = reqwest::Client::new().get(&check_url).send().await;
+        match check {
+            Ok(r) if r.status().is_success() => id,
+            _ => {
+                store::clear_active_session().await?;
+                let client = reqwest::Client::new();
+                let url = daemon_url(&host, port, "/api/sessions");
+                let sender = store::get_sender_name(sender_override);
+                let resp = client.post(&url).json(&CreateSessionRequest { message: None, sender: Some(sender), name: None }).send().await?;
+                let session: CreateSessionResponse = resp.json().await?;
+                store::write_active_session(&session.id).await?;
+                if !quiet {
+                    eprintln!("Created session {}", session.id);
+                }
+                session.id
+            }
+        }
     } else {
         let client = reqwest::Client::new();
         let url = daemon_url(&host, port, "/api/sessions");
         let sender = store::get_sender_name(sender_override);
-        let resp = client.post(&url).json(&CreateSessionRequest { message: None, sender: Some(sender) }).send().await?;
+        let resp = client.post(&url).json(&CreateSessionRequest { message: None, sender: Some(sender), name: None }).send().await?;
         let session: CreateSessionResponse = resp.json().await?;
         store::write_active_session(&session.id).await?;
         if !quiet {

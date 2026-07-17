@@ -188,7 +188,7 @@ Start your feedback with:
 TASK
 
   # Start the daemon
-  $CHIT_BIN --daemon --home "$tmp_dir/.chit" 2>/dev/null &
+  CHIT_HOME="$tmp_dir/.chit" $CHIT_BIN daemon 2>/dev/null &
   echo $! > "$BASE_DIR/tmp/daemon.pid"
   sleep 1
 
@@ -201,7 +201,7 @@ TASK
   echo "  1. Agent Alpha  →  $AGENT_TASKS_DIR/cross-project/agent-alpha.md"
   echo "  2. Agent Beta   →  $AGENT_TASKS_DIR/cross-project/agent-beta.md"
   echo ""
-  echo "Chit daemon running with --home $tmp_dir/.chit"
+  echo "Chit daemon running with CHIT_HOME=$tmp_dir/.chit"
   echo "PID: $(cat $BASE_DIR/tmp/daemon.pid)"
   echo ""
   echo "Once both agents finish, run:"
@@ -319,7 +319,7 @@ Start with:
 TASK
 
   # Start daemon
-  $CHIT_BIN --daemon --home "$tmp_dir/.chit" 2>/dev/null &
+  CHIT_HOME="$tmp_dir/.chit" $CHIT_BIN daemon 2>/dev/null &
   echo $! > "$BASE_DIR/tmp/daemon.pid"
   sleep 1
 

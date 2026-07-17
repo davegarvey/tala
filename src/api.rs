@@ -53,7 +53,7 @@ async fn create_session(
 ) -> impl IntoResponse {
     let sender = req.sender.unwrap_or_else(|| "unknown".to_string());
     let initial = req.message.map(|msg| (sender, msg));
-    let id = state.store.create_session(initial).await;
+    let id = state.store.create_session(initial, req.name).await;
     (StatusCode::CREATED, Json(CreateSessionResponse { id }))
 }
 
@@ -253,6 +253,23 @@ async fn wait_for_message(
                 .into_response();
         }
     };
+
+    // Re-check for messages or close that arrived between our initial check and subscribe
+    let session = state.store.get_session(&id).await;
+    let is_closed = match &session {
+        Some(s) => s.closed,
+        None => false,
+    };
+    if is_closed {
+        return (StatusCode::OK, Json(wrap_wait(vec![], false, None, true))).into_response();
+    }
+    let existing = state
+        .store
+        .get_messages_filtered(&id, since, limit, from)
+        .await;
+    if !existing.is_empty() {
+        return (StatusCode::OK, Json(wrap_wait(existing, false, None, is_closed))).into_response();
+    }
 
     let timeout_dur = Duration::from_secs(wait_timeout);
     let result = timeout(timeout_dur, async {

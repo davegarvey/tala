@@ -19,7 +19,9 @@ fn generate_session_id() -> String {
 }
 
 pub fn chit_home() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(ch) = std::env::var_os("CHIT_HOME") {
+        PathBuf::from(ch)
+    } else if let Some(home) = std::env::var_os("HOME") {
         PathBuf::from(home).join(".chit")
     } else {
         PathBuf::from("/tmp/.chit")
@@ -50,7 +52,7 @@ impl Store {
         }
     }
 
-    pub async fn create_session(&self, initial_message: Option<(String, String)>) -> String {
+    pub async fn create_session(&self, initial_message: Option<(String, String)>, name: Option<String>) -> String {
         let id = loop {
             let candidate = generate_session_id();
             let sessions = self.sessions.read().await;
@@ -62,7 +64,7 @@ impl Store {
         let now = Utc::now();
         let session = Session {
             id: id.clone(),
-            name: None,
+            name,
             created_at: now,
             last_activity: now,
             closed: false,
@@ -350,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn test_store_create_session() {
         let store = Store::new();
-        let id = store.create_session(None).await;
+        let id = store.create_session(None, None).await;
         assert!(
             id.starts_with("sess_"),
             "session ID should start with sess_"
@@ -364,7 +366,7 @@ mod tests {
     #[tokio::test]
     async fn test_store_add_and_retrieve_messages() {
         let store = Store::new();
-        let id = store.create_session(None).await;
+        let id = store.create_session(None, None).await;
 
         let msg = store.add_message(&id, "agent-a", "hello").await;
         assert!(msg.is_some());
@@ -383,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn test_store_messages_since() {
         let store = Store::new();
-        let id = store.create_session(None).await;
+        let id = store.create_session(None, None).await;
 
         store.add_message(&id, "a", "first").await;
         store.add_message(&id, "b", "second").await;
@@ -403,7 +405,7 @@ mod tests {
     #[tokio::test]
     async fn test_store_close_session() {
         let store = Store::new();
-        let id = store.create_session(None).await;
+        let id = store.create_session(None, None).await;
 
         assert!(store.close_session(&id).await);
         assert!(!store.close_session(&id).await);
@@ -420,8 +422,8 @@ mod tests {
         let store = Store::new();
         assert!(store.list_sessions().await.is_empty());
 
-        store.create_session(None).await;
-        store.create_session(None).await;
+        store.create_session(None, None).await;
+        store.create_session(None, None).await;
 
         let sessions = store.list_sessions().await;
         assert_eq!(sessions.len(), 2);
@@ -431,7 +433,7 @@ mod tests {
     async fn test_store_create_with_initial_message() {
         let store = Store::new();
         let id = store
-            .create_session(Some(("init-agent".into(), "initial message".into())))
+            .create_session(Some(("init-agent".into(), "initial message".into())), None)
             .await;
 
         let messages = store.get_messages_since(&id, 0).await;
