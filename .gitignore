@@ -1,3 +1,6 @@
 /target
 /.chit/
+/eval/agent-tasks/
+/eval/results/
+/eval/tmp/
 

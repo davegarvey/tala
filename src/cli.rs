@@ -45,6 +45,8 @@ pub enum Commands {
     Start {
         #[arg(help = "Optional initial message to send")]
         message: Option<String>,
+        #[arg(long, short = 'j', help = "Output in JSON format")]
+        json: bool,
     },
     /// Set or show the active session for this project directory
     Use {
@@ -204,7 +206,7 @@ pub enum SessionCommands {
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init { name } => cmd_init(name).await,
-        Commands::Start { message } => cmd_start(message).await,
+        Commands::Start { message, json } => cmd_start(message, json).await,
         Commands::Use { session_id, clear, json } => cmd_use(session_id, clear, json).await,
         Commands::Chat { message, file, session, wait, sender_name, json, quiet, timeout } => {
             cmd_send(session, message, file, wait, sender_name.as_deref(), json, quiet, timeout).await
@@ -421,7 +423,7 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
     Ok(())
 }
 
-async fn cmd_start(message: Option<String>) -> anyhow::Result<()> {
+async fn cmd_start(message: Option<String>, json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
     let client = reqwest::Client::new();
     let url = daemon_url(&host, port, "/api/sessions");
@@ -435,10 +437,23 @@ async fn cmd_start(message: Option<String>) -> anyhow::Result<()> {
 
     let resp = client.post(&url).json(&req_body).send().await?;
     let session: CreateSessionResponse = resp.json().await?;
-    println!("{}", session.id);
 
-    if message.is_some() {
-        cmd_wait(Some(session.id.clone()), None, None, None, None, false).await?;
+    // Auto-set as active session
+    store::write_active_session(&session.id).await?;
+
+    // Send initial message if provided (without waiting)
+    if let Some(ref msg) = message {
+        let sender = store::get_sender_name(None);
+        let msg_url = daemon_url(&host, port, &format!("/api/sessions/{}/messages", session.id));
+        let req = SendMessageRequest { sender, content: msg.to_string() };
+        let _ = client.post(&msg_url).json(&req).send().await;
+    }
+
+    if json_output {
+        println!("{}", serde_json::json!({"session_id": session.id}));
+    } else {
+        println!("{}", session.id);
+        println!("Active session set to {}", session.id);
     }
     Ok(())
 }
@@ -541,7 +556,19 @@ async fn cmd_wait(
     let config = store::read_user_config().await;
     let default_timeout = config["default_timeout"].as_u64().unwrap_or(300);
     let wait_timeout = timeout_secs.unwrap_or(default_timeout);
-    let since_id = since.unwrap_or(0);
+
+    let since_id = if let Some(s) = since {
+        s
+    } else {
+        let msgs_url = daemon_url(&host, port, &format!("/api/sessions/{}/messages?since=0", session_id));
+        match reqwest::Client::new().get(&msgs_url).send().await {
+            Ok(resp) => {
+                let msgs: Vec<Message> = resp.json().await.unwrap_or_default();
+                msgs.iter().map(|m| m.id).max().unwrap_or(0)
+            }
+            Err(_) => 0,
+        }
+    };
 
     let mut path = format!("/api/sessions/{}/wait?since={}&timeout_secs={}", session_id, since_id, wait_timeout);
     if let Some(l) = limit.filter(|&l| l > 0) {

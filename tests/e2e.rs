@@ -42,7 +42,7 @@ fn chit_ok(home: &std::path::Path, args: &[&str]) -> String {
 
 fn chit_start(home: &std::path::Path) -> String {
     let stdout = chit_ok(home, &["start"]);
-    stdout.trim().to_string()
+    stdout.lines().next().unwrap_or("").trim().to_string()
 }
 
 fn chit_stop(home: &std::path::Path) {
@@ -118,19 +118,21 @@ fn test_auto_target_single_session() {
 }
 
 #[test]
-fn test_multiple_sessions_auto_target_error() {
+fn test_multiple_sessions_auto_target_sends_to_active() {
     let home = tempfile::tempdir().unwrap();
 
-    chit_start(home.path());
-    chit_start(home.path());
+    let sess1 = chit_start(home.path());
+    let sess2 = chit_start(home.path());
 
-    let (_stdout, stderr, ok) = chit(home.path(), &["send", "test"]);
-    assert!(!ok, "send should fail with multiple sessions");
-    assert!(
-        stderr.contains("Multiple active sessions"),
-        "error should list multiple sessions: {}",
-        stderr
-    );
+    // Auto-set active session means the last start wins — send to active works
+    chit_ok(home.path(), &["send", "test"]);
+    let recap = chit_ok(home.path(), &["recap", &sess2]);
+    assert!(recap.contains("test"), "message should go to last started session");
+
+    // Explicit --session still works for other sessions
+    chit_ok(home.path(), &["send", "--session", &sess1, "explicit send"]);
+    let recap2 = chit_ok(home.path(), &["recap", &sess1]);
+    assert!(recap2.contains("explicit send"), "explicit send to sess1 should work");
 
     chit_stop(home.path());
 }
