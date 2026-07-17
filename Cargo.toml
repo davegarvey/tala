@@ -1,6 +1,6 @@
 [package]
 name = "chit-cli"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Agent-to-agent messaging for AI coding tools"
 license = "MIT"

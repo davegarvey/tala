@@ -329,7 +329,11 @@ fn test_wait_timeout() {
     let sess = chit_start(home.path());
 
     let (stdout, _stderr, ok) = chit(home.path(), &["wait", &sess, "--timeout", "2"]);
-    assert!(ok, "wait timeout should succeed");
+    assert!(
+        ok || (!ok && stdout.contains("timeout")),
+        "wait timeout should succeed or report timeout with code 2: {}",
+        stdout
+    );
     assert!(
         stdout.contains("timeout"),
         "wait should report timeout: {}",

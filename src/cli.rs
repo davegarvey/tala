@@ -1,3 +1,4 @@
+use std::process;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -6,6 +7,18 @@ use serde_json::json;
 
 use crate::models::*;
 use crate::store;
+
+fn fail(json: bool, msg: impl std::fmt::Display, code: &str) -> ! {
+    if json {
+        eprintln!(
+            "{}",
+            serde_json::json!({"error": format!("{}", msg), "code": code})
+        );
+    } else {
+        eprintln!("Error: {}", msg);
+    }
+    process::exit(1);
+}
 
 #[derive(Parser)]
 #[command(name = "chit", about = "Agent-to-agent messaging", version)]
@@ -52,9 +65,9 @@ pub enum Commands {
     Wait {
         /// Session ID (positional, for backwards compatibility)
         session: Option<String>,
-        /// Session ID
-        #[arg(long, short, conflicts_with = "session")]
-        session_id: Option<String>,
+        /// Session ID (also accepts --session-id for backwards compat)
+        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session")]
+        session_arg: Option<String>,
         /// Timeout in seconds
         #[arg(long)]
         timeout: Option<u64>,
@@ -69,9 +82,9 @@ pub enum Commands {
     Recap {
         /// Session ID (positional, for backwards compatibility)
         session: Option<String>,
-        /// Session ID
-        #[arg(long, short, conflicts_with = "session")]
-        session_id: Option<String>,
+        /// Session ID (also accepts --session-id for backwards compat)
+        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session")]
+        session_arg: Option<String>,
         /// Output in JSON format
         #[arg(long, short = 'j')]
         json: bool,
@@ -86,9 +99,12 @@ pub enum Commands {
     Close {
         /// Session ID (positional, for backwards compatibility)
         session: Option<String>,
-        /// Session ID
-        #[arg(long, short, conflicts_with = "session")]
-        session_id: Option<String>,
+        /// Session ID (also accepts --session-id for backwards compat)
+        #[arg(long = "session", short, alias = "session-id", conflicts_with = "session")]
+        session_arg: Option<String>,
+        /// Output in JSON format
+        #[arg(long, short = 'j')]
+        json: bool,
     },
     /// Show daemon status
     Status {
@@ -117,21 +133,22 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         } => cmd_send(session, &message, ff, sender_name.as_deref(), json, timeout).await,
         Commands::Wait {
             session,
-            session_id,
+            session_arg,
             timeout,
             since,
             json,
-        } => cmd_wait(session.or(session_id), timeout, since, json).await,
+        } => cmd_wait(session.or(session_arg), timeout, since, json).await,
         Commands::Recap {
             session,
-            session_id,
+            session_arg,
             json,
-        } => cmd_recap(session.or(session_id), json).await,
+        } => cmd_recap(session.or(session_arg), json).await,
         Commands::List { json } => cmd_list(json).await,
         Commands::Close {
             session,
-            session_id,
-        } => cmd_close(session.or(session_id)).await,
+            session_arg,
+            json,
+        } => cmd_close(session.or(session_arg), json).await,
         Commands::Status { json } => cmd_status(json).await,
         Commands::Stop => cmd_stop().await,
         Commands::Daemon => crate::daemon::run_daemon().await,
@@ -335,7 +352,7 @@ async fn cmd_send(
 
     if !resp.status().is_success() {
         let err: ErrorResponse = resp.json().await?;
-        bail!("{}", err.error);
+        fail(json_output, &err.error, "SEND_ERROR");
     }
 
     let msg: SendMessageResponse = resp.json().await?;
@@ -360,6 +377,9 @@ async fn cmd_send(
 
     if json_output {
         println!("{}", serde_json::to_string(&result).unwrap());
+        if result.timeout {
+            process::exit(2);
+        }
     } else if result.closed {
         println!("[session closed]");
     } else if result.timeout {
@@ -367,6 +387,7 @@ async fn cmd_send(
             "[timeout after {}s, no reply]",
             result.timeout_after.unwrap_or(0)
         );
+        process::exit(2);
     } else {
         for m in &result.messages {
             println!("{}: {}", m.sender, m.content);
@@ -404,13 +425,16 @@ async fn cmd_wait(
 
     if !resp.status().is_success() {
         let err: ErrorResponse = resp.json().await?;
-        bail!("{}", err.error);
+        fail(json_output, &err.error, "WAIT_ERROR");
     }
 
     let result: WaitResponse = resp.json().await?;
 
     if json_output {
         println!("{}", serde_json::to_string(&result).unwrap());
+        if result.timeout {
+            process::exit(2);
+        }
     } else if result.closed {
         println!("[session closed]");
     } else if result.timeout {
@@ -418,6 +442,7 @@ async fn cmd_wait(
             "timeout after {}s, no new messages",
             result.timeout_after.unwrap_or(0)
         );
+        process::exit(2);
     } else {
         for msg in &result.messages {
             println!(
@@ -443,7 +468,7 @@ async fn cmd_recap(session_arg: Option<String>, json_output: bool) -> anyhow::Re
 
     if !resp.status().is_success() {
         let err: ErrorResponse = resp.json().await?;
-        bail!("{}", err.error);
+        fail(json_output, &err.error, "RECAP_ERROR");
     }
 
     let recap: RecapResponse = resp.json().await?;
@@ -495,7 +520,7 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_close(session_arg: Option<String>) -> anyhow::Result<()> {
+async fn cmd_close(session_arg: Option<String>, json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
     let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "close").await?;
 
@@ -505,10 +530,17 @@ async fn cmd_close(session_arg: Option<String>) -> anyhow::Result<()> {
 
     if resp.status().is_success() {
         let result: CloseSessionResponse = resp.json().await?;
-        println!("Session {}: {}", session_id, result.status);
+        if json_output {
+            println!(
+                "{}",
+                serde_json::json!({"session_id": session_id, "status": result.status})
+            );
+        } else {
+            println!("Session {}: {}", session_id, result.status);
+        }
     } else {
         let err: ErrorResponse = resp.json().await?;
-        bail!("{}", err.error);
+        fail(json_output, &err.error, "CLOSE_ERROR");
     }
 
     Ok(())
