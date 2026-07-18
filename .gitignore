@@ -3,4 +3,7 @@
 /eval/agent-tasks/
 /eval/results/
 /eval/tmp/
+/eval/.harness-state.env
+/eval/.harness-state.env.tmp
+/eval/.harness.pid
 

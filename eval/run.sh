@@ -1,73 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CHIT_BIN="${CHIT_BIN:-$(dirname "$0")/../target/release/chit}"
-BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
-SCENARIOS_DIR="$BASE_DIR/scenarios"
-AGENT_TASKS_DIR="$BASE_DIR/agent-tasks"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
 
-if [ ! -f "$CHIT_BIN" ]; then
-  CHIT_BIN="$(dirname "$0")/../target/debug/chit"
-fi
-if [ ! -f "$CHIT_BIN" ]; then
-  echo "Error: chit binary not found. Build with: cargo build --release"
-  exit 1
-fi
-
-feedback_dir_for() {
-  echo "$AGENT_TASKS_DIR/$1/feedback"
-}
-
-check_daemon_health() {
-  local pid_file="$1"
-  local chit_home="$2"
-  if [ ! -f "$pid_file" ]; then
-    echo "Error: No PID file found at $pid_file"
-    return 1
-  fi
-  local pid
-  pid=$(cat "$pid_file")
-  if ! kill -0 "$pid" 2>/dev/null; then
-    echo "Error: Daemon (PID $pid) is not running"
-    return 1
-  fi
-  sleep 1
-  if ! CHIT_HOME="$chit_home" "$CHIT_BIN" list &>/dev/null; then
-    echo "Error: Daemon (PID $pid) is running but not responding to 'chit list'"
-    return 1
-  fi
-  echo "Daemon OK (PID $pid)"
-  return 0
-}
-
-show_chit_version() {
-  local version
-  version=$("$CHIT_BIN" --version 2>/dev/null || echo "unknown")
-  echo "chit version: $version"
-}
-
-cleanup() {
-  echo "Cleaning up temp directories..."
-  rm -rf "$BASE_DIR/tmp" "$AGENT_TASKS_DIR"
-  echo "Done."
-}
-
-clean_scenario() {
-  local scenario="$1"
-  echo "Cleaning previous $scenario run..."
-  rm -rf "$BASE_DIR/tmp/$scenario" "$AGENT_TASKS_DIR/$scenario"
-  # Clean up stale daemon PID from previous run
-  if [ -f "$BASE_DIR/tmp/daemon.pid" ]; then
-    local pid
-    pid=$(cat "$BASE_DIR/tmp/daemon.pid")
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "Stopping stale daemon (PID $pid)..."
-      kill "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-    fi
-    rm -f "$BASE_DIR/tmp/daemon.pid"
-  fi
-}
+# --- Scenario functions (available to both run.sh and harness.sh) ---
 
 setup_cross_project() {
   clean_scenario "cross-project"
@@ -310,7 +247,7 @@ TASK
   disown
   local daemon_pid=$!
   echo $daemon_pid > "$BASE_DIR/tmp/daemon.pid"
-  echo "Starting daemon..."
+  msg "Starting daemon..."
 
   if ! check_daemon_health "$BASE_DIR/tmp/daemon.pid" "$tmp_dir/.chit"; then
     echo "Error: Daemon failed to start. Aborting."
@@ -319,11 +256,9 @@ TASK
 
   show_chit_version
 
-  echo "==========================================="
-  echo "  cross-project eval: READY"
-  echo "==========================================="
-  echo ""
-  echo "Copy these into parallel Task tool calls:"
+  hdr "cross-project eval: READY"
+  msg ""
+  msg "Copy these into parallel Task tool calls:"
   echo ""
   while IFS= read -r line; do echo "$line"; done < "$AGENT_TASKS_DIR/cross-project/agent-alpha.md" | \
     awk '/^# Agent Alpha/{p=1} p{print}'
@@ -346,42 +281,7 @@ TASK
   echo "CHIT_HOME=$tmp_dir/.chit"
   echo "Daemon PID: $(cat $BASE_DIR/tmp/daemon.pid)"
   echo ""
-  echo "After both finish:  ./eval/run.sh collect cross-project"
-  echo "==========================================="
-}
-
-collect_feedback() {
-  local scenario="$1"
-  local feedback_dir
-  feedback_dir=$(feedback_dir_for "$scenario")
-  stop_daemon
-  echo "==========================================="
-  echo "  $scenario eval: COLLECTED"
-  echo "==========================================="
-  echo ""
-  if [ -d "$feedback_dir" ]; then
-    local count=0
-    for f in "$feedback_dir"/*.md; do
-      if [ -f "$f" ]; then
-        echo "--- $(basename "$f" .md) ---"
-        cat "$f"
-        echo ""
-        count=$((count + 1))
-      fi
-    done
-    if [ "$count" -eq 0 ]; then
-      echo "No feedback files found in $feedback_dir"
-    else
-      echo "---"
-      echo "Saved $count feedback file(s) in $feedback_dir"
-    fi
-  else
-    echo "No feedback directory found at $feedback_dir"
-    echo "Did the agents write their feedback files?"
-  fi
-  echo ""
-  echo "Next step:  ./eval/run.sh critique $scenario"
-  echo "==========================================="
+  msg "After both finish:  ./eval/run.sh collect cross-project"
 }
 
 collect_cross_project() {
@@ -550,7 +450,7 @@ TASK
   disown
   local daemon_pid=$!
   echo $daemon_pid > "$BASE_DIR/tmp/daemon.pid"
-  echo "Starting daemon..."
+  msg "Starting daemon..."
 
   if ! check_daemon_health "$BASE_DIR/tmp/daemon.pid" "$tmp_dir/.chit"; then
     echo "Error: Daemon failed to start. Aborting."
@@ -559,11 +459,9 @@ TASK
 
   show_chit_version
 
-  echo "==========================================="
-  echo "  observe eval: READY"
-  echo "==========================================="
-  echo ""
-  echo "Launch all in parallel: Alpha, Beta, Gamma, and Monitor"
+  hdr "observe eval: READY"
+  msg ""
+  msg "Launch all in parallel: Alpha, Beta, Gamma, and Monitor"
   echo ""
   echo "### Agent Alpha prompt"
   echo '```'
@@ -588,95 +486,11 @@ TASK
   echo "CHIT_HOME=$tmp_dir/.chit"
   echo "Daemon PID: $(cat $BASE_DIR/tmp/daemon.pid)"
   echo ""
-  echo "After all finish:  ./eval/run.sh collect observe"
-  echo "==========================================="
+  msg "After all finish:  ./eval/run.sh collect observe"
 }
 
 collect_observe() {
   collect_feedback "observe"
-}
-
-critique_generate() {
-  local scenario="$1"
-  local feedback_dir
-  feedback_dir=$(feedback_dir_for "$scenario")
-  local title="$2"
-  local specifics="$3"
-
-  echo "==========================================="
-  echo "  CRITIC PROMPT — $scenario"
-  echo "==========================================="
-  echo ""
-
-  local feedback_content=""
-  if [ -d "$feedback_dir" ]; then
-    for f in "$feedback_dir"/*.md; do
-      if [ -f "$f" ]; then
-        feedback_content="$feedback_content
-$(cat "$f")
-"
-      fi
-    done
-  fi
-
-  if [ -z "$feedback_content" ]; then
-    echo "WARNING: No feedback files found in $feedback_dir"
-    echo "The agents may not have written their feedback files yet."
-    echo "You can still manually paste feedback below."
-    echo ""
-    feedback_content="__FEEDBACK__"
-  fi
-
-  cat << CRITPROMPT
-Copy this into a Task tool call for the critic sub-agent:
-
-task description="Critic — $scenario" subagent_type="general" prompt="
-# Critic — $title
-
-You are evaluating feedback from agents that tested the **chit** agent-to-agent messaging tool.
-
-## Collected Feedback
-
-$feedback_content
-
-## Your Task
-
-Read the feedback above carefully. Cross-reference between agents and assess each item:
-
-1. **Cross-reference** — identify where different agents report the same issue in different words
-2. **Assess materiality** — would fixing this make a real, noticeable difference to the product?
-3. **Classify** each item as:
-   - **P0** — must fix (crashes, data loss, hangs, broken core flow)
-   - **P1** — should fix (confusing UX, missing feature that blocks workflow)
-   - **P2** — nice to have (polish, convenience, minor ergonomics)
-4. **Recommend only material items** — exclude noise, one-off preferences, and non-actionable feedback
-$specifics
-
-Return your analysis as:
-## Critic Report
-### Recommended Items
-- **P0** | <description> | <rationale>
-- **P1** | <description> | <rationale>
-- **P2** | <description> | <rationale>
-
-### Excluded Items (with reasons)
-- <description> | <why excluded>
-
-### Summary
-- Total issues found vs recommended
-- Patterns or themes in the feedback
-- Single most impactful change to make
----
-"
-CRITPROMPT
-
-  if [ "$feedback_content" != "__FEEDBACK__" ]; then
-    echo ""
-    echo "==========================================="
-    echo "  Feedback was auto-injected from $feedback_dir"
-    echo "  If agents didn't write files, manually replace __FEEDBACK__ above."
-    echo "==========================================="
-  fi
 }
 
 critique_cross_project() {
@@ -687,21 +501,14 @@ critique_observe() {
   critique_generate "observe" "Observe Eval" "- The feedback is specifically about the \`chit observe\` feature — pay special attention to multi-agent monitoring concerns"
 }
 
-stop_daemon() {
-  if [ -f "$BASE_DIR/tmp/daemon.pid" ]; then
-    local pid
-    pid=$(cat "$BASE_DIR/tmp/daemon.pid")
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "Stopping daemon (PID $pid)..."
-      kill "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-    fi
-    rm -f "$BASE_DIR/tmp/daemon.pid"
-  else
-    echo "No daemon PID file found."
-  fi
-}
-
+# State-aware dispatch with precondition checks
+# When .harness-state.env exists, enforce transition order.
+# When absent, operate in backward-compatible mode (no guards).
+# Source guard: only run dispatch when executed directly, not when sourced.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+cleanup_stale_tmp
+lock_acquire
+trap lock_release EXIT
 case "${1:-help}" in
   setup)
     if [ -z "${2:-}" ]; then
@@ -710,25 +517,42 @@ case "${1:-help}" in
       exit 1
     fi
     mkdir -p "$BASE_DIR/tmp"
+    if [ -f "$STATE_FILE" ]; then
+      check_precondition "setup" "initial"
+    fi
     "setup_${2//-/_}"
+    STATE=launching
+    SCENARIO="$2"
+    state_write
     ;;
   collect)
     if [ -z "${2:-}" ]; then
       echo "Usage: $0 collect <scenario>"
       exit 1
     fi
+    if [ -f "$STATE_FILE" ]; then
+      check_precondition "collect" "launching"
+    fi
     "collect_${2//-/_}"
+    STATE=collecting
+    state_write
     ;;
   critique)
     if [ -z "${2:-}" ]; then
       echo "Usage: $0 critique <scenario>"
       exit 1
     fi
+    if [ -f "$STATE_FILE" ]; then
+      check_precondition "critique" "collecting"
+    fi
     "critique_${2//-/_}"
+    STATE=critiquing
+    state_write
     ;;
   cleanup)
     stop_daemon
     cleanup
+    state_reset
     ;;
   *)
     echo "Usage: $0 {setup|collect|critique|cleanup} [scenario]"
@@ -743,3 +567,4 @@ case "${1:-help}" in
     exit 1
     ;;
 esac
+fi

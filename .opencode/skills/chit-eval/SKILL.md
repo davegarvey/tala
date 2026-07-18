@@ -1,36 +1,94 @@
 ---
 name: chit-eval
-description: Run chit evaluation loops — set up scenarios, launch sub-agents, collect feedback, fix issues, and re-validate. Load this when the user asks to evaluate chit, run an eval, or iterate on product feedback.
+description: Run chit evaluation loops — sub-agents test chit in realistic multi-agent scenarios, feedback is triaged, and product improvements are implemented automatically. Load when you want to evaluate chit, run an eval, or iterate on product feedback.
 license: MIT
-compatibility: Requires chit development environment (AGENTS.md + eval/run.sh)
+compatibility: Requires chit development environment (AGENTS.md + eval/ directory)
 metadata:
   author: chit
-  version: "1.0"
+  version: "2.0"
 ---
+
 # chit Evaluation Workflow
 
-Evaluate chit by running sub-agents through realistic multi-agent scenarios. Sub-agents use chit to communicate cross-project and then provide structured product feedback. Agents act autonomously throughout the eval loop — no manual intervention.
+Evaluate chit by running sub-agents through realistic multi-agent scenarios. Sub-agents use chit to communicate cross-project, then provide structured feedback. The eval coordinator agent drives the full loop autonomously — setup, launch, collect, critique, analyze, spec, implement, and iterate — reporting progress at each step.
+
+The key architectural insight: the **harness** (`eval/harness.sh`) is a deterministic bash state machine that enforces correct step sequencing, precondition checks, and exit criteria. The **coordinator agent** (`eval-coordinator`) drives the harness and launches sub-agents via the Task tool. This splits the work: the harness handles control flow (reliable), the coordinator handles LLM work (analysis, code generation).
 
 ## Quick Start
 
 ```bash
-# 1. Setup (starts daemon, verifies health, writes task prompts, creates feedback dirs)
-./eval/run.sh setup cross-project
+# In a Task tool call, invoke the coordinator agent:
+task description="Run chit eval" subagent_type="general" prompt="
+Load /skill chit-eval
+Follow the eval coordinator agent prompt in .opencode/agents/eval-coordinator.md
+"
+```
 
-# 2. Launch sub-agents (copy prompts from setup output into Task tool calls)
-#    - Agent Alpha: sends bug report, waits for reply
-#    - Agent Beta:  reads messages, replies with fix
-#    Agents write feedback to eval/agent-tasks/<scenario>/feedback/ when done
+Or if you prefer to drive it manually (step by step):
 
-# 3. Collect (stops daemon, reads and displays saved feedback files)
-./eval/run.sh collect cross-project
+```bash
+# Set up the scenario
+./eval/harness.sh scenario cross-project
+./eval/harness.sh advance setup
 
-# 4. Critique (auto-injects saved feedback into critic prompt)
-./eval/run.sh critique cross-project
-# Copy the generated prompt into a Task tool call for the critic sub-agent
+# Launch sub-agents (copy prompts from the generated files)
+# ...
 
-# 5. Clean up
-./eval/run.sh cleanup
+# Collect and critique
+./eval/harness.sh advance collecting
+./eval/harness.sh advance critiquing
+
+# Save critic output
+echo '<critic-json>' | ./eval/harness.sh save-critic
+./eval/harness.sh advance analyzing
+
+# Fix issues or exit
+./eval/harness.sh advance spec   # if items found
+./eval/harness.sh advance exit   # if no items
+```
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────┐
+│           eval-coordinator agent             │
+│  (opencode subagent with bash + task tools)  │
+│  - reads harness status                      │
+│  - launches sub-agents via Task tool         │
+│  - reports progress to user                  │
+│  - loops until STATE=finished                │
+└──────────┬───────────────────────────────────┘
+           │ drives
+┌──────────▼───────────────────────────────────┐
+│           eval/harness.sh                    │
+│  (deterministic bash state machine)          │
+│  - 7 states, 8 guarded transitions           │
+│  - PID lock, atomic state file               │
+│  - precondition checks on every step         │
+│  - deterministic exit via structured JSON    │
+│  - auto mode: KEY=VALUE for agent parsing    │
+└──────────┬───────────────────────────────────┘
+           │ sources
+┌──────────▼───────────────────────────────────┐
+│           eval/lib.sh                        │
+│  (shared functions)                          │
+│  - daemon lifecycle                          │
+│  - feedback collection                       │
+│  - critic prompt generation                  │
+│  - state file read/write                     │
+│  - PID lock                                  │
+└──────────────────────────────────────────────┘
+```
+
+## State Machine
+
+```
+initial ──setup──→ launching ──collecting──→ collecting
+  ──critiquing──→ critiquing ──analyzing──→ analyzing
+  analyzing ──spec──→ specing ──pr──→ pr_ci
+  analyzing ──exit──→ finished
+  pr_ci ──setup──→ (next loop)
+  pr_ci ──exit──→ finished
 ```
 
 ## Eval Scenarios
@@ -40,125 +98,46 @@ Evaluate chit by running sub-agents through realistic multi-agent scenarios. Sub
 | `cross-project` | 2 (Alpha + Beta) | Two agents collaborate across projects via chit |
 | `observe` | 4 (Alpha + Beta + Gamma + Monitor) | Agents work independently; monitor watches via `chit observe` |
 
-## The Eval Loop
+## Coordinator Agent (eval-coordinator)
 
-```
-1. Setup    →  ./eval/run.sh setup <scenario>
-                Creates temp dirs, starts daemon, writes task prompts.
-                Daemon health verified via `chit list`. chit version displayed.
+Defined in `.opencode/agents/eval-coordinator.md`. This agent runs the full loop:
 
-2. Launch   →  Copy prompts from terminal into Task tool calls.
-                Agents write feedback to a file AND return it inline.
-                Launch all agents in parallel (workers + monitor).
+1. **Setup** — `harness.sh scenario <name>` + `harness.sh advance setup`
+2. **Launch sub-agents** — reads prompt files, launches Task tool calls, waits
+3. **Collect** — `harness.sh advance collecting`
+4. **Critique** — `harness.sh advance critiquing`, launches critic via Task tool
+5. **Analyze** — `harness.sh advance analyzing`, evaluates exit criteria
+6. **Exit** — if no issues found, `harness.sh advance exit` → DONE
+7. **Spec** — creates openspec change, red-teams via Task tool, implements
+8. **PR** — `harness.sh advance pr`, loops to step 1
 
-3. Collect  →  ./eval/run.sh collect <scenario>
-                Stops daemon, reads saved feedback files,
-                prints aggregated feedback to terminal.
-                Feedback persists in eval/agent-tasks/<scenario>/feedback/
+The agent reports progress at each step. The harness prevents skipping or misordering steps.
 
-4. Critique →  ./eval/run.sh critique <scenario>
-                Auto-reads saved feedback files and generates a
-                ready-to-use critic prompt with real feedback injected.
-                Copy the output into a Task tool call for the critic.
+## Deterministic Exit Criteria
 
-5. Analyze  →  Read the critic's report. Review recommended items:
-                - P0 bugs (crashes, data loss, hangs)
-                - P1 friction (confusing UX, missing features)
-                - P2 wishes (nice-to-haves)
-                ↓
-        Any items selected for spec?
-       /                          \
-      YES                          NO → STOP
-       │
-6. Spec      →  openspec new change "<name>"  (proposal → specs → design → tasks)
-
-7. Implement →  Work through tasks, test after each group
-
-8. PR & CI   →  Commit, PR, wait for CI, fix if needed, merge
-       │
-       └──→  Go to step 1 (full re-run)
+The critic sub-agent outputs structured JSON:
+```json
+{
+  "p0": [{"description": "...", "rationale": "..."}],
+  "p1": [{"description": "...", "rationale": "..."}],
+  "p2": [{"description": "...", "rationale": "..."}],
+  "summary": "..."
+}
 ```
 
-Keep iterating: implement the selected items, then re-run the eval (step 1) with the same scenario. Each round validates that previous fixes actually resolved the issues and surfaces any new ones. The loop exits only when step 5 produces zero items worth specifying. As long as feedback contains material improvements — P0 bugs, P1 friction, or strong P2 signals — carry on looping.
-
-### CI Failure Patterns
-
-| Failure | Likely Cause | Fix |
-|---|---|---|
-| Compile error | Rust type mismatch, missing import | Fix locally, amend commit |
-| Test failure (e2e) | Shared `.chit/active-session` race | Rerun with `--test-threads=1` |
-| Test failure (unit) | Logic change broke invariant | Update test or fix logic |
-| Clippy warning | Style issue | `cargo clippy --fix` |
-| Integration flake | Daemon port conflict, timeout | Rerun the job |
-
-## Lessons from Previous Eval Rounds
-
-### Daemon lifecycle
-- Daemons die when the bash tool times out if not properly detached. Use `nohup` + `disown` to keep them alive.
-- `eval/run.sh` now uses `nohup` + `disown` so setup exits cleanly even from the bash tool.
-- Before re-running, kill stale daemons: `pkill -f "chit daemon"`
-
-### CHIT_HOME
-- Always set CHIT_HOME for both the daemon and sub-agents.
-- The eval runner does this automatically. Sub-agents must export it.
-
-### Active session gotchas
-- `chit start` now sets the active session. Run `chit use <id>` to switch to a different one.
-- Stale `.chit/active-session` in CWD can confuse parallel tests. Always use:
-  `cargo test --test e2e -- --test-threads=1`
-
-### Sub-agent tips
-- Give agents a specific suggested chit workflow (concrete commands, not just goals).
-- Include the exact CHIT_HOME path in the prompt.
-- Launch all agents in parallel — even for observe, the Monitor should start with the workers.
-- Agents self-resolve: Alpha sends, Beta waits/recaps/replies.
-
-### Feedback analysis
-- Agents often report the same issue differently. Cross-reference.
-- "Frustrating" = P0. "Would be nice" = P2. 
-- If an agent says `wait` didn't work, it's likely a race condition in the broadcast channel.
-- If an agent couldn't discover a feature (e.g. `chit use`, session rename), the UX needs work.
-- If both agents independently request the same thing (e.g. `-s` short flag for `--session`), it's a strong signal.
-- If `chit wait` doesn't show the session ID on receipt, agents have to run `chit list`/`recap` separately to reply — a clear friction point.
-- `chit start` silently switching the active session is confusing when agents experiment. Better to keep it scoped: create only, use `chit use` to activate.
-- `chit rename` isn't a top-level command — it's `chit session rename`. Double-check command structure in task docs.
-- `chit observe`'s scope (showing all sessions including the observer's own) can be surprising. Clarify in docs.
-- Agents must write feedback to a file AND return it inline. The file feeds the critique step; the inline copy is for the human reader. The `collect` command checks for file existence and warns if agents skipped it.
-
-### OpenSpec workflow
-- Always red team the spec before implementing. Find inaccurate claims (e.g. "endpoint already supports X" when it doesn't), contradictions, and missing edge cases.
-- Name resolution (`chit use <name>`) is client-side (fetch all, filter) to avoid daemon changes. Works because session count is small.
-- `chit send` vs `resolve_session_id` inconsistency is intentional: send is a write (misrouted messages are silently lost), recap/close/follow are reads (safe to auto-route).
-- Tests sharing CWD race on `.chit/active-session`. Isolate with `chit_in(..., Some(project_dir), ...)` or use `--test-threads=1`.
-
-### CI after eval changes
-- Always run `cargo test --test e2e -- --test-threads=1` before pushing — parallel test threads cause flaky active-session races.
-- If CI fails on a flaky test, rerun the job before debugging. If it fails consistently, check for active-session file pollution from other tests.
+The harness evaluates programmatically: P0+P1 == 0 → exit criteria met. No LLM judgment in the exit decision.
 
 ## Adding a New Scenario
 
-1. Create `eval/scenarios/<name>.md` with:
-   - `## Scenario` — narrative description
-   - `## Setup` — expected directory structure and seed files
-   - `## Agent Tasks` — one section per agent, describing their project context and goal
-   - `## Feedback` — questions each agent should answer
-2. Add `setup_<name>`, `collect_<name>`, and `critique_<name>` functions in `eval/run.sh`.
-3. Register the scenario name in the `case` statement's help text.
-
-### Best practices for setup functions
-
-- Call `clean_scenario "<name>"` at the start to remove previous run artifacts
-- Create feedback dir: `feedback_dir=$(feedback_dir_for "<name>")` then `mkdir -p "$feedback_dir"`
-- Include the exact feedback file path in each agent's task prompt (e.g. `$feedback_dir/alpha.md`)
-- Use `check_daemon_health` after starting the daemon instead of a bare `sleep`
-- Call `show_chit_version` to record which binary was tested
-- For collect, delegate to the shared `collect_feedback "<name>"`
-- For critique, delegate to the shared `critique_generate "<name>" "<Title>" "<specifics>"`
+1. Create `eval/scenarios/<name>.md` with agent tasks and setup instructions
+2. Add `setup_<name>`, `collect_<name>`, and `critique_<name>` functions to `eval/run.sh`
+3. The harness auto-discovers scenarios from `eval/scenarios/*.md`
 
 ## Reference
 
-- `AGENTS.md` — high-level framework docs
-- `eval/run.sh` — the orchestrator
+- `eval/harness.sh` — deterministic state machine (interactive + --auto mode)
+- `eval/lib.sh` — shared library (state file, PID lock, daemon lifecycle)
+- `eval/run.sh` — thin wrapper (backward compatible, sourced by harness)
+- `.opencode/agents/eval-coordinator.md` — autonomous coordinator agent
 - `eval/scenarios/` — scenario definitions
-- `.opencode/skills/chit/SKILL.md` — end-user chit skill (what agents use)
-- `.opencode/skills/chit-eval/SKILL.md` — this skill (what you're reading now)
+- `.opencode/skills/chit/SKILL.md` — end-user chit skill

@@ -44,6 +44,9 @@ chit start
 | `chit wait [session]` | Block until next message arrives. `--timeout <s>` |
 | `chit recap [session]` | Full conversation transcript |
 | `chit list` | List active sessions |
+| `chit listen [--from] [--match]` | Watch all sessions (alias: `chit observe`) |
+| `chit watch [session]` | Stream messages live via SSE (aliases: `follow`, `stream`) |
+| `chit agents` | List active participants across sessions |
 | `chit close [session]` | End a session |
 | `chit status` | Show daemon info |
 | `chit stop` | Stop the daemon |

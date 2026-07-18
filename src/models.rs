@@ -129,6 +129,13 @@ pub struct ObserveEvent {
     pub message: Option<Message>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSummary {
+    pub sender: String,
+    pub last_seen: DateTime<Utc>,
+    pub message_count: usize,
+}
+
 /// Query parameters for the recap endpoint
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecapQuery {

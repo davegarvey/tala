@@ -45,6 +45,7 @@ pub fn create_router(store: Arc<Store>) -> Router {
         .route("/api/sessions/wait-new", get(wait_new_session))
         .route("/api/sessions/wait-all", get(wait_all))
         .route("/api/observe", get(observe_events))
+        .route("/api/agents", get(agents))
         .route("/api/status", get(status))
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state)
@@ -767,6 +768,39 @@ async fn observe_events(
     use tokio_stream::wrappers::ReceiverStream;
     let stream = ReceiverStream::new(rx_channel);
     (StatusCode::OK, Sse::new(stream)).into_response()
+}
+
+async fn agents(State(state): State<AppState>) -> impl IntoResponse {
+    use std::collections::BTreeMap;
+    let sessions = state.store.list_sessions().await;
+    let mut agent_map: BTreeMap<String, (chrono::DateTime<chrono::Utc>, usize)> = BTreeMap::new();
+
+    for summary in &sessions {
+        if summary.closed {
+            continue;
+        }
+        let msgs = state.store.get_messages_since(&summary.id, 0).await;
+        for msg in &msgs {
+            let entry = agent_map
+                .entry(msg.sender.clone())
+                .or_insert((msg.timestamp, 0));
+            if msg.timestamp > entry.0 {
+                entry.0 = msg.timestamp;
+            }
+            entry.1 += 1;
+        }
+    }
+
+    let agents: Vec<AgentSummary> = agent_map
+        .into_iter()
+        .map(|(sender, (last_seen, message_count))| AgentSummary {
+            sender,
+            last_seen,
+            message_count,
+        })
+        .collect();
+
+    (StatusCode::OK, Json(agents))
 }
 
 async fn status(State(state): State<AppState>) -> impl IntoResponse {

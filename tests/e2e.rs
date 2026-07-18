@@ -636,13 +636,39 @@ fn test_wait_after_close_returns_messages_and_closed_true() {
 }
 
 #[test]
-fn test_follow_after_close() {
+fn test_watch_after_close() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
     chit_ok(home.path(), &["close", &sess]);
 
     let (stdout, _stderr, ok) = chit(
+        home.path(),
+        &[
+            "watch",
+            "--session",
+            &sess,
+            "--since",
+            "0",
+            "--timeout",
+            "3",
+            "--json",
+        ],
+    );
+    assert!(ok, "watch after close should succeed");
+    assert!(stdout.contains("closed"), "should emit closed event");
+
+    chit_stop(home.path());
+}
+
+#[test]
+fn test_follow_alias_still_works() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = chit_start(home.path());
+
+    chit_ok(home.path(), &["close", &sess]);
+
+    let (stdout, stderr, ok) = chit(
         home.path(),
         &[
             "follow",
@@ -655,8 +681,12 @@ fn test_follow_after_close() {
             "--json",
         ],
     );
-    assert!(ok, "follow after close should succeed");
+    assert!(ok, "follow alias should still work after close");
     assert!(stdout.contains("closed"), "should emit closed event");
+    assert!(
+        stderr.contains("deprecated"),
+        "follow alias should emit deprecation warning"
+    );
 
     chit_stop(home.path());
 }
@@ -1099,23 +1129,22 @@ fn test_list_shows_session_name() {
 }
 
 #[test]
-fn test_observe_timeout() {
+fn test_listen_timeout() {
     let home = tempfile::tempdir().unwrap();
 
     let sess = chit_start(home.path());
 
     let child = std::process::Command::new(chit_bin())
         .env("HOME", home.path())
-        .args(["observe", "--since", "0", "--json", "--timeout", "3"])
+        .args(["listen", "--since", "0", "--json", "--timeout", "3"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
 
-    // Send a message so observe has something to see
     chit_ok(
         home.path(),
-        &["send", "--session", &sess, "observe-timeout-test"],
+        &["send", "--session", &sess, "listen-timeout-test"],
     );
 
     let output = child.wait_with_output().unwrap();
@@ -1123,11 +1152,11 @@ fn test_observe_timeout() {
 
     assert!(
         output.status.success(),
-        "observe with timeout should exit successfully"
+        "listen with timeout should exit successfully"
     );
     assert!(
-        stdout.contains("observe-timeout-test"),
-        "observe should capture the message: {}",
+        stdout.contains("listen-timeout-test"),
+        "listen should capture the message: {}",
         stdout
     );
 
@@ -1135,35 +1164,28 @@ fn test_observe_timeout() {
 }
 
 #[test]
-fn test_observe_streams_all_sessions() {
+fn test_listen_streams_all_sessions() {
     let home = tempfile::tempdir().unwrap();
     let sess1 = chit_start(home.path());
     let sess2 = chit_start(home.path());
 
     let mut child = std::process::Command::new(chit_bin())
         .env("HOME", home.path())
-        .args(["observe", "--since", "0", "--json"])
+        .args(["listen", "--since", "0", "--json"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .expect("failed to start observe");
+        .expect("failed to start listen");
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     chit_ok(
         home.path(),
-        &[
-            "send",
-            "--session",
-            &sess1,
-            "--as",
-            "alpha",
-            "observe-msg-1",
-        ],
+        &["send", "--session", &sess1, "--as", "alpha", "listen-msg-1"],
     );
     chit_ok(
         home.path(),
-        &["send", "--session", &sess2, "--as", "beta", "observe-msg-2"],
+        &["send", "--session", &sess2, "--as", "beta", "listen-msg-2"],
     );
 
     std::thread::sleep(std::time::Duration::from_secs(2));
@@ -1173,23 +1195,23 @@ fn test_observe_streams_all_sessions() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(
-        stdout.contains("observe-msg-1"),
-        "observe should see msg from session 1: {}",
+        stdout.contains("listen-msg-1"),
+        "listen should see msg from session 1: {}",
         stdout
     );
     assert!(
-        stdout.contains("observe-msg-2"),
-        "observe should see msg from session 2: {}",
+        stdout.contains("listen-msg-2"),
+        "listen should see msg from session 2: {}",
         stdout
     );
-    assert!(stdout.contains("alpha"), "observe should show sender alpha");
-    assert!(stdout.contains("beta"), "observe should show sender beta");
+    assert!(stdout.contains("alpha"), "listen should show sender alpha");
+    assert!(stdout.contains("beta"), "listen should show sender beta");
 
     chit_stop(home.path());
 }
 
 #[test]
-fn test_observe_channel_filter() {
+fn test_listen_channel_filter() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
@@ -1200,11 +1222,11 @@ fn test_observe_channel_filter() {
 
     let mut child = std::process::Command::new(chit_bin())
         .env("HOME", home.path())
-        .args(["observe", "--since", "0", "--channel", "help", "--json"])
+        .args(["listen", "--since", "0", "--channel", "help", "--json"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .expect("failed to start observe");
+        .expect("failed to start listen");
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -1228,7 +1250,7 @@ fn test_observe_channel_filter() {
 
     assert!(
         stdout.contains("help-request-msg"),
-        "observe --channel should filter: {}",
+        "listen --channel should filter: {}",
         stdout
     );
     assert!(
@@ -1240,17 +1262,17 @@ fn test_observe_channel_filter() {
 }
 
 #[test]
-fn test_observe_from_filter() {
+fn test_listen_from_filter() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
     let mut child = std::process::Command::new(chit_bin())
         .env("HOME", home.path())
-        .args(["observe", "--since", "0", "--from", "monitor", "--json"])
+        .args(["listen", "--since", "0", "--from", "monitor", "--json"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .expect("failed to start observe");
+        .expect("failed to start listen");
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -1285,29 +1307,29 @@ fn test_observe_from_filter() {
 
     assert!(
         stdout.contains("monitor-only-msg"),
-        "observe --from should include monitor msg: {}",
+        "listen --from should include monitor msg: {}",
         stdout
     );
     assert!(
         !stdout.contains("should-be-filtered"),
-        "observe --from should exclude other senders"
+        "listen --from should exclude other senders"
     );
 
     chit_stop(home.path());
 }
 
 #[test]
-fn test_observe_match_filter() {
+fn test_listen_match_filter() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
     let mut child = std::process::Command::new(chit_bin())
         .env("HOME", home.path())
-        .args(["observe", "--since", "0", "--match", "urgent", "--json"])
+        .args(["listen", "--since", "0", "--match", "urgent", "--json"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .expect("failed to start observe");
+        .expect("failed to start listen");
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -1342,12 +1364,12 @@ fn test_observe_match_filter() {
 
     assert!(
         stdout.contains("urgent"),
-        "observe --match should match urgent: {}",
+        "listen --match should match urgent: {}",
         stdout
     );
     assert!(
         !stdout.contains("normal update"),
-        "observe --match should exclude non-matching"
+        "listen --match should exclude non-matching"
     );
 
     chit_stop(home.path());
@@ -1389,17 +1411,17 @@ fn test_send_stdin() {
 }
 
 #[test]
-fn test_follow_streams_messages() {
+fn test_watch_streams_messages() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
     let mut child = Command::new(chit_bin())
         .env("HOME", home.path())
-        .args(["follow", "--session", &sess, "--since", "0", "--json"])
+        .args(["watch", "--session", &sess, "--since", "0", "--json"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .expect("failed to start follow");
+        .expect("failed to start watch");
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -1416,23 +1438,23 @@ fn test_follow_streams_messages() {
 
     assert!(
         stdout.contains("live-msg"),
-        "follow should stream msg: {}",
+        "watch should stream msg: {}",
         stdout
     );
-    assert!(stdout.contains("streamer"), "follow should show sender");
+    assert!(stdout.contains("streamer"), "watch should show sender");
 
     chit_stop(home.path());
 }
 
 #[test]
-fn test_follow_limit_caps_messages() {
+fn test_watch_limit_caps_messages() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
     let mut child = Command::new(chit_bin())
         .env("HOME", home.path())
         .args([
-            "follow",
+            "watch",
             "--session",
             &sess,
             "--since",
@@ -1444,7 +1466,7 @@ fn test_follow_limit_caps_messages() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .expect("failed to start follow");
+        .expect("failed to start watch");
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -1457,20 +1479,20 @@ fn test_follow_limit_caps_messages() {
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let count = stdout.matches("\"content\"").count();
-    assert_eq!(count, 1, "follow --limit 1 should cap at 1: {}", stdout);
+    assert_eq!(count, 1, "watch --limit 1 should cap at 1: {}", stdout);
 
     chit_stop(home.path());
 }
 
 #[test]
-fn test_follow_limit_zero_is_unlimited() {
+fn test_watch_limit_zero_is_unlimited() {
     let home = tempfile::tempdir().unwrap();
     let sess = chit_start(home.path());
 
     let mut child = Command::new(chit_bin())
         .env("HOME", home.path())
         .args([
-            "follow",
+            "watch",
             "--session",
             &sess,
             "--since",
@@ -1482,7 +1504,7 @@ fn test_follow_limit_zero_is_unlimited() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .expect("failed to start follow");
+        .expect("failed to start watch");
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
