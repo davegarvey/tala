@@ -1,26 +1,29 @@
 ## Why
 
-Three P1 issues were identified in the cross-project eval: (1) misleading error messages when the daemon is unreachable, (2) no visibility into unread or new messages in list/status, and (3) no lightweight non-blocking poll for new messages since last check. These gaps impact both human and autonomous agent workflows.
+The cross-project eval critic identified three P1 and three P2 issues from two autonomous agents testing tala. The most critical gaps are: no way for agents to discover each other across projects, confusingly overlapping message-watching commands, and silent active-session changes after close/reopen. These undermine tala's core value proposition of cross-project agent-to-agent messaging.
 
 ## What Changes
 
-- **Better daemon connectivity errors**: When `daemon.json` exists but the daemon is unreachable (wrong `TALA_HOME`, stale file, crashed daemon), show the path attempted and a clear diagnostic message instead of a raw connection error
-- **Unread message indicators**: `tala list` output shows unread count per session; `tala status` shows total unread across all sessions; active session is marked with `*` in list output
-- **New `tala whatsup` command**: Non-blocking incremental poll for new messages since last check. Reads a local cursor file, queries all messages since that cursor across all sessions, displays them grouped by session, and updates the cursor
+- **Agent discovery**: Add `tala discover` command so agents can find and connect to agents in other projects by scanning session history and agent configs across known project roots
+- **Command naming clarification**: Add help text disambiguation and cross-references between `wait`/`listen`/`stream`/`whatsup` so users can understand the difference at a glance
+- **Active session integrity**: `tala use` now warns when switching active session implicitly (e.g. after close/reopen), and `tala wait`/`tala send` verify the active session is still active before using it
+- **`--new` renamed to `--new-session`**: The `tala wait --new` flag renamed to `--new-session` for clarity
+- **`tala listen` default `--since`**: Default `since` for `tala listen` changed to "latest checkpoint" instead of 0, so it only shows new messages on first connect (opt-in to full history with `--since 0`)
 
 ## Capabilities
 
 ### New Capabilities
-- `whatsup`: Lightweight non-blocking incremental poll for new messages since last checked
-- `unread-indicators`: Unread/new-message counts in list and status output
+- `cross-project-discovery`: Mechanism for agents to discover and connect to agents in other projects
 
 ### Modified Capabilities
-- (none — first spec creation)
+- `cli-ux`: Message-watching help text disambiguation; `--new` renamed to `--new-session`; `listen` default behavior changed from full-history to new-messages-only
+- `active-session-integrity`: Active session verification and warning on implicit switches
+- `command-organization`: Top-level vs subcommand split clarification
 
 ## Impact
 
-- **cli.rs**: Add `whatsup` command variant + handler; modify `cmd_list` and `cmd_status` for unread indicators; improve `ensure_daemon_running` error messages
-- **store.rs**: Add cursor file I/O for per-project cursor tracking; add unread count to session summaries
-- **models.rs**: Add `unread_count` field to `SessionSummary`; potentially minor changes to daemon info structs
-- **api.rs**: May need endpoint for unread counts or cursor-based session queries
-- **No new dependencies**
+- `src/cli.rs` — new `discover` command, flag rename, help text updates
+- `src/api.rs` — new discovery endpoint if needed, listen since default change
+- `src/models.rs` — new discovery models
+- `src/store.rs` — active session integrity handling
+- `tests/e2e.rs` — tests for all new behaviors

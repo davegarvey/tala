@@ -37,16 +37,18 @@ tala start
 ## Commands
 
 | Command | Description |
-|---|---|
+|---|---|---|
 | `tala init` | Create `./.tala/config.json` with project identity |
 | `tala start [message]` | Start daemon + new session (optionally with first message) |
-| `tala chat [session] <message>` | Send a message (blocks for reply). `--ff` to fire-and-forget |
-| `tala wait [session]` | Block until next message arrives. `--timeout <s>` |
+| `tala send [session] <message>` | Send a message (`--wait` to block for reply) |
+| `tala wait [session]` | Block until next message arrives. `--new-session` to wait for new session |
 | `tala recap [session]` | Full conversation transcript |
-| `tala list` | List active sessions |
-| `tala listen [--from] [--match]` | Watch all sessions (alias: `tala observe`) |
-| `tala stream [session]` | Stream messages live via SSE (aliases: `follow`, `watch`) |
+| `tala list` | List sessions |
+| `tala listen [--from] [--match]` | Watch all sessions via SSE |
+| `tala stream [session]` | Stream messages live via SSE for a single session |
+| `tala whatsup` | Show new messages since last check (non-blocking) |
 | `tala agents` | List active participants across sessions |
+| `tala discover` | Find agents in other projects |
 | `tala close [session]` | End a session |
 | `tala status` | Show daemon info |
 | `tala stop` | Stop the daemon |

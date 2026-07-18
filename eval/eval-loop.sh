@@ -206,6 +206,17 @@ phase_collect() {
   rm -f "$tmp"
 }
 
+validate_critic_json() {
+  local json="$1"
+  printf '%s\n' "$json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for k in ['p0', 'p1', 'p2']:
+    assert k in data, f'Missing required key: {k}'
+    assert isinstance(data[k], list), f'Key {k} must be an array, got {type(data[k]).__name__}'
+" 2>&1
+}
+
 phase_critique() {
   harness advance critiquing
 
@@ -214,24 +225,67 @@ phase_critique() {
     die "Critic prompt not found at $critic_prompt"
   fi
 
-  say "Launching critic agent..."
-  local critic_output
-  critic_output=$(run_agent "$critic_prompt" "Critic" "")
+  local max_retries=3
+  local retry=0
+  local critic_output=""
+  local critic_json=""
+  local validation_msg=""
+  local ok=false
 
-  local critic_json
-  critic_json=$(echo "$critic_output" | sed -n '/```json/,/```/p' | sed '1d;$d')
-  if [ -z "$critic_json" ]; then
-    critic_json=$(echo "$critic_output" | sed -n '/```/,/```/p' | sed '1d;$d')
-  fi
-  if [ -z "$critic_json" ]; then
-    critic_json=$(echo "$critic_output" | grep -Eo '\{[^}]*"p0"[^}]*"p1"[^}]*"p2"[^}]*\}' | head -1)
-  fi
+  while [ "$retry" -lt "$max_retries" ] && [ "$ok" = false ]; do
+    if [ "$retry" -gt 0 ]; then
+      local retry_prompt
+      retry_prompt=$(mktemp)
+      cat "$critic_prompt" > "$retry_prompt"
+      cat >> "$retry_prompt" << PROMPT
+
+## JSON Validation Failed
+
+Your previous response did not produce valid JSON. Details:
+
+$validation_msg
+
+Please respond again with ONLY valid JSON matching the schema above. Do not include markdown code fences, explanatory text, or any formatting — just the raw JSON object. Make sure arrays use proper comma separators and there are no trailing commas.
+
+PROMPT
+      critic_output=$(run_agent "$retry_prompt" "Critic (retry $((retry + 1))/$max_retries)" "")
+      rm -f "$retry_prompt"
+    else
+      say "Launching critic agent..."
+      critic_output=$(run_agent "$critic_prompt" "Critic" "")
+    fi
+
+    critic_json=$(echo "$critic_output" | sed -n '/```json/,/```/p' | sed '1d;$d')
+    if [ -z "$critic_json" ]; then
+      critic_json=$(echo "$critic_output" | sed -n '/```/,/```/p' | sed '1d;$d')
+    fi
+    if [ -z "$critic_json" ]; then
+      critic_json=$(echo "$critic_output" | grep -Eo '\{[^}]*"p0"[^}]*"p1"[^}]*"p2"[^}]*\}' | head -1)
+    fi
+    if [ -z "$critic_json" ]; then
+      critic_json=$(echo "$critic_output" | grep -Eo '\{.*\}' | head -1)
+    fi
+
+    if [ -z "$critic_json" ]; then
+      validation_msg="No JSON content found in response"
+    else
+      validation_msg=$(validate_critic_json "$critic_json")
+    fi
+
+    if [ -z "$validation_msg" ]; then
+      ok=true
+    else
+      say "WARNING: Invalid JSON (attempt $((retry + 1))/$max_retries): ${validation_msg%%$'\n'*}"
+    fi
+
+    retry=$((retry + 1))
+  done
 
   local tmp
   tmp=$(mktemp)
 
-  if [ -z "$critic_json" ]; then
-    say "WARNING: Could not extract JSON from critic output. Using fallback."
+  if [ "$ok" = false ]; then
+    say "WARNING: Could not extract valid JSON from critic output after $max_retries attempts. Using fallback."
     critic_json='{"p0":[],"p1":[],"p2":[],"summary":"extraction failed"}'
     echo "p0: 0" > "$tmp"
     echo "p1: 0" >> "$tmp"
@@ -290,13 +344,6 @@ phase_analyze() {
 phase_implement() {
   state_read
   local loop_num="${LOOP:-0}"
-  local change_name="eval-fix-loop-${loop_num}"
-
-  if [ -d "openspec/changes/$change_name" ]; then
-    say "Change $change_name already exists, removing..."
-    rm -rf "openspec/changes/$change_name"
-  fi
-  openspec new change "$change_name"
 
   local total
   total=$(jq '.p0 | length + .p1 | length' "$AGENT_TASKS_DIR/$SCENARIO/critic-output-loop-${loop_num}.json" 2>/dev/null || echo "?")
@@ -312,60 +359,78 @@ You are implementing fixes for issues found during the tala eval loop.
 ## Context
 
 The eval scenario "$SCENARIO" has identified $total material issue(s) that need fixing.
-Read the change directory at openspec/changes/$change_name/ for details.
 
 ## Your Tasks
 
-1. Create all openspec artifacts for this change:
+1. **Propose a change name.** Based on the issues found, choose a short descriptive kebab-case name (e.g. "fix-csv-parsing", "add-error-handling"). Do not include the loop number — that will be added automatically.
+
+2. Create the openspec change with your proposed name:
+   - \`openspec new change <name>\`
+
+3. Create all openspec artifacts for this change:
    - Read the critic output at: $AGENT_TASKS_DIR/$SCENARIO/critic-output-loop-${loop_num}.json
-   - Run: \`openspec instructions proposal --change $change_name\` and write the proposal file
+   - Run: \`openspec instructions proposal --change <name>\` and write the proposal file
    - Continue creating each artifact (specs, design, tasks) using \`openspec instructions\`
    - If openspec tells you to STOP, IGNORE that — continue until all artifacts exist
 
-2. Red-team the spec yourself — review for gaps and flaws before implementing
+4. **Red-team the spec yourself** — review for gaps and flaws before implementing. Note what you find — you'll report it in the summary.
 
-3. Implement all tasks from the tasks.md file
+5. Implement all tasks from the tasks.md file
 
-4. When done, commit all changes:
+6. When done, commit all changes:
    - \`git add -A\`
-   - \`git commit -m "eval fix loop $loop_num: implement fixes"\`
+   - \`git commit -m "<name>: implement fixes"\`
 
-5. Write a JSON summary of what you did to: $summary_file
-   Include fields: change_name, commits (array), files_changed (array), issues_fixed (array)
+7. Write a JSON summary of what you did to: $summary_file
+   Include fields: change_name, commits (array), files_changed (array), issues_fixed (array), red_team_findings (array of strings describing gaps/flaws you caught during red-teaming)
    Example:
    \`\`\`json
-   {"change_name":"$change_name","commits":["abc123"],"files_changed":["src/main.py"],"issues_fixed":["fixed csv parsing bug"]}
+   {"change_name":"<your-proposed-name>","commits":["abc123"],"files_changed":["src/main.py"],"issues_fixed":["fixed csv parsing bug"],"red_team_findings":["missing error handling for empty input","spec didn't cover edge case X"]}
    \`\`\`
 
-Report what you did and what was fixed.
+Report what you did, what was fixed, and what red-team gaps you caught.
 PROMPT
 
   run_agent "$implement_prompt" "Implementation" "$SCRIPT_DIR/.."
   rm -f "$implement_prompt"
 
   if [ -f "$summary_file" ]; then
+    local change_name
+    change_name=$(jq -r '.change_name // empty' "$summary_file" 2>/dev/null || echo "")
+    if [ -z "$change_name" ]; then
+      change_name="fix-loop-${loop_num}"
+      say "WARNING: summary missing change_name, falling back to '$change_name'"
+    fi
     report "implement" "$summary_file"
     rm -f "$summary_file"
   else
+    local change_name="fix-loop-${loop_num}"
     local tmp
     tmp=$(mktemp)
     echo "change: $change_name" > "$tmp"
     echo "summary: agent did not write summary file" >> "$tmp"
     report "implement" "$tmp"
     rm -f "$tmp"
+    say "WARNING: No summary file written, falling back to '$change_name'"
   fi
 
-  if git -C "$SCRIPT_DIR/.." log --oneline -1 2>/dev/null | grep -q "eval fix loop $loop_num"; then
-    :
-  else
-    say "WARNING: No commit detected for loop $loop_num. You may need to commit manually."
-  fi
+  # store change_name for subsequent phases
+  echo "$change_name" > "$BASE_DIR/tmp/change-name-${loop_num}.txt"
 }
 
 phase_finalize() {
   state_read
   local loop_num="${LOOP:-0}"
-  local branch_name="eval-fix-loop-${loop_num}"
+
+  local change_name
+  if [ -f "$BASE_DIR/tmp/change-name-${loop_num}.txt" ]; then
+    change_name=$(cat "$BASE_DIR/tmp/change-name-${loop_num}.txt")
+  else
+    change_name="fix-loop-${loop_num}"
+    say "WARNING: no stored change_name, falling back to '$change_name'"
+  fi
+
+  local branch_name="${change_name}-${loop_num}"
 
   cd "$SCRIPT_DIR/.."
 

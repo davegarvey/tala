@@ -1,33 +1,53 @@
 ## Context
 
-Tala uses a file-based cursor system via `.tala/active-session` for tracking the active session per project directory. The `daemon.json` file stores the daemon's host/port. Currently, connection failures produce raw `reqwest` errors (e.g., "connection refused") without indicating which path or `TALA_HOME` value was used. Session listings show total message counts but no new/unread differentiation. There is no lightweight non-blocking command for polling new messages — agents must use `tala wait` (blocking long-poll) or `tala recap` (full transcript).
+The cross-project eval critic identified 3 P1 and 3 P2 issues from two agents testing tala. This change addresses all 6. The codebase is Rust, using clap for CLI, reqwest for HTTP, and SSE for streaming.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Add diagnostic information (path, TALA_HOME) to daemon connection errors
-- Add unread counts to `tala list` and `tala status`
-- Add active session marker (`*`) to `tala list`
-- Add `tala whatsup` command for non-blocking incremental message poll
-- Per-project cursor persistence at `.tala/cursor`, shared across `whatsup` and unread tracking
+- Add `tala discover` command for finding agents in parent/sibling projects
+- Add help-text cross-references for message-watching commands
+- Rename `--new` to `--new-session` on `tala wait`
+- Change `tala listen` default `--since` from 0 to cursor value (new messages only)
+- Fix active session integrity on close and reopen
+- Clarify command organization in help text
 
 **Non-Goals:**
-- Server-side per-agent cursor tracking (keeping it client-side avoids state complexity)
-- Push notifications or real-time unread updates
-- UI-level changes beyond CLI text/JSON output
+- No full peer-to-peer agent protocol (still single-daemon per project)
+- No daemon-side changes for discovery (uses existing `/api/agents` endpoint)
+- No structural reorganization of the CLI enum
 
 ## Decisions
 
-1. **Client-side cursor, not server-side**: The cursor file (`.tala/cursor`) is stored per project directory, matching the existing pattern of `.tala/active-session`. Server-side per-agent cursors would require agent identity tracking and more complex state management. The client-side approach is simpler and sufficient for the eval use case. The trade-off is that cursor is per-project, not per-agent-identity.
+### D1: Cross-project discovery — parent/sibling directory scan
+- **Decision**: `tala discover` scans parent directories (up to 3 levels) for `.tala/config.json`, then scans siblings of each parent. For each discovered project, reads config (agent name) and daemon.json (host/port). If daemon reachable, queries `/api/agents`.
+- **Implementation**: Pure CLI-side scan — no new daemon endpoints needed. Uses existing `store::tala_home()` logic pattern for reading configs.
+- **File**: `cmd_discover()` in cli.rs + helper `discover_projects()` in store.rs or new module.
 
-2. **`tala whatsup` as a new top-level command**: Fits the existing command structure pattern. Alternative considered: adding `--since` to `tala list`. Rejected because `list` shows session metadata, not message content. The `whatsup` name fills the gap between `tala wait` (blocking) and `tala recap` (full history).
+### D2: Help text cross-references
+- **Decision**: Add `after_help` / `long_about` text to clap command definitions for `Wait`, `Listen`, `Stream`, `WhatsUp`, `Recap`, `Agents`.
+- **File**: cli.rs — edit the `#[command(about = "...", long_about = "...")]` attributes.
 
-3. **Reusing the observe endpoint for `whatsup`**: The existing `/api/observe?since=N` endpoint already returns all messages across all sessions since a cursor. With `timeout_secs=0` the daemon can return immediately. Alternative: creating a dedicated `/api/whats-new` endpoint. Rejected to keep API surface minimal — the observe endpoint is a superset.
+### D3: --new to --new-session rename
+- **Decision**: Change the clap attribute `long = "new"` to `long = "new-session"`. Add `alias = "new"` for backward compatibility.
+- **File**: cli.rs — edit the `r#new: bool` field on `Wait`.
 
-4. **Unread counts computed from cursor**: Rather than adding new daemon state, unread counts are computed client-side: total messages per session minus messages up to cursor. The daemon returns `message_count` in `SessionSummary` — the CLI computes `unread_count = message_count - messages_seen_count`. Alternative: daemon computes unread per session using per-project cursors. Rejected for simplicity — client-side computation matches the cursor approach.
+### D4: Listen default since from cursor
+- **Decision**: In `cmd_listen`, replace `since.unwrap_or(0)` with `since.unwrap_or_else(|| store::read_cursor().await.unwrap_or(0))`. Update cursor on message receive.
+- **File**: cli.rs — `cmd_listen` function.
+
+### D5: Active session on close/reopen
+- **Decision**: In `cmd_close`, when session is sourced from `resolve_session_id` (active session implicit), clear the active session file after successful close and print a warning about the cleared session.
+- **Decision**: In `cmd_session_reopen`, after successful reopen, write the session as active and print "(now active)".
+- **File**: cli.rs — `cmd_close` and `cmd_session_reopen`.
+
+### D6: Command organization hints
+- **Decision**: Add `after_help` to `Use` mentioning `tala session`. Add aliases/notes to `SessionCommands::List` and `SessionCommands::Close` help.
+- **File**: cli.rs.
 
 ## Risks / Trade-offs
 
-- [Cursor staleness] If the cursor file is deleted, all messages become "unread" again → Acceptable; same as first-time behavior
-- [Performance for many sessions] `tala whatsup` fetches all messages since cursor across all sessions → Acceptable for typical eval scenarios; if performance becomes an issue, pagination can be added later
-- [Cursor shared between whatsup and list] `tala list` updating the cursor could interfere with whatsup expectations → Mitigation: only `tala whatsup` updates the cursor; `tala list` reads it but does not advance it
+- [Directory scanning is imprecise] — scanning parent/sibling dirs is best-effort; it may miss projects in arbitrary locations. Acceptable for a discovery aid.
+- [Listen default change is behavioral] — existing users relying on `tala listen` showing full history will be surprised. Mitigated by documented `--since 0` opt-in.
+- [--new alias compatibility] — keeping `--new` as a hidden alias ensures existing scripts and skills continue working.
+- [Close clearing active session] — when user does `tala close` without args, they probably want to close the active session and have it cleared. Explicit close with `tala close sess_id` preserves the active session.

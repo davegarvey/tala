@@ -208,6 +208,15 @@ impl Store {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(session_id) {
             session.name = Some(name.to_string());
+            // Persist session name to disk
+            let mut names: HashMap<String, String> = HashMap::new();
+            for (sid, s) in sessions.iter() {
+                if let Some(ref n) = s.name {
+                    names.insert(sid.clone(), n.clone());
+                }
+            }
+            drop(sessions);
+            let _ = write_sessions_json(&names).await;
             Ok(true)
         } else {
             Ok(false)
@@ -222,14 +231,12 @@ impl Store {
             }
             session.closed = true;
             session.last_activity = Utc::now();
-            drop(sessions);
 
-            if let Some(tx) = self.broadcast.read().await.get(session_id) {
+            let sid = session_id.to_string();
+            if let Some(tx) = self.broadcast.read().await.get(&sid) {
                 let _ = tx.send(DaemonEvent::SessionClosed);
             }
-            let _ = self
-                .global_tx
-                .send((session_id.to_string(), DaemonEvent::SessionClosed));
+            let _ = self.global_tx.send((sid, DaemonEvent::SessionClosed));
             true
         } else {
             false
@@ -244,13 +251,15 @@ impl Store {
             }
             session.closed = false;
             session.last_activity = Utc::now();
-            drop(sessions);
 
-            let event = DaemonEvent::SessionReopened(session_id.to_string());
-            if let Some(tx) = self.broadcast.read().await.get(session_id) {
-                let _ = tx.send(event.clone());
+            let sid = session_id.to_string();
+            let event = DaemonEvent::SessionReopened(sid.clone());
+            if let Some(tx) = self.broadcast.read().await.get(&sid) {
+                let _ = tx.send(event);
             }
-            let _ = self.global_tx.send((session_id.to_string(), event));
+            let _ = self
+                .global_tx
+                .send((sid, DaemonEvent::SessionReopened(session_id.to_string())));
             true
         } else {
             false
@@ -309,6 +318,20 @@ pub async fn write_daemon_json(port: u16) -> anyhow::Result<()> {
 pub async fn remove_daemon_json() {
     let path = tala_home().join("daemon.json");
     let _ = tokio::fs::remove_file(&path).await;
+}
+
+fn sessions_path() -> PathBuf {
+    tala_home().join("sessions.json")
+}
+
+pub async fn write_sessions_json(names: &HashMap<String, String>) -> anyhow::Result<()> {
+    let path = sessions_path();
+    let tmp = tala_home().join("sessions.json.tmp");
+    let content = serde_json::to_string_pretty(names)?;
+    tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+    tokio::fs::write(&tmp, &content).await?;
+    tokio::fs::rename(&tmp, &path).await?;
+    Ok(())
 }
 
 pub fn local_active_session_path() -> PathBuf {

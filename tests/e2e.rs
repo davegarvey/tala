@@ -1015,15 +1015,26 @@ fn test_send_no_active_session_with_existing_sessions_fails() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
 
-    tala_start(home.path());
+    let sess = tala_start(home.path());
 
-    let (_stdout, stderr, ok) =
-        tala_in(home.path(), Some(project.path()), &["send", "should fail"]);
-    assert!(!ok, "send with existing sessions but no active should fail");
+    // With a single open session, auto-target should succeed
+    let (_stdout, stderr, ok) = tala_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "should auto-target"],
+    );
     assert!(
-        stderr.contains("No active session set"),
-        "error should list active sessions: {}",
+        ok,
+        "send with single open session should auto-target: stderr={}",
         stderr
+    );
+
+    // Verify message was delivered to the single session
+    let recap = tala_ok(home.path(), &["recap", &sess]);
+    assert!(
+        recap.contains("should auto-target"),
+        "recap should contain message from auto-target: {}",
+        recap
     );
 
     tala_stop(home.path());

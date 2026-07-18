@@ -351,12 +351,20 @@ async fn wait_new_session(
         loop {
             match rx.recv().await {
                 Ok((_sid, DaemonEvent::SessionCreated(id))) => {
-                    return serde_json::json!({"session_id": id});
+                    let msgs = state.store.get_messages_since(&id, 0).await;
+                    let first = msgs.first().cloned();
+                    let mut resp = serde_json::json!({"session_id": id});
+                    if let Some(msg) = first {
+                        resp["message"] = serde_json::to_value(msg).unwrap_or_default();
+                    }
+                    return resp;
                 }
                 Ok((_sid, DaemonEvent::NewMessage(msg))) => {
                     let sessions = state.store.list_sessions().await;
                     if sessions.len() > existing_count {
-                        return serde_json::json!({"session_id": msg.session_id});
+                        let mut resp = serde_json::json!({"session_id": msg.session_id});
+                        resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
+                        return resp;
                     }
                 }
                 Ok((_sid, DaemonEvent::SessionClosed)) => continue,
@@ -637,7 +645,7 @@ async fn observe_events(
     }
 
     let mut rx = state.store.subscribe_global();
-    let sessions_clone = sessions.clone();
+    let store_for_task = state.store.clone();
 
     let (tx, rx_channel) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
 
@@ -670,8 +678,8 @@ async fn observe_events(
 
             match result {
                 Ok((session_id, event)) => {
-                    let session = sessions_clone.iter().find(|s| s.id == session_id);
-                    let session_name = session.and_then(|s| s.name.clone());
+                    let session = store_for_task.get_session(&session_id).await;
+                    let session_name = session.as_ref().and_then(|s| s.name.clone());
 
                     if let Some(ref ch) = channel {
                         match session_name {
