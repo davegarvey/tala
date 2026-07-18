@@ -1,32 +1,28 @@
-## 1. Fix reopen race condition
+## 1. Session Reopen Fix
 
-- [ ] 1.1 In `store.rs`, modify `reopen_session` to hold the sessions write lock through the broadcast send, eliminating the TOCTOU window
+- [ ] 1.1 Fix reopen_session in api.rs to consistently set closed=false and verify send_message allows sending after reopen
 
-## 2. Fix stream --timeout
+## 2. TALA_HOME Error Messages
 
-- [ ] 2.1 In `cli.rs`, remove underscore prefix from `_timeout` parameter in `cmd_watch` and pass it to the API request
-- [ ] 2.2 In `api.rs`, add timeout support to `stream_events` SSE handler using `tokio::time::timeout`
+- [ ] 2.1 Fix daemon resolution error messages to check $TALA_HOME first before falling back to ~/.tala/
 
-## 3. Add session targeting improvements
+## 3. Listen Default Timeout
 
-- [ ] 3.1 Add `--session` / `-s` flag to `send`, `wait`, and `recap` subcommands in CLI argument definitions
-- [ ] 3.2 Implement auto-select of single open session when no active session is set
-- [ ] 3.3 Update session resolution helper to use auto-select
+- [ ] 3.1 Add default 300s timeout to `tala listen` command
+- [ ] 3.2 Check user config for default_timeout before falling back to 300
 
-## 4. Preserve session name on reply
+## 4. Session Rename Persistence
 
-- [ ] 4.1 In `store.rs` `add_message`, only set session name from sender if session currently has no name
+- [ ] 4.1 Add sessions.json persistence in store.rs (write on rename, load on daemon start)
+- [ ] 4.2 Ensure session name is not overwritten by counterparty messages
 
-## 5. Hide unread counts for closed sessions
+## 5. Daemon Stop Message
 
-- [ ] 5.1 In `cli.rs`, filter out or skip unread computation for closed sessions in `cmd_list`
+- [ ] 5.1 Improve `tala stop` to print "daemon is not running" when daemon.json doesn't exist
 
-## 6. Improve start output
+## 6. CLI Polish
 
-- [ ] 6.1 Enhance `cmd_start` output to show message confirmation alongside session ID
-- [ ] 6.2 Add inline message to `tala wait --json` output
-
-## 7. Verify and test
-
-- [ ] 7.1 Run `cargo build` to verify compilation
-- [ ] 7.2 Run `cargo test` to verify existing tests pass
+- [ ] 6.1 Add `tala session close` subcommand
+- [ ] 6.2 Clarify help text for `tala listen` vs `tala stream`
+- [ ] 6.3 Improve `--file` flag discoverability in help text
+- [ ] 6.4 Improve `tala init` help text

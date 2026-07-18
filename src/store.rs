@@ -208,6 +208,15 @@ impl Store {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(session_id) {
             session.name = Some(name.to_string());
+            // Persist session name to disk
+            let mut names: HashMap<String, String> = HashMap::new();
+            for (sid, s) in sessions.iter() {
+                if let Some(ref n) = s.name {
+                    names.insert(sid.clone(), n.clone());
+                }
+            }
+            drop(sessions);
+            let _ = write_sessions_json(&names).await;
             Ok(true)
         } else {
             Ok(false)
@@ -309,6 +318,20 @@ pub async fn write_daemon_json(port: u16) -> anyhow::Result<()> {
 pub async fn remove_daemon_json() {
     let path = tala_home().join("daemon.json");
     let _ = tokio::fs::remove_file(&path).await;
+}
+
+fn sessions_path() -> PathBuf {
+    tala_home().join("sessions.json")
+}
+
+pub async fn write_sessions_json(names: &HashMap<String, String>) -> anyhow::Result<()> {
+    let path = sessions_path();
+    let tmp = tala_home().join("sessions.json.tmp");
+    let content = serde_json::to_string_pretty(names)?;
+    tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+    tokio::fs::write(&tmp, &content).await?;
+    tokio::fs::rename(&tmp, &path).await?;
+    Ok(())
 }
 
 pub fn local_active_session_path() -> PathBuf {

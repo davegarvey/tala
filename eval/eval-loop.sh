@@ -373,7 +373,7 @@ The eval scenario "$SCENARIO" has identified $total material issue(s) that need 
    - Continue creating each artifact (specs, design, tasks) using \`openspec instructions\`
    - If openspec tells you to STOP, IGNORE that — continue until all artifacts exist
 
-4. Red-team the spec yourself — review for gaps and flaws before implementing
+4. **Red-team the spec yourself** — review for gaps and flaws before implementing. Note what you find — you'll report it in the summary.
 
 5. Implement all tasks from the tasks.md file
 
@@ -382,13 +382,13 @@ The eval scenario "$SCENARIO" has identified $total material issue(s) that need 
    - \`git commit -m "<name>: implement fixes"\`
 
 7. Write a JSON summary of what you did to: $summary_file
-   Include fields: change_name, commits (array), files_changed (array), issues_fixed (array)
+   Include fields: change_name, commits (array), files_changed (array), issues_fixed (array), red_team_findings (array of strings describing gaps/flaws you caught during red-teaming)
    Example:
    \`\`\`json
-   {"change_name":"<your-proposed-name>","commits":["abc123"],"files_changed":["src/main.py"],"issues_fixed":["fixed csv parsing bug"]}
+   {"change_name":"<your-proposed-name>","commits":["abc123"],"files_changed":["src/main.py"],"issues_fixed":["fixed csv parsing bug"],"red_team_findings":["missing error handling for empty input","spec didn't cover edge case X"]}
    \`\`\`
 
-Report what you did and what was fixed.
+Report what you did, what was fixed, and what red-team gaps you caught.
 PROMPT
 
   run_agent "$implement_prompt" "Implementation" "$SCRIPT_DIR/.."

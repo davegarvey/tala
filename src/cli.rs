@@ -43,7 +43,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize tala configuration for this project
+    /// Initialize tala config for this project directory (sets agent name used when sending messages)
     Init {
         #[arg(
             help = "Agent name for this project (defaults to directory name)",
@@ -78,7 +78,7 @@ pub enum Commands {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
-    /// Send a message (alias: send)
+    /// Send a message to a session (alias: tala send)
     #[command(alias = "send")]
     Chat {
         #[arg(help = "Session ID (positional, or use --session/-s)")]
@@ -87,7 +87,7 @@ pub enum Commands {
         session_arg: Option<String>,
         #[arg(help = "Message content (omit to read from piped stdin)")]
         message: Option<String>,
-        #[arg(long, help = "Read message content from a file")]
+        #[arg(long, help = "Read message content from a file (use - for filename to use piped stdin)")]
         file: Option<String>,
         #[arg(
             long,
@@ -137,7 +137,7 @@ pub enum Commands {
         )]
         r#new: bool,
     },
-    /// Stream new messages as they arrive (SSE)
+    /// Stream new messages as they arrive for a single session (SSE). For all sessions use `tala listen`.
     #[command(name = "stream")]
     Stream {
         #[arg(help = "Session ID (uses active session if set)")]
@@ -226,7 +226,7 @@ pub enum Commands {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
-    /// Observe all sessions for new messages. Use `tala agents` to discover active participants. For a single session use `tala stream`.
+    /// Observe all sessions for new messages (default timeout: 300s). Use `tala agents` to discover active participants. For a single session use `tala stream`.
     Listen {
         #[arg(long, help = "Only show messages with ID greater than this")]
         since: Option<u64>,
@@ -236,7 +236,7 @@ pub enum Commands {
         from: Option<String>,
         #[arg(long, help = "Only show messages in sessions with matching name")]
         channel: Option<String>,
-        #[arg(long, help = "Seconds to stay connected before disconnecting")]
+        #[arg(long, help = "Seconds to stay connected before disconnecting (default: 300, 0 = no timeout)")]
         timeout: Option<u64>,
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
@@ -1398,7 +1398,10 @@ async fn cmd_listen(
     if let Some(ref ch) = channel {
         path = format!("{}&channel={}", path, ch);
     }
-    if let Some(t) = timeout {
+    // Default timeout to 300s if not specified, unless explicitly set to 0
+    let timeout_secs = timeout.map(|t| if t == 0 { None } else { Some(t) }).flatten()
+        .or_else(|| Some(300u64));
+    if let Some(t) = timeout_secs {
         path = format!("{}&timeout_secs={}", path, t);
     }
     let url = daemon_url(&host, port, &path);
@@ -1992,7 +1995,13 @@ async fn cmd_stop() -> anyhow::Result<()> {
 
     #[cfg(unix)]
     {
-        let info = store::read_daemon_json().await?;
+        let info = match store::read_daemon_json().await {
+            Ok(info) => info,
+            Err(_) => {
+                println!("daemon is not running");
+                return Ok(());
+            }
+        };
         use std::process::Command;
         Command::new("kill")
             .arg(info.pid.to_string())
