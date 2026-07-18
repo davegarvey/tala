@@ -111,42 +111,42 @@ maintained by the agent in project-beta. You've noticed a CSV parsing bug
 and need to coordinate with them to get it fixed.
 
 ## This Is an Eval!
-Your real job is to evaluate the **chit tool itself**. chit is an agent-to-agent
+Your real job is to evaluate the **tala tool itself**. tala is an agent-to-agent
 messaging tool. Try it out, explore its features, and report what worked and
 what didn't. Your feedback directly shapes the product.
 
-The chit binary is at: $CHIT_BIN
+The tala binary is at: $TALA_BIN
 
-First, change to your project directory — this ensures chit uses the right active session:
+First, change to your project directory — this ensures tala uses the right active session:
 \`\`\`
 cd $tmp_dir/project-alpha
-export CHIT_HOME=$tmp_dir/.chit
+export TALA_HOME=$tmp_dir/.tala
 \`\`\`
 
 ## Scenario
 1. Read README.md and process.py to understand the CSV parsing bug
-2. Use chit to collaborate with the expert in project-beta
+2. Use tala to collaborate with the expert in project-beta
 3. Apply the fix and verify it works
 
-**But don't just follow a script** — explore chit's commands and see what you
+**But don't just follow a script** — explore tala's commands and see what you
 discover. Try things like starting sessions, sending with and without flags,
 checking session status, listing sessions, renaming, closing, using recap,
 sending files, JSON output, timeout options, etc. This is your chance to kick
 the tires.
 
-### chit commands to explore
+### tala commands to explore
 \`\`\`
-chit start <message>          Start a new session
-chit send <message>           Send a message (uses active session by default)
-chit wait                     Wait for new messages (sets active session)
-chit recap                    Read the full conversation
-chit list                     List all sessions
-chit status                   Show session status
-chit use <id>                 Set the active session
-chit close <id>               Close a session
-chit session rename <id> <name>  Give a session a name
-chit follow                   Stream new messages live
-chit observe                  Watch all sessions (multi-agent)
+tala start <message>          Start a new session
+tala send <message>           Send a message (uses active session by default)
+tala wait                     Wait for new messages (sets active session)
+tala recap                    Read the full conversation
+tala list                     List all sessions
+tala status                   Show session status
+tala use <id>                 Set the active session
+tala close <id>               Close a session
+tala session rename <id> <name>  Give a session a name
+tala follow                   Stream new messages live
+tala observe                  Watch all sessions (multi-agent)
 \`\`\`
 
 Try as many as you can. You don't need to use them all, but the more you
@@ -165,7 +165,7 @@ Answer honestly:
 - What was the most frustrating moment?
 - What surprised you (good or bad)?
 - If you could change one thing, what would it be?
-- Did using chit feel natural for agent-to-agent collaboration?
+- Did using tala feel natural for agent-to-agent collaboration?
 
 Start your file and inline response with:
 ## Feedback from Agent Alpha (project-alpha)
@@ -182,42 +182,42 @@ project-alpha maintains a library that depends on your project, and they've
 found a bug they need your help with.
 
 ## This Is an Eval!
-Your real job is to evaluate the **chit tool itself**. chit is an agent-to-agent
+Your real job is to evaluate the **tala tool itself**. tala is an agent-to-agent
 messaging tool. Try it out, explore its features, and report what worked and
 what didn't. Your feedback directly shapes the product.
 
-The chit binary is at: $CHIT_BIN
+The tala binary is at: $TALA_BIN
 
-First, change to your project directory — this ensures chit uses the right active session:
+First, change to your project directory — this ensures tala uses the right active session:
 \`\`\`
 cd $tmp_dir/project-beta
-export CHIT_HOME=$tmp_dir/.chit
+export TALA_HOME=$tmp_dir/.tala
 \`\`\`
 
 ## Scenario
 1. Read README.md to understand the CSV data format
-2. Watch for a message from project-alpha via chit
+2. Watch for a message from project-alpha via tala
 3. Diagnose the bug and help them fix it
 
-**But don't just follow a script** — explore chit's commands and see what you
+**But don't just follow a script** — explore tala's commands and see what you
 discover. Try things like waiting for messages with options, checking session
 status, listing active sessions, sending files, using recap to review the full
 conversation, renaming sessions, JSON output, etc. This is your chance to
 kick the tires.
 
-### chit commands to explore
+### tala commands to explore
 \`\`\`
-chit wait                     Wait for new messages (sets active session)
-chit send <message>           Send a message (uses active session by default)
-chit recap                    Read the full conversation
-chit list                     List all sessions
-chit status                   Show session status
-chit use <id>                 Set the active session
-chit close <id>               Close a session
-chit session rename <id> <name>  Give a session a name
-chit follow                   Stream new messages live
-chit start <message>          Start a new session
-chit observe                  Watch all sessions (multi-agent)
+tala wait                     Wait for new messages (sets active session)
+tala send <message>           Send a message (uses active session by default)
+tala recap                    Read the full conversation
+tala list                     List all sessions
+tala status                   Show session status
+tala use <id>                 Set the active session
+tala close <id>               Close a session
+tala session rename <id> <name>  Give a session a name
+tala follow                   Stream new messages live
+tala start <message>          Start a new session
+tala observe                  Watch all sessions (multi-agent)
 \`\`\`
 
 Try as many as you can. You don't need to use them all, but the more you
@@ -236,25 +236,25 @@ Answer honestly:
 - What was the most frustrating moment?
 - What surprised you (good or bad)?
 - If you could change one thing, what would it be?
-- Did using chit feel natural for agent-to-agent collaboration?
+- Did using tala feel natural for agent-to-agent collaboration?
 
 Start your file and inline response with:
 ## Feedback from Agent Beta (project-beta)
 TASK
 
   # Start the daemon (nohup + disown so the bash tool doesn't kill it on timeout)
-  CHIT_HOME="$tmp_dir/.chit" nohup "$CHIT_BIN" daemon > /dev/null 2>&1 &
+  TALA_HOME="$tmp_dir/.tala" nohup "$TALA_BIN" daemon > /dev/null 2>&1 &
   disown
   local daemon_pid=$!
   echo $daemon_pid > "$BASE_DIR/tmp/daemon.pid"
   msg "Starting daemon..."
 
-  if ! check_daemon_health "$BASE_DIR/tmp/daemon.pid" "$tmp_dir/.chit"; then
+  if ! check_daemon_health "$BASE_DIR/tmp/daemon.pid" "$tmp_dir/.tala"; then
     echo "Error: Daemon failed to start. Aborting."
     exit 1
   fi
 
-  show_chit_version
+  show_tala_version
 
   hdr "cross-project eval: READY"
   msg ""
@@ -278,7 +278,7 @@ TASK
   echo '"'
   echo '```'
   echo ""
-  echo "CHIT_HOME=$tmp_dir/.chit"
+  echo "TALA_HOME=$tmp_dir/.tala"
   echo "Daemon PID: $(cat $BASE_DIR/tmp/daemon.pid)"
   echo ""
   msg "After both finish:  ./eval/run.sh collect cross-project"
@@ -298,7 +298,7 @@ setup_observe() {
 # Project $proj
 
 A simple component. Create the required file and verify it works.
-When done, send a chit status update.
+When done, send a tala status update.
 SEED
   done
 
@@ -314,10 +314,10 @@ You are in project-alpha at: $tmp_dir/project-alpha
 
 ## Your Task
 
-First, change to your project directory — this ensures chit uses the right active session:
+First, change to your project directory — this ensures tala uses the right active session:
 \`\`\`
 cd $tmp_dir/project-alpha
-export CHIT_HOME=$tmp_dir/.chit
+export TALA_HOME=$tmp_dir/.tala
 \`\`\`
 
 Create \`src/server.py\` with a health-check endpoint that returns:
@@ -325,8 +325,8 @@ Create \`src/server.py\` with a health-check endpoint that returns:
 {"status": "ok", "version": "1.0.0"}
 \`\`\`
 
-Use chit to send status updates as you work (start, done, etc).
-All chit commands must be run from $tmp_dir/project-alpha.
+Use tala to send status updates as you work (start, done, etc).
+All tala commands must be run from $tmp_dir/project-alpha.
 
 ### Feedback (write to file + return inline)
 After your task, **write your feedback to the file below** AND include it in
@@ -335,7 +335,7 @@ your final message. Write the file first, then return the same content inline.
 Feedback file path: $feedback_dir/alpha.md
 
 Answer:
-- How easy was it to get started with chit?
+- How easy was it to get started with tala?
 - How intuitive were the commands?
 - Was anything confusing or surprising?
 - What would you improve?
@@ -351,15 +351,15 @@ You are in project-beta at: $tmp_dir/project-beta
 
 ## Your Task
 
-First, change to your project directory — this ensures chit uses the right active session:
+First, change to your project directory — this ensures tala uses the right active session:
 \`\`\`
 cd $tmp_dir/project-beta
-export CHIT_HOME=$tmp_dir/.chit
+export TALA_HOME=$tmp_dir/.tala
 \`\`\`
 
 Create \`src/watch.py\` that watches a file path and prints changes.
-Use chit to send status updates.
-All chit commands must be run from $tmp_dir/project-beta.
+Use tala to send status updates.
+All tala commands must be run from $tmp_dir/project-beta.
 
 ### Feedback (write to file + return inline)
 After your task, **write your feedback to the file below** AND include it in
@@ -368,7 +368,7 @@ your final message. Write the file first, then return the same content inline.
 Feedback file path: $feedback_dir/beta.md
 
 Answer:
-- How easy was it to get started with chit?
+- How easy was it to get started with tala?
 - How intuitive were the commands?
 - Was anything confusing or surprising?
 - What would you improve?
@@ -384,16 +384,16 @@ You are in project-gamma at: $tmp_dir/project-gamma
 
 ## Your Task
 
-First, change to your project directory — this ensures chit uses the right active session:
+First, change to your project directory — this ensures tala uses the right active session:
 \`\`\`
 cd $tmp_dir/project-gamma
-export CHIT_HOME=$tmp_dir/.chit
+export TALA_HOME=$tmp_dir/.tala
 \`\`\`
 
 Write documentation (README.md) for "ChitChat" — a fictional messaging API.
 Include title, description, and usage section.
-Use chit to send status updates.
-All chit commands must be run from $tmp_dir/project-gamma.
+Use tala to send status updates.
+All tala commands must be run from $tmp_dir/project-gamma.
 
 ### Feedback (write to file + return inline)
 After your task, **write your feedback to the file below** AND include it in
@@ -402,7 +402,7 @@ your final message. Write the file first, then return the same content inline.
 Feedback file path: $feedback_dir/gamma.md
 
 Answer:
-- How easy was it to get started with chit?
+- How easy was it to get started with tala?
 - How intuitive were the commands?
 - Was anything confusing or surprising?
 - What would you improve?
@@ -418,13 +418,13 @@ You are the monitor, watching all agent activity.
 
 ## Your Task
 
-First, change to the monitor directory — this ensures chit uses the right active session:
+First, change to the monitor directory — this ensures tala uses the right active session:
 \`\`\`
 cd $tmp_dir/monitor
-export CHIT_HOME=$tmp_dir/.chit
+export TALA_HOME=$tmp_dir/.tala
 \`\`\`
 
-Run \`chit observe\` and watch the three agents work.
+Run \`tala observe\` and watch the three agents work.
 Note what you can see — do you have enough context to understand each project?
 
 ### Feedback (write to file + return inline)
@@ -434,11 +434,11 @@ your final message. Write the file first, then return the same content inline.
 Feedback file path: $feedback_dir/monitor.md
 
 Answer:
-- Did \`chit observe\` give you an accurate picture of what was happening?
+- Did \`tala observe\` give you an accurate picture of what was happening?
 - Could you distinguish between the different sessions/agents?
 - What would make observe more useful?
 - How did you discover the observe command? Was it intuitive?
-- How easy was it to get started with chit?
+- How easy was it to get started with tala?
 - How intuitive were the commands?
 
 Start your file and inline response with:
@@ -446,18 +446,18 @@ Start your file and inline response with:
 TASK
 
   # Start daemon (nohup + disown so the bash tool doesn't kill it on timeout)
-  CHIT_HOME="$tmp_dir/.chit" nohup "$CHIT_BIN" daemon > /dev/null 2>&1 &
+  TALA_HOME="$tmp_dir/.tala" nohup "$TALA_BIN" daemon > /dev/null 2>&1 &
   disown
   local daemon_pid=$!
   echo $daemon_pid > "$BASE_DIR/tmp/daemon.pid"
   msg "Starting daemon..."
 
-  if ! check_daemon_health "$BASE_DIR/tmp/daemon.pid" "$tmp_dir/.chit"; then
+  if ! check_daemon_health "$BASE_DIR/tmp/daemon.pid" "$tmp_dir/.tala"; then
     echo "Error: Daemon failed to start. Aborting."
     exit 1
   fi
 
-  show_chit_version
+  show_tala_version
 
   hdr "observe eval: READY"
   msg ""
@@ -483,7 +483,7 @@ TASK
   cat "$AGENT_TASKS_DIR/observe/monitor.md"
   echo '```'
   echo ""
-  echo "CHIT_HOME=$tmp_dir/.chit"
+  echo "TALA_HOME=$tmp_dir/.tala"
   echo "Daemon PID: $(cat $BASE_DIR/tmp/daemon.pid)"
   echo ""
   msg "After all finish:  ./eval/run.sh collect observe"
@@ -498,7 +498,7 @@ critique_cross_project() {
 }
 
 critique_observe() {
-  critique_generate "observe" "Observe Eval" "- The feedback is specifically about the \`chit observe\` feature — pay special attention to multi-agent monitoring concerns"
+  critique_generate "observe" "Observe Eval" "- The feedback is specifically about the \`tala observe\` feature — pay special attention to multi-agent monitoring concerns"
 }
 
 # State-aware dispatch with precondition checks

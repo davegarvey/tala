@@ -82,19 +82,19 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            name: chit-linux-x86_64
+            name: tala-linux-x86_64
             cross: true
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-            name: chit-linux-aarch64
+            name: tala-linux-aarch64
             cross: true
           - target: aarch64-apple-darwin
             os: macos-latest
-            name: chit-macos-aarch64
+            name: tala-macos-aarch64
             cross: false
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            name: chit-windows-x86_64.exe
+            name: tala-windows-x86_64.exe
             cross: false
     runs-on: ${{ matrix.os }}
     permissions:
@@ -127,7 +127,7 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.name }}.tar.gz chit
+          tar czf ../../../${{ matrix.name }}.tar.gz tala
           cd -
           shasum -a 256 ${{ matrix.name }}.tar.gz > ${{ matrix.name }}.tar.gz.sha256
 
@@ -135,7 +135,7 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../${{ matrix.name }}.zip chit.exe
+          7z a ../../../${{ matrix.name }}.zip tala.exe
           cd -
 
       - name: Upload Release Asset (Unix)

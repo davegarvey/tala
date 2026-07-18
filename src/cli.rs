@@ -12,7 +12,7 @@ use crate::store;
 
 fn deprecation_warning(old: &str, new: &str) {
     eprintln!(
-        "warning: '{}' is deprecated, use 'chit {}' instead",
+        "error: '{}' is deprecated and will be removed in a future release. Use 'tala {}' instead.",
         old, new
     );
 }
@@ -31,9 +31,9 @@ fn fail(json: bool, msg: impl std::fmt::Display, code: &str) -> ! {
 
 #[derive(Parser)]
 #[command(
-    name = "chit",
+    name = "tala",
     about = "Agent-to-agent messaging for AI coding tools",
-    long_about = "chit is a lightweight messaging tool for AI agents working across projects.\n\nStart a session with `chit start`, send messages with `chit send`,\nwait for replies with `chit wait`, or watch all sessions with `chit listen`.\n\nEvery command supports --json for structured output.",
+    long_about = "tala is a lightweight messaging tool for AI agents working across projects.\n\nStart a session with `tala start`, send messages with `tala send`,\nwait for replies with `tala wait`, stream a session with `tala stream`,\nor observe all sessions with `tala listen`.\n\nEvery command supports --json for structured output.",
     version
 )]
 pub struct Cli {
@@ -43,7 +43,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize chit configuration for this project
+    /// Initialize tala configuration for this project
     Init {
         #[arg(
             help = "Agent name for this project (defaults to directory name)",
@@ -138,8 +138,8 @@ pub enum Commands {
         r#new: bool,
     },
     /// Stream new messages as they arrive (SSE)
-    #[command(name = "watch", alias = "stream")]
-    Watch {
+    #[command(name = "stream")]
+    Stream {
         #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
         #[arg(
@@ -159,9 +159,31 @@ pub enum Commands {
         #[arg(long, help = "Seconds to stay connected before disconnecting")]
         timeout: Option<u64>,
     },
-    /// Stream new messages as they arrive (SSE) [deprecated: use watch]
+    /// Stream new messages as they arrive (SSE) [deprecated: use stream]
     #[command(hide = true)]
     Follow {
+        #[arg(help = "Session ID (uses active session if set)")]
+        session: Option<String>,
+        #[arg(
+            long = "session",
+            short,
+            alias = "session-id",
+            conflicts_with = "session",
+            help = "Session ID"
+        )]
+        session_arg: Option<String>,
+        #[arg(long, help = "Only stream messages with ID greater than this")]
+        since: Option<u64>,
+        #[arg(long, help = "Maximum number of messages to stream (0 = unlimited)")]
+        limit: Option<usize>,
+        #[arg(long, short = 'j', help = "Output in JSON format")]
+        json: bool,
+        #[arg(long, help = "Seconds to stay connected before disconnecting")]
+        timeout: Option<u64>,
+    },
+    /// Stream new messages as they arrive (SSE) [deprecated: use stream]
+    #[command(hide = true)]
+    Watch {
         #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
         #[arg(
@@ -204,7 +226,7 @@ pub enum Commands {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
-    /// Watch all sessions for interesting messages. Use `chit agents` to discover active participants.
+    /// Observe all sessions for new messages. Use `tala agents` to discover active participants. For a single session use `tala stream`.
     Listen {
         #[arg(long, help = "Only show messages with ID greater than this")]
         since: Option<u64>,
@@ -392,7 +414,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 cmd_wait(session.or(session_arg), timeout, since, limit, from, json).await
             }
         }
-        Commands::Watch {
+        Commands::Stream {
             session,
             session_arg,
             since,
@@ -400,6 +422,17 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             json,
             timeout,
         } => cmd_watch(session.or(session_arg), since, limit, json, timeout).await,
+        Commands::Watch {
+            session,
+            session_arg,
+            since,
+            limit,
+            json,
+            timeout,
+        } => {
+            deprecation_warning("watch", "stream");
+            cmd_watch(session.or(session_arg), since, limit, json, timeout).await
+        }
         Commands::Follow {
             session,
             session_arg,
@@ -408,7 +441,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             json,
             timeout,
         } => {
-            deprecation_warning("follow", "watch");
+            deprecation_warning("follow", "stream");
             cmd_watch(session.or(session_arg), since, limit, json, timeout).await
         }
         Commands::Recap {
@@ -517,12 +550,12 @@ async fn resolve_session_id(
     let active: Vec<_> = sessions.iter().filter(|s| !s.closed).collect();
 
     match active.len() {
-        0 => bail!("No active sessions. Start one with `chit start`"),
+        0 => bail!("No active sessions. Start one with `tala start`"),
         1 => Ok(active[0].id.clone()),
         _ => {
             let ids: Vec<&str> = active.iter().map(|s| s.id.as_str()).collect();
             bail!(
-                "Multiple active sessions: {}. Specify one with `chit {} <session>` or set one with `chit use <session>`",
+                "Multiple active sessions: {}. Specify one with `tala {} <session>` or set one with `tala use <session>`",
                 ids.join(", "),
                 cmd_name
             );
@@ -531,12 +564,12 @@ async fn resolve_session_id(
 }
 
 async fn cmd_init(name: Option<String>) -> anyhow::Result<()> {
-    let chit_dir = std::path::PathBuf::from(".chit");
+    let chit_dir = std::path::PathBuf::from(".tala");
     tokio::fs::create_dir_all(&chit_dir).await?;
 
     let config_path = chit_dir.join("config.json");
     if config_path.exists() {
-        eprintln!("./.chit/config.json already exists");
+        eprintln!("./.tala/config.json already exists");
     } else {
         let project_name = name.unwrap_or_else(|| {
             std::env::current_dir()
@@ -546,7 +579,7 @@ async fn cmd_init(name: Option<String>) -> anyhow::Result<()> {
         });
         let config = json!({ "name": project_name });
         tokio::fs::write(&config_path, serde_json::to_string_pretty(&config)?).await?;
-        println!("Created ./.chit/config.json with name: {}", project_name);
+        println!("Created ./.tala/config.json with name: {}", project_name);
     }
 
     install_opencode_skills().await?;
@@ -559,47 +592,47 @@ async fn install_opencode_skills() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let skill_dir = opencode_dir.join("skills").join("chit");
+    let skill_dir = opencode_dir.join("skills").join("tala");
     tokio::fs::create_dir_all(&skill_dir).await?;
 
     let skill_path = skill_dir.join("SKILL.md");
     let skill = r#"---
-name: chit
+name: tala
 description: Agent-to-agent messaging for AI coding tools. Use to communicate with agents across projects, terminals, or sessions.
 license: MIT
-compatibility: Requires chit CLI v0.23+
+compatibility: Requires tala CLI v0.23+
 metadata:
-  author: chit
+  author: tala
   version: "2.1"
 ---
-# chit — Agent-to-Agent Messaging
+# tala — Agent-to-Agent Messaging
 
-Send FYI messages with `chit send "msg"` (uses active session, returns immediately). Requires `chit start` first.
-Request replies with `chit send --wait "question"`. Receive sessions with `chit wait --new`.
-Pipe messages: `echo "msg" | chit send`. All commands support `--json`.
+Send FYI messages with `tala send "msg"` (uses active session, returns immediately). Requires `tala start` first.
+Request replies with `tala send --wait "question"`. Receive sessions with `tala wait --new`.
+Pipe messages: `echo "msg" | tala send`. All commands support `--json`.
 
 ## Common Patterns
 
 | Task | Command |
 |---|---|
-| Broadcast FYI | `chit send "status: done"` |
-| Request + wait | `chit send --wait "need help" --timeout 300` |
-| Wait for incoming | `sess=$(chit wait --new --timeout 600)` |
-| Read transcript | `chit recap` |
-| Named session | `chit start --name "my-project"` |
-| Watch all | `chit listen` |
-| Filtered watch | `chit listen --from "alpha" --match "urgent"` |
-| Discover agents | `chit agents` |
+| Broadcast FYI | `tala send "status: done"` |
+| Request + wait | `tala send --wait "need help" --timeout 300` |
+| Wait for incoming | `sess=$(tala wait --new --timeout 600)` |
+| Read transcript | `tala recap` |
+| Named session | `tala start --name "my-project"` |
+| Watch all | `tala listen` |
+| Filtered watch | `tala listen --from "alpha" --match "urgent"` |
+| Discover agents | `tala agents` |
 
 ## Key Behaviors (v0.23+)
 - Send returns immediately by default (fire-and-forget). Use `-w`/`--wait` to block.
-- `chit start` is required first — `chit send` needs an active session.
-- Active session is auto-set per project directory (`.chit/active-session`).
-- `chit wait` without `--since` only waits for new messages (no history replay).
-- `chit wait --new` blocks until another agent creates a session.
-- `chit listen` watches all sessions (replaces `chit observe`).
-- `chit agents` lists active participants.
-- `CHIT_HOME` env var overrides `~/.chit` for isolated daemon instances.
+- `tala start` is required first — `tala send` needs an active session.
+- Active session is auto-set per project directory (`.tala/active-session`).
+- `tala wait` without `--since` only waits for new messages (no history replay).
+- `tala wait --new` blocks until another agent creates a session.
+- `tala listen` watches all sessions (replaces `tala observe`).
+- `tala agents` lists active participants.
+- `TALA_HOME` env var overrides `~/.tala` for isolated daemon instances.
 
 ## Guidelines
 - Use **markdown** in messages — code blocks, file refs `path/file:line`.
@@ -607,18 +640,18 @@ Pipe messages: `echo "msg" | chit send`. All commands support `--json`.
 - Sessions are ephemeral (in-memory daemon).
 "#;
     tokio::fs::write(&skill_path, skill).await?;
-    println!("Created .opencode/skills/chit/SKILL.md");
+    println!("Created .opencode/skills/tala/SKILL.md");
 
     let commands_dir = opencode_dir.join("commands");
     tokio::fs::create_dir_all(&commands_dir).await?;
-    let command_path = commands_dir.join("chit.md");
+    let command_path = commands_dir.join("tala.md");
     let command = r#"---
-description: Use chit for agent-to-agent messaging — cross-project, cross-terminal, cross-agent communication.
+description: Use tala for agent-to-agent messaging — cross-project, cross-terminal, cross-agent communication.
 ---
-Run chit for agent-to-agent messaging. Start a session with `chit start "msg"`, then send messages with `chit send "msg"`. Request replies with `chit send --wait "question"`. Receive with `chit wait --new`. Watch all with `chit listen`. Discover agents with `chit agents`. Pipe messages via stdin. Use `--json` for structured output.
+Run tala for agent-to-agent messaging. Start a session with `tala start "msg"`, then send messages with `tala send "msg"`. Request replies with `tala send --wait "question"`. Receive sessions with `tala wait --new`. Watch all activity with `tala listen`. Read transcripts with `tala recap`. Pipe messages via stdin. All commands support `--json`. By default, `tala send` returns immediately (use `-w`/`--wait` to block).
 "#;
     tokio::fs::write(&command_path, command).await?;
-    println!("Created .opencode/commands/chit.md");
+    println!("Created .opencode/commands/tala.md");
     Ok(())
 }
 
@@ -702,7 +735,7 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
             .collect();
         if !closed_match.is_empty() {
             bail!(
-                "Session '{}' is closed. Use `chit session reopen` to continue",
+                "Session '{}' is closed. Use `tala session reopen` to continue",
                 closed_match[0].id
             );
         }
@@ -722,7 +755,7 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
             if json_output {
                 println!("{}", serde_json::json!({"session_id": null}));
             } else {
-                println!("No active session set. Use `chit use <session-id>` to set one.");
+                println!("No active session set. Use `tala use <session-id>` to set one.");
             }
         }
     }
@@ -813,7 +846,7 @@ async fn cmd_send(
             .to_string()
     } else if stdin_flag {
         if std::io::stdin().is_terminal() {
-            anyhow::bail!("No message provided via stdin");
+            anyhow::bail!("No message provided via stdin (use `--stdin` flag with piped input)");
         }
         let read = tokio::task::spawn_blocking(|| {
             let mut buf = String::new();
@@ -827,7 +860,9 @@ async fn cmd_send(
         });
         match tokio::time::timeout(Duration::from_secs(3600), read).await {
             Ok(Ok(Some(content))) => content,
-            _ => anyhow::bail!("No message provided via stdin (empty)"),
+            _ => {
+                anyhow::bail!("No message provided via stdin (use `--stdin` flag with piped input)")
+            }
         }
     } else if let Some(msg) = &message {
         msg.clone()
@@ -845,12 +880,12 @@ async fn cmd_send(
         match tokio::time::timeout(Duration::from_millis(500), read).await {
             Ok(Ok(Some(content))) => content,
             _ => anyhow::bail!(
-                "No message provided. Use a positional argument, --file <path>, or pipe to stdin"
+                "No message provided. Use a positional argument, --file <path>, --stdin, or pipe to stdin"
             ),
         }
     } else {
         anyhow::bail!(
-            "No message provided. Use a positional argument, --file <path>, or pipe to stdin"
+            "No message provided. Use a positional argument, --file <path>, --stdin, or pipe to stdin"
         );
     };
 
@@ -887,7 +922,7 @@ async fn cmd_send(
                 let name = s.name.as_deref().unwrap_or("-");
                 msg.push_str(&format!("\n  {}  {}", s.id, name));
             }
-            msg.push_str("\nSet one with `chit use <id>`");
+            msg.push_str("\nSet one with `tala use <id>`");
             fail(json_output, &msg, "NO_ACTIVE_SESSION");
         }
     };
@@ -927,16 +962,35 @@ async fn cmd_send(
         return Ok(());
     }
 
-    if !json_output && !quiet {
-        eprint!("⏎ Waiting for reply...");
+    let spinner = if !json_output && !quiet {
+        eprint!("⏎ Waiting for reply");
         let _ = std::io::Write::flush(&mut std::io::stderr());
-    }
+        let spinner = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                eprint!(".");
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+            }
+        });
+        Some(spinner)
+    } else {
+        if !json_output && !quiet {
+            eprint!("⏎ Waiting for reply...");
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+        }
+        None
+    };
     let mut wait_url = format!("/api/sessions/{}/wait?since={}", session_id, msg.id);
     if let Some(to) = chat_timeout {
         wait_url = format!("{}&timeout_secs={}", wait_url, to);
     }
     let wait_url = daemon_url(&host, port, &wait_url);
     let wait_resp = client.get(&wait_url).send().await?;
+    if let Some(s) = spinner {
+        s.abort();
+        let _ = s.await;
+    }
     let result: WaitResponse = wait_resp.json().await?;
 
     if !json_output && !quiet {
@@ -1055,11 +1109,11 @@ async fn cmd_wait(
                             "{}",
                             serde_json::json!({
                                 "sessions": sessions_json,
-                                "error": "Use 'chit use <id>' to select a session"
+                                "error": "Use 'tala use <id>' to select a session"
                             })
                         );
                     } else {
-                        println!("Multiple open sessions. Use `chit use <id>` to select one:\n");
+                        println!("Multiple open sessions. Use `tala use <id>` to select one:\n");
                         for s in &active {
                             let name = s.name.as_deref().unwrap_or("-");
                             println!("  {}  {}  {} msgs", s.id, name, s.message_count);
@@ -1175,7 +1229,7 @@ async fn cmd_watch(
     _timeout: Option<u64>,
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
-    let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "watch").await?;
+    let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "stream").await?;
 
     let since_id = since.unwrap_or(0);
     let mut path = format!("/api/sessions/{}/events?since={}", session_id, since_id);
@@ -1194,6 +1248,7 @@ async fn cmd_watch(
 
     let mut buffer = String::new();
     let mut stream = resp.bytes_stream();
+    let mut message_count: u64 = 0;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -1225,6 +1280,7 @@ async fn cmd_watch(
                     return Ok(());
                 }
                 "message" => {
+                    message_count += 1;
                     if json_output {
                         if let Ok(msg) = serde_json::from_str::<Message>(&data) {
                             let mut obj: serde_json::Value =
@@ -1246,6 +1302,14 @@ async fn cmd_watch(
                 }
                 _ => {}
             }
+        }
+    }
+
+    if message_count == 0 {
+        if json_output {
+            println!("[]");
+        } else {
+            println!("[no messages received]");
         }
     }
 
@@ -1444,7 +1508,7 @@ async fn cmd_agents(json_output: bool) -> anyhow::Result<()> {
     if json_output {
         println!("{}", serde_json::to_string(&agents).unwrap());
     } else if agents.is_empty() {
-        println!("No active agents found. Start a session with `chit start <message>`.");
+        println!("No active agents found. Start a session with `tala start <message>`.");
     } else {
         for a in &agents {
             println!(

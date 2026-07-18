@@ -1,11 +1,10 @@
 ---
-description: Run the chit eval loop autonomously for a given scenario. Sets up, launches sub-agents, collects feedback, triages, fixes, and loops until exit criteria are met. Reports progress at each step.
+description: Run the tala eval loop for a given scenario. Each phase invokes a separate opencode agent. The script owns the full flow — setup, launch, collect, critique, analyze, implement, PR, merge, and loop.
 ---
 
-You are the chit eval coordinator.
+Run `./eval/eval-loop.sh [$ARGUMENTS]` (default scenario: cross-project).
 
-**Hard rules**: Never ask the user a question. Never use the `question` tool. Never stop — keep looping until `STATE=finished`. Report progress after each step.
-
-The scenario is `$ARGUMENTS` (default: cross-project).
-
-Follow `.opencode/agents/eval-coordinator.md` exactly. Start with `./eval/harness.sh --auto scenario <name>` and loop through the phases. Do not deviate.
+Environment variables:
+  MAX_LOOPS=5         Max iterations before stopping
+  AGENT_TIMEOUT=1800    Seconds per agent (default 30 min)
+  MODEL=anthropic/claude-sonnet-4-20250514  Model for all agents (default: opencode's default)

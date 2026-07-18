@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# chit eval shared library
+# tala eval shared library
 # Source this from run.sh or harness.sh.
 # Set HARNESS_MODE=1 to suppress human-friendly banners.
 
 set -euo pipefail
 
 # --- Paths ---
-CHIT_BIN="${CHIT_BIN:-$(dirname "${BASH_SOURCE[0]}")/../target/release/chit}"
+TALA_BIN="${TALA_BIN:-$(dirname "${BASH_SOURCE[0]}")/../target/release/tala}"
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCENARIOS_DIR="$BASE_DIR/scenarios"
 AGENT_TASKS_DIR="$BASE_DIR/agent-tasks"
 STATE_FILE="$BASE_DIR/.harness-state.env"
 PID_FILE="$BASE_DIR/.harness.pid"
 
-if [ ! -f "$CHIT_BIN" ]; then
-  CHIT_BIN="$(dirname "${BASH_SOURCE[0]}")/../target/debug/chit"
+if [ ! -f "$TALA_BIN" ]; then
+  TALA_BIN="$(dirname "${BASH_SOURCE[0]}")/../target/debug/tala"
 fi
-if [ ! -f "$CHIT_BIN" ]; then
-  echo "Error: chit binary not found. Build with: cargo build --release"
+if [ ! -f "$TALA_BIN" ]; then
+  echo "Error: tala binary not found. Build with: cargo build --release"
   exit 1
 fi
 
@@ -156,7 +156,7 @@ feedback_dir_for() {
 
 check_daemon_health() {
   local pid_file="$1"
-  local chit_home="$2"
+  local tala_home="$2"
   if [ ! -f "$pid_file" ]; then
     echo "Error: No PID file found at $pid_file" >&2
     return 1
@@ -168,18 +168,18 @@ check_daemon_health() {
     return 1
   fi
   sleep 1
-  if ! env CHIT_HOME="$chit_home" "$CHIT_BIN" list &>/dev/null; then
-    echo "Error: Daemon (PID $pid) is running but not responding to 'chit list'" >&2
+  if ! env TALA_HOME="$tala_home" "$TALA_BIN" list &>/dev/null; then
+    echo "Error: Daemon (PID $pid) is running but not responding to 'tala list'" >&2
     return 1
   fi
   msg "Daemon OK (PID $pid)"
   return 0
 }
 
-show_chit_version() {
+show_tala_version() {
   local version
-  version=$("$CHIT_BIN" --version 2>/dev/null || echo "unknown")
-  msg "chit version: $version"
+  version=$("$TALA_BIN" --version 2>/dev/null || echo "unknown")
+  msg "tala version: $version"
 }
 
 stop_daemon() {
@@ -294,7 +294,7 @@ Copy this into a Task tool call for the critic sub-agent:
 task description="Critic — $scenario" subagent_type="general" prompt="
 # Critic — $title
 
-You are evaluating feedback from agents that tested the **chit** agent-to-agent messaging tool.
+You are evaluating feedback from agents that tested the   **tala** agent-to-agent messaging tool.
 
 ## Collected Feedback
 
@@ -339,7 +339,7 @@ CRITPROMPT
   cat > "$critic_prompt" << CRITFILE
 # Critic — $title
 
-You are evaluating feedback from agents that tested the **chit** agent-to-agent messaging tool.
+You are evaluating feedback from agents that tested the   **tala** agent-to-agent messaging tool.
 
 ## Collected Feedback
 

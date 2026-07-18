@@ -1,22 +1,27 @@
-# chit Eval Framework
+# tala Eval Framework
 
-Evaluate chit by running sub-agents through realistic multi-agent scenarios.
-The eval coordinator agent drives the full loop autonomously.
+Evaluate tala by running sub-agents through realistic multi-agent scenarios.
+The script (`eval/eval-loop.sh`) orchestrates the full loop autonomously —
+each phase invokes a separate opencode agent. The script owns the control
+flow; agents do exactly one narrow task each.
 
 ## Automated eval (recommended)
 
-Invoke the coordinator agent to run the full loop:
 ```
-task description="Run chit eval" subagent_type="general" prompt="
-Load /skill chit-eval
-Follow the eval coordinator agent prompt in .opencode/agents/eval-coordinator.md
-"
+./eval/eval-loop.sh <scenario>
 ```
 
-The agent reports progress at each step. The harness (`eval/harness.sh`)
-enforces correct step sequencing and prevents drift.
+Options:
+- `MAX_LOOPS=5` — max iterations before stopping
+- `AGENT_TIMEOUT=1800` — seconds per agent (default 30 min)
+- `MODEL=anthropic/claude-sonnet-4-20250514` — model for all agent invocations (default: opencode's default)
+- `VARIANT=max` — reasoning effort (provider-specific, e.g. `high`, `max`, `minimal`)
 
-## Manual eval
+The script starts an `opencode serve` instance, runs through all phases
+(setup → launch → collect → critique → analyze → implement → PR → merge),
+and loops until exit criteria are met or max loops reached.
+
+## Manual eval (step-by-step)
 
 For step-by-step control, use the harness commands directly:
 ```
@@ -25,4 +30,4 @@ For step-by-step control, use the harness commands directly:
 ...
 ```
 
-See `.opencode/skills/chit-eval/SKILL.md` for full documentation.
+See `.opencode/skills/tala-eval/SKILL.md` for full documentation.

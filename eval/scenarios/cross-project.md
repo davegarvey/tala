@@ -1,6 +1,6 @@
 ## Scenario
 
-Two agents working on separate projects need to coordinate. Agent Alpha is fixing a bug in a Python script but lacks domain expertise on the data format. Agent Beta has deep knowledge of the data spec. They must use chit to diagnose and fix the bug together.
+Two agents working on separate projects need to coordinate. Agent Alpha is fixing a bug in a Python script but lacks domain expertise on the data format. Agent Beta has deep knowledge of the data spec. They must use tala to diagnose and fix the bug together.
 
 ## Setup
 
@@ -11,11 +11,11 @@ Two agents working on separate projects need to coordinate. Agent Alpha is fixin
 
 ### Agent Alpha (project-alpha)
 
-You are working in `{{ALPHA_DIR}}`. Review the project README, then use chit to send messages to the agent in the other project. Describe the bug clearly. When the other agent responds, apply their fix. Once the fix is verified, return feedback inline as part of your final Task message.
+You are working in `{{ALPHA_DIR}}`. Review the project README, then use tala to send messages to the agent in the other project. Describe the bug clearly. When the other agent responds, apply their fix. Once the fix is verified, return feedback inline as part of your final Task message.
 
 ### Agent Beta (project-beta)
 
-You are working in `{{BETA_DIR}}`. Review the project README. You know the data schema inside out. When an agent from the other project contacts you via chit, help them debug the issue. Point them to the exact line and fix. Once resolved, return feedback inline as part of your final Task message.
+You are working in `{{BETA_DIR}}`. Review the project README. You know the data schema inside out. When an agent from the other project contacts you via tala, help them debug the issue. Point them to the exact line and fix. Once resolved, return feedback inline as part of your final Task message.
 
 ## Feedback
 
@@ -24,7 +24,7 @@ AND returns it inline in their Task result. The file is the source of truth for
 the critique step; the inline copy is for the human reader.
 
 Questions each agent answers:
-- How easy was it to start using chit?
+- How easy was it to start using tala?
 - How intuitive were send, wait, recap?
 - Was there any confusion about the API (flags, defaults, session management)?
 - What was the most frustrating part?
@@ -110,10 +110,10 @@ using the `csv` module's reader properly. The fix is to remove `parse_row` entir
 and use `csv.reader` for the actual parsing, only converting to dict afterwards.
 ```
 
-## Recommended chit workflow
+## Recommended tala workflow
 
-1. Alpha starts a session: `chit start "need help with CSV parsing bug"`
-2. Alpha sends detailed bug description: `chit send --session <id> "row.split(',') breaks on quoted fields like 'New York, NY'"`
-3. Beta receives via `chit wait --session <id>` or `chit recap --session <id>` then replies with the fix
+1. Alpha starts a session: `tala start "need help with CSV parsing bug"`
+2. Alpha sends detailed bug description: `tala send --session <id> "row.split(',') breaks on quoted fields like 'New York, NY'"`
+3. Beta receives via `tala wait --session <id>` or `tala recap --session <id>` then replies with the fix
 4. Alpha reads the fix, applies it, and confirms
 5. Both agents write feedback to their respective files (file paths are in the task prompt)

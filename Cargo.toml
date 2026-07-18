@@ -1,10 +1,10 @@
 [package]
-name = "chit-cli"
+name = "tala-cli"
 version = "0.25.0"
 edition = "2021"
 description = "Agent-to-agent messaging for AI coding tools"
 license = "MIT"
-repository = "https://github.com/davegarvey/chit"
+repository = "https://github.com/davegarvey/tala"
 keywords = ["agent", "ai", "messaging", "cli", "chat"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -17,7 +17,7 @@ pkg-fmt = "tgz"
 pkg-fmt = "zip"
 
 [[bin]]
-name = "chit"
+name = "tala"
 path = "src/main.rs"
 
 [dev-dependencies]

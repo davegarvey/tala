@@ -6,7 +6,7 @@ use tokio::signal;
 use tracing::info;
 
 use crate::api::create_router;
-use crate::store::{chit_home, read_user_config, remove_daemon_json, write_daemon_json, Store};
+use crate::store::{read_user_config, remove_daemon_json, tala_home, write_daemon_json, Store};
 
 pub async fn run_daemon() -> anyhow::Result<()> {
     let store = Arc::new(Store::new());
@@ -17,7 +17,7 @@ pub async fn run_daemon() -> anyhow::Result<()> {
     let port = addr.port();
 
     write_daemon_json(port).await?;
-    info!("chit daemon started on port {}", port);
+    info!("tala daemon started on port {}", port);
 
     let idle_timeout = {
         let config = read_user_config().await;
@@ -34,7 +34,7 @@ pub async fn run_daemon() -> anyhow::Result<()> {
 
             let has_recent_activity = store_clone.has_recent_activity(max_idle).await;
             if !has_recent_activity {
-                let daemon_path = chit_home().join("daemon.json");
+                let daemon_path = tala_home().join("daemon.json");
                 if daemon_path.exists() {
                     let metadata = match tokio::fs::metadata(&daemon_path).await {
                         Ok(m) => m,
@@ -64,7 +64,7 @@ pub async fn run_daemon() -> anyhow::Result<()> {
 
     idle_handle.abort();
     remove_daemon_json().await;
-    info!("chit daemon stopped");
+    info!("tala daemon stopped");
     Ok(())
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# chit eval harness — deterministic state machine
+# tala eval harness — deterministic state machine
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -537,7 +537,7 @@ cmd_reset() {
 
 cmd_help() {
   cat << HELP
-chit eval harness — interactive state machine
+tala eval harness — interactive state machine
 
 Commands:
   status                  Show current state, loop, available transitions

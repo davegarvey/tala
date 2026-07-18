@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- chit-eval skill for coding agent eval workflow
+- tala-eval skill for coding agent eval workflow
 
 ## [0.4.0] - 2026-07-14
 
@@ -26,13 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - fix wording in install instructions
-- update install instructions for chit-cli rename, add binstall metadata
+- update install instructions for tala-cli rename, add binstall metadata
 
 ## [0.2.2] - 2026-07-14
 
 ### Fixed
 
-- rename crate to chit-cli to avoid crates.io conflict
+- rename crate to tala-cli to avoid crates.io conflict
 
 ## [0.2.1] - 2026-07-14
 
@@ -51,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simplify release to direct-push flow
 - Fix formatting for CI
 - Add CI and release workflows
-- Initial commit: chit v0.1.0
+- Initial commit: tala v0.1.0
 
 ### Fixed
 

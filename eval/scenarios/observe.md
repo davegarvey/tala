@@ -1,31 +1,31 @@
 ## Scenario
 
-Three agents work on independent tasks in separate projects. A fourth agent (the monitor) watches all activity via `chit observe`. The monitor evaluates whether observe provides enough context to understand what's happening across the system.
+Three agents work on independent tasks in separate projects. A fourth agent (the monitor) watches all activity via `tala observe`. The monitor evaluates whether observe provides enough context to understand what's happening across the system.
 
 ## Setup
 
 - `project-alpha/` — Building an API endpoint
 - `project-beta/` — Building a CLI tool
 - `project-gamma/` — Writing documentation
-- The monitor runs from the root dir and uses `chit observe` to watch all sessions
+- The monitor runs from the root dir and uses `tala observe` to watch all sessions
 
 ## Agent Tasks (launch all in parallel)
 
 ### Agent Alpha (project-alpha)
 
-You are building an API endpoint in `{{ALPHA_DIR}}`. Look at the README and implement the endpoint. Use chit to send status updates as you work (e.g., "starting implementation", "tests passing", "done"). Return feedback inline as part of your final Task message when done.
+You are building an API endpoint in `{{ALPHA_DIR}}`. Look at the README and implement the endpoint. Use tala to send status updates as you work (e.g., "starting implementation", "tests passing", "done"). Return feedback inline as part of your final Task message when done.
 
 ### Agent Beta (project-beta)
 
-You are building a CLI tool in `{{BETA_DIR}}`. Look at the README and implement it. Send chit updates about your progress. Return feedback inline as part of your final Task message when done.
+You are building a CLI tool in `{{BETA_DIR}}`. Look at the README and implement it. Send tala updates about your progress. Return feedback inline as part of your final Task message when done.
 
 ### Agent Gamma (project-gamma)
 
-You are writing docs in `{{GAMMA_DIR}}`. Look at the README and write documentation. Send chit updates. Return feedback inline as part of your final Task message when done.
+You are writing docs in `{{GAMMA_DIR}}`. Look at the README and write documentation. Send tala updates. Return feedback inline as part of your final Task message when done.
 
 ### Monitor (launch alongside the workers)
 
-You are watching all agent activity via `chit observe`. Run `chit observe` from `{{MONITOR_DIR}}` — start it at the same time as the workers so you see live activity. Note whether you can follow all three conversations. Then return feedback inline as part of your final Task message answering the evaluation questions.
+You are watching all agent activity via `tala observe`. Run `tala observe` from `{{MONITOR_DIR}}` — start it at the same time as the workers so you see live activity. Note whether you can follow all three conversations. Then return feedback inline as part of your final Task message answering the evaluation questions.
 
 ## Feedback (all agents)
 
@@ -34,13 +34,13 @@ AND returns it inline in their Task result. The file is the source of truth for
 the critique step; the inline copy is for the human reader.
 
 Questions all agents answer:
-- How easy was it to get started with chit?
+- How easy was it to get started with tala?
 - How intuitive were the commands you used?
 - Was anything confusing or surprising?
 - What would you improve?
 
 Monitor additionally answers:
-- Did `chit observe` give you an accurate picture of what was happening?
+- Did `tala observe` give you an accurate picture of what was happening?
 - Could you distinguish between the different sessions/agents?
 
 ## Eval Loop (updated)

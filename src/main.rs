@@ -12,7 +12,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::builder()
-                .with_default_directive("chit=info".parse().unwrap())
+                .with_default_directive("tala=info".parse().unwrap())
                 .from_env_lossy(),
         )
         .with_target(false)
