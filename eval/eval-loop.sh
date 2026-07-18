@@ -236,8 +236,34 @@ phase_launch() {
   done
 
   local failed=0
+  local start_time
+  start_time=$(date +%s)
+  local spinner='-\|/'
+  local sp_i=0
+
+  while true; do
+    local running=0
+    for pid in "${pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        running=$((running + 1))
+      fi
+    done
+    [ "$running" -eq 0 ] && break
+
+    local now elapsed done_count
+    now=$(date +%s)
+    elapsed=$((now - start_time))
+    done_count=$(( ${#pids[@]} - running ))
+    local sp="${spinner:$sp_i:1}"
+    sp_i=$(( (sp_i + 1) % 4 ))
+    printf "\r  [%s] %d sub-agent(s) running (%ds) %d/%d done" "$sp" "$running" "$elapsed" "$done_count" "${#pids[@]}" >&2
+    sleep 3
+  done
+
+  printf "\r%80s\r" "" >&2
+
   for pid in "${pids[@]}"; do
-    if ! wait "$pid"; then
+    if ! wait "$pid" 2>/dev/null; then
       failed=$((failed + 1))
     fi
   done
