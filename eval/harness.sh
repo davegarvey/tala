@@ -166,9 +166,10 @@ print(len(d.get('p2',[])))
 advance_setup() {
   local scenario="${SCENARIO}"
   cd "$SCRIPT_DIR/.."
-  git checkout main 2>/dev/null || true
-  git pull origin main 2>/dev/null || true
-  # Prune merged branches
+  git fetch origin main --quiet
+  git checkout main --force 2>/dev/null || { echo "Error: Cannot checkout main" >&2; exit 1; }
+  git reset --hard origin/main
+  # Prune stale local branches (git branch -d is safe — refuses if not merged)
   git branch --merged main | grep -v '^\*\|main$' | xargs -r git branch -d 2>/dev/null || true
   cd "$SCRIPT_DIR"
   mkdir -p "$BASE_DIR/tmp"
