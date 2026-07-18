@@ -6,5 +6,5 @@
 /eval/.harness-state.env
 /eval/.harness-state.env.tmp
 /eval/.harness.pid
-/eval/.env
+/eval/.config.env
 

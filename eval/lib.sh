@@ -39,7 +39,7 @@ msg() {
 
 # --- Config file (user-set, persists across resets) ---
 # Path relative to BASE_DIR
-CONFIG_FILE="$BASE_DIR/.env"
+CONFIG_FILE="$BASE_DIR/.config.env"
 
 config_read() {
   MODEL=""
