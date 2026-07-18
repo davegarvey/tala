@@ -70,6 +70,9 @@ pub enum Commands {
         json: bool,
     },
     /// Set or show the active session for this project directory
+    #[command(
+        after_help = "See also: tala session (show, rename, reopen) for advanced session management"
+    )]
     Use {
         #[arg(help = "Session ID to set as active (omit to show current)")]
         session_id: Option<String>,
@@ -87,7 +90,10 @@ pub enum Commands {
         session_arg: Option<String>,
         #[arg(help = "Message content (omit to read from piped stdin)")]
         message: Option<String>,
-        #[arg(long, help = "Read message content from a file (use - for filename to use piped stdin)")]
+        #[arg(
+            long,
+            help = "Read message content from a file (use - for filename to use piped stdin)"
+        )]
         file: Option<String>,
         #[arg(
             long,
@@ -110,6 +116,9 @@ pub enum Commands {
         timeout: Option<u64>,
     },
     /// Wait for new messages in a session
+    #[command(
+        after_help = "See also: tala stream (real-time SSE), tala listen (all sessions), tala whatsup (non-blocking), tala recap (transcript)"
+    )]
     Wait {
         #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
@@ -132,13 +141,17 @@ pub enum Commands {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
         #[arg(
-            long,
+            long = "new-session",
+            alias = "new",
             help = "Wait for a new session to be created (ignores other args)"
         )]
         r#new: bool,
     },
     /// Stream new messages as they arrive for a single session (SSE). For all sessions use `tala listen`.
-    #[command(name = "stream")]
+    #[command(
+        name = "stream",
+        after_help = "See also: tala listen (all sessions), tala wait (blocking poll), tala whatsup (non-blocking)"
+    )]
     Stream {
         #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
@@ -204,6 +217,9 @@ pub enum Commands {
         timeout: Option<u64>,
     },
     /// View conversation transcript
+    #[command(
+        after_help = "See also: tala wait (blocking poll), tala listen (all sessions), tala stream (real-time SSE)"
+    )]
     Recap {
         #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
@@ -227,6 +243,9 @@ pub enum Commands {
         json: bool,
     },
     /// Observe all sessions for new messages (default timeout: 300s). Use `tala agents` to discover active participants. For a single session use `tala stream`.
+    #[command(
+        after_help = "See also: tala wait (blocking poll), tala stream (single session SSE), tala whatsup (non-blocking)"
+    )]
     Listen {
         #[arg(long, help = "Only show messages with ID greater than this")]
         since: Option<u64>,
@@ -236,7 +255,10 @@ pub enum Commands {
         from: Option<String>,
         #[arg(long, help = "Only show messages in sessions with matching name")]
         channel: Option<String>,
-        #[arg(long, help = "Seconds to stay connected before disconnecting (default: 300, 0 = no timeout)")]
+        #[arg(
+            long,
+            help = "Seconds to stay connected before disconnecting (default: 300, 0 = no timeout)"
+        )]
         timeout: Option<u64>,
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
@@ -258,6 +280,9 @@ pub enum Commands {
         json: bool,
     },
     /// Show new messages since last check (non-blocking)
+    #[command(
+        after_help = "See also: tala wait (blocking poll), tala listen (all sessions), tala stream (real-time SSE), tala recap (transcript)"
+    )]
     WhatsUp {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
@@ -267,7 +292,16 @@ pub enum Commands {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
+    /// Discover agents in other projects (scans parent directories for tala projects)
+    #[command(
+        after_help = "Scans up to 3 parent directories and their siblings for .tala/config.json files"
+    )]
+    Discover {
+        #[arg(long, short = 'j', help = "Output in JSON format")]
+        json: bool,
+    },
     /// List all active agents (unique senders across open sessions)
+    #[command(after_help = "See also: tala discover (cross-project agent discovery)")]
     Agents {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
@@ -308,11 +342,13 @@ pub enum Commands {
 #[derive(Subcommand)]
 pub enum SessionCommands {
     /// List all sessions
+    #[command(after_help = "Alias: tala list")]
     List {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
     /// Close a session by ID
+    #[command(after_help = "Alias: tala close")]
     Close {
         #[arg(help = "Session ID to close")]
         session_id: String,
@@ -478,6 +514,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             cmd_listen(since, r#match, from, channel, timeout, json).await
         }
         Commands::List { json } => cmd_list(json).await,
+        Commands::Discover { json } => cmd_discover(json).await,
         Commands::Agents { json } => cmd_agents(json).await,
         Commands::Close {
             session,
@@ -638,7 +675,7 @@ metadata:
 # tala — Agent-to-Agent Messaging
 
 Send FYI messages with `tala send "msg"` (uses active session, returns immediately). Requires `tala start` first.
-Request replies with `tala send --wait "question"`. Receive sessions with `tala wait --new`.
+Request replies with `tala send --wait "question"`. Receive sessions with `tala wait --new-session`.
 Pipe messages: `echo "msg" | tala send`. All commands support `--json`.
 
 ## Common Patterns
@@ -647,21 +684,23 @@ Pipe messages: `echo "msg" | tala send`. All commands support `--json`.
 |---|---|
 | Broadcast FYI | `tala send "status: done"` |
 | Request + wait | `tala send --wait "need help" --timeout 300` |
-| Wait for incoming | `sess=$(tala wait --new --timeout 600)` |
+| Wait for incoming | `sess=$(tala wait --new-session --timeout 600)` |
 | Read transcript | `tala recap` |
 | Named session | `tala start --name "my-project"` |
 | Watch all | `tala listen` |
 | Filtered watch | `tala listen --from "alpha" --match "urgent"` |
 | Discover agents | `tala agents` |
+| Cross-project discovery | `tala discover` |
 
 ## Key Behaviors (v0.23+)
 - Send returns immediately by default (fire-and-forget). Use `-w`/`--wait` to block.
 - `tala start` is required first — `tala send` needs an active session.
 - Active session is auto-set per project directory (`.tala/active-session`).
 - `tala wait` without `--since` only waits for new messages (no history replay).
-- `tala wait --new` blocks until another agent creates a session.
+- `tala wait --new-session` blocks until another agent creates a session.
 - `tala listen` watches all sessions (replaces `tala observe`).
 - `tala agents` lists active participants.
+- `tala discover` finds agents in other projects.
 - `TALA_HOME` env var overrides `~/.tala` for isolated daemon instances.
 
 ## Guidelines
@@ -678,7 +717,7 @@ Pipe messages: `echo "msg" | tala send`. All commands support `--json`.
     let command = r#"---
 description: Use tala for agent-to-agent messaging — cross-project, cross-terminal, cross-agent communication.
 ---
-Run tala for agent-to-agent messaging. Start a session with `tala start "msg"`, then send messages with `tala send "msg"`. Request replies with `tala send --wait "question"`. Receive sessions with `tala wait --new`. Watch all activity with `tala listen`. Read transcripts with `tala recap`. Pipe messages via stdin. All commands support `--json`. By default, `tala send` returns immediately (use `-w`/`--wait` to block).
+Run tala for agent-to-agent messaging. Start a session with `tala start "msg"`, then send messages with `tala send "msg"`. Request replies with `tala send --wait "question"`. Receive sessions with `tala wait --new-session`. Watch all activity with `tala listen`. Read transcripts with `tala recap`. Discover cross-project agents with `tala discover`. Pipe messages via stdin. All commands support `--json`. By default, `tala send` returns immediately (use `-w`/`--wait` to block).
 "#;
     tokio::fs::write(&command_path, command).await?;
     println!("Created .opencode/commands/tala.md");
@@ -1387,7 +1426,11 @@ async fn cmd_listen(
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
 
-    let since_id = since.unwrap_or(0);
+    let since_id = if let Some(s) = since {
+        s
+    } else {
+        store::read_cursor().await
+    };
     let mut path = format!("/api/observe?since={}", since_id);
     if let Some(ref m) = match_str {
         path = format!("{}&match={}", path, urlencoding(m));
@@ -1399,8 +1442,7 @@ async fn cmd_listen(
         path = format!("{}&channel={}", path, ch);
     }
     // Default timeout to 300s if not specified, unless explicitly set to 0
-    let timeout_secs = timeout.map(|t| if t == 0 { None } else { Some(t) }).flatten()
-        .or_else(|| Some(300u64));
+    let timeout_secs = timeout.filter(|&t| t != 0).or(Some(300u64));
     if let Some(t) = timeout_secs {
         path = format!("{}&timeout_secs={}", path, t);
     }
@@ -1416,6 +1458,7 @@ async fn cmd_listen(
 
     let mut buffer = String::new();
     let mut stream = resp.bytes_stream();
+    let mut max_msg_id = since_id;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -1439,6 +1482,9 @@ async fn cmd_listen(
                 match evt.r#type.as_str() {
                     "message" => {
                         if let Some(msg) = evt.message {
+                            if msg.id > max_msg_id {
+                                max_msg_id = msg.id;
+                            }
                             let session_label = evt.session_name.unwrap_or(evt.session_id);
                             println!(
                                 "[{}] {} ({}):\n    {}",
@@ -1457,6 +1503,10 @@ async fn cmd_listen(
                 }
             }
         }
+    }
+
+    if max_msg_id > since_id {
+        let _ = store::write_cursor(max_msg_id).await;
     }
 
     Ok(())
@@ -1634,6 +1684,147 @@ async fn compute_session_unread(
     }
 }
 
+async fn try_read_json(path: &std::path::Path) -> Option<serde_json::Value> {
+    tokio::fs::read_to_string(path)
+        .await
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+}
+
+#[derive(serde::Serialize)]
+struct DiscoveredProject {
+    project: String,
+    agent_name: String,
+    daemon_running: bool,
+    agents: Vec<AgentSummary>,
+}
+
+async fn cmd_discover(json_output: bool) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let mut discovered: Vec<DiscoveredProject> = Vec::new();
+
+    // Walk up parent directories looking for .tala/config.json
+    let mut current = Some(cwd.as_path());
+    let mut checked = std::collections::HashSet::new();
+    for _ in 0..4 {
+        let dir = match current {
+            Some(d) => d,
+            None => break,
+        };
+        let tala_config = dir.join(".tala").join("config.json");
+        if tala_config.exists() && checked.insert(dir.to_path_buf()) {
+            if let Some(config) = try_read_json(&tala_config).await {
+                let agent_name = config["name"].as_str().unwrap_or("unknown").to_string();
+                let daemon_path = dir.join(".tala").join("daemon.json");
+                let mut daemon_running = false;
+                let mut agents: Vec<AgentSummary> = Vec::new();
+                if let Some(dinfo) = try_read_json(&daemon_path).await {
+                    let host = dinfo["host"].as_str().unwrap_or("127.0.0.1");
+                    let port = dinfo["port"].as_u64().unwrap_or(0) as u16;
+                    if port > 0 {
+                        let client = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(2))
+                            .build()?;
+                        let url = format!("http://{}:{}/api/agents", host, port);
+                        match client.get(&url).send().await {
+                            Ok(resp) if resp.status().is_success() => {
+                                daemon_running = true;
+                                agents = resp.json::<Vec<AgentSummary>>().await.unwrap_or_default();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                discovered.push(DiscoveredProject {
+                    project: dir.display().to_string(),
+                    agent_name,
+                    daemon_running,
+                    agents,
+                });
+            }
+        }
+
+        // Check siblings
+        if let Some(parent) = dir.parent() {
+            if let Ok(mut entries) = tokio::fs::read_dir(parent).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let path = entry.path();
+                    if path.is_dir() && path != dir && checked.insert(path.clone()) {
+                        let sibling_config = path.join(".tala").join("config.json");
+                        if sibling_config.exists() {
+                            if let Some(config) = try_read_json(&sibling_config).await {
+                                let agent_name =
+                                    config["name"].as_str().unwrap_or("unknown").to_string();
+                                let daemon_path = path.join(".tala").join("daemon.json");
+                                let mut daemon_running = false;
+                                let mut agents: Vec<AgentSummary> = Vec::new();
+                                if let Some(dinfo) = try_read_json(&daemon_path).await {
+                                    let host = dinfo["host"].as_str().unwrap_or("127.0.0.1");
+                                    let port = dinfo["port"].as_u64().unwrap_or(0) as u16;
+                                    if port > 0 {
+                                        let client = reqwest::Client::builder()
+                                            .timeout(std::time::Duration::from_secs(2))
+                                            .build()?;
+                                        let url = format!("http://{}:{}/api/agents", host, port);
+                                        match client.get(&url).send().await {
+                                            Ok(resp) if resp.status().is_success() => {
+                                                daemon_running = true;
+                                                agents = resp
+                                                    .json::<Vec<AgentSummary>>()
+                                                    .await
+                                                    .unwrap_or_default();
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                discovered.push(DiscoveredProject {
+                                    project: path.display().to_string(),
+                                    agent_name,
+                                    daemon_running,
+                                    agents,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        current = dir.parent();
+    }
+
+    if json_output {
+        println!("{}", serde_json::to_string(&discovered).unwrap());
+    } else if discovered.is_empty() {
+        println!("No other tala projects discovered in parent directories.");
+    } else {
+        for p in &discovered {
+            let daemon_status = if p.daemon_running {
+                "running"
+            } else {
+                "stopped"
+            };
+            println!(
+                "{}  ({})  [daemon: {}]",
+                p.project, p.agent_name, daemon_status
+            );
+            if p.daemon_running && !p.agents.is_empty() {
+                for a in &p.agents {
+                    println!(
+                        "  └ {}  last: {}  {} msgs",
+                        a.sender,
+                        a.last_seen.format("%Y-%m-%d %H:%M:%S UTC"),
+                        a.message_count
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn cmd_agents(json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
 
@@ -1645,7 +1836,7 @@ async fn cmd_agents(json_output: bool) -> anyhow::Result<()> {
     if json_output {
         println!("{}", serde_json::to_string(&agents).unwrap());
     } else if agents.is_empty() {
-        println!("No active agents found. Start a session with `tala start <message>`.");
+        println!("No active agents found. Start a session with `tala start <message>`, or try `tala discover` to find agents in other projects.");
     } else {
         for a in &agents {
             println!(
@@ -1673,13 +1864,22 @@ async fn cmd_close(
 
     if resp.status().is_success() {
         let result: CloseSessionResponse = resp.json().await?;
+        let was_active = session_arg.is_none()
+            && store::read_active_session().await.as_deref() == Some(&session_id);
+        if was_active {
+            store::clear_active_session().await?;
+        }
         if json_output {
-            println!(
-                "{}",
-                serde_json::json!({"session_id": session_id, "status": result.status})
-            );
+            let mut out = serde_json::json!({"session_id": session_id, "status": result.status});
+            if was_active {
+                out["active_cleared"] = serde_json::json!(true);
+            }
+            println!("{}", out);
         } else if !quiet {
             println!("Session {}: {}", session_id, result.status);
+            if was_active {
+                eprintln!("Active session was closed and cleared. Use `tala use <session-id>` to set a new one.");
+            }
         }
     } else {
         let err: ErrorResponse = resp.json().await?;
@@ -1782,10 +1982,13 @@ async fn cmd_session_reopen(session_id: String, json_output: bool) -> anyhow::Re
     }
 
     let result: serde_json::Value = resp.json().await?;
+    store::write_active_session(&session_id).await?;
     if json_output {
-        println!("{}", serde_json::to_string(&result).unwrap());
+        let mut out = result;
+        out["active"] = serde_json::json!(true);
+        println!("{}", serde_json::to_string(&out).unwrap());
     } else {
-        println!("Session {} reopened", session_id);
+        println!("Session {} reopened (now active)", session_id);
     }
     Ok(())
 }

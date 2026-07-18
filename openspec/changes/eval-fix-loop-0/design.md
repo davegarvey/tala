@@ -1,31 +1,53 @@
 ## Context
 
-The eval loop found that the core session model has lifecycle bugs and UX gaps. All state is in-memory only — sessions, names, and activity are lost on daemon restart. Error messages and help text need polish.
+The cross-project eval critic identified 3 P1 and 3 P2 issues from two agents testing tala. This change addresses all 6. The codebase is Rust, using clap for CLI, reqwest for HTTP, and SSE for streaming.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Fix session reopen so it actually works (sets closed=false, allows subsequent operations)
-- Fix daemon resolution error messages to respect `$TALA_HOME` ordering
-- Add default 300s timeout to `tala listen`
-- Persist session names so they survive daemon restarts
-- Improve `tala stop` message when daemon is already dead
-- Add `tala session close` subcommand
-- Improve help text for listen/stream, --file, tala init
+- Add `tala discover` command for finding agents in parent/sibling projects
+- Add help-text cross-references for message-watching commands
+- Rename `--new` to `--new-session` on `tala wait`
+- Change `tala listen` default `--since` from 0 to cursor value (new messages only)
+- Fix active session integrity on close and reopen
+- Clarify command organization in help text
 
 **Non-Goals:**
-- Full persistence of all session state (messages, etc.)
-- Renaming the `tala chat` / `tala send` command
-- Deprecating `tala init`
+- No full peer-to-peer agent protocol (still single-daemon per project)
+- No daemon-side changes for discovery (uses existing `/api/agents` endpoint)
+- No structural reorganization of the CLI enum
 
 ## Decisions
 
-- **Session rename persistence**: Write session names to `{tala_home()}/sessions.json` as a simple map of session_id → name. On daemon startup, load this file. On rename, update both in-memory and on-disk. This is simpler than SQLite or a full event log.
-- **Reopen fix**: The `reopen_session` handler correctly sets `session.closed = false`, but the issue may be that `send_message` checks `session.closed` and rejects — verify the check is consistent.
-- **Listen default timeout**: Use 300s matching the existing `default_timeout` in user config. Check user config first, then fall back to 300.
-- **Daemon stop message**: Check if daemon.json exists before trying to kill; if not, print "daemon is not running" instead of attempting kill.
+### D1: Cross-project discovery — parent/sibling directory scan
+- **Decision**: `tala discover` scans parent directories (up to 3 levels) for `.tala/config.json`, then scans siblings of each parent. For each discovered project, reads config (agent name) and daemon.json (host/port). If daemon reachable, queries `/api/agents`.
+- **Implementation**: Pure CLI-side scan — no new daemon endpoints needed. Uses existing `store::tala_home()` logic pattern for reading configs.
+- **File**: `cmd_discover()` in cli.rs + helper `discover_projects()` in store.rs or new module.
+
+### D2: Help text cross-references
+- **Decision**: Add `after_help` / `long_about` text to clap command definitions for `Wait`, `Listen`, `Stream`, `WhatsUp`, `Recap`, `Agents`.
+- **File**: cli.rs — edit the `#[command(about = "...", long_about = "...")]` attributes.
+
+### D3: --new to --new-session rename
+- **Decision**: Change the clap attribute `long = "new"` to `long = "new-session"`. Add `alias = "new"` for backward compatibility.
+- **File**: cli.rs — edit the `r#new: bool` field on `Wait`.
+
+### D4: Listen default since from cursor
+- **Decision**: In `cmd_listen`, replace `since.unwrap_or(0)` with `since.unwrap_or_else(|| store::read_cursor().await.unwrap_or(0))`. Update cursor on message receive.
+- **File**: cli.rs — `cmd_listen` function.
+
+### D5: Active session on close/reopen
+- **Decision**: In `cmd_close`, when session is sourced from `resolve_session_id` (active session implicit), clear the active session file after successful close and print a warning about the cleared session.
+- **Decision**: In `cmd_session_reopen`, after successful reopen, write the session as active and print "(now active)".
+- **File**: cli.rs — `cmd_close` and `cmd_session_reopen`.
+
+### D6: Command organization hints
+- **Decision**: Add `after_help` to `Use` mentioning `tala session`. Add aliases/notes to `SessionCommands::List` and `SessionCommands::Close` help.
+- **File**: cli.rs.
 
 ## Risks / Trade-offs
 
-- [Sessions.json file] → If two daemons run concurrently (unlikely), they'll race on writes. Acceptable because daemon is singleton on a machine.
-- [Listen default timeout] → 300s may be too short for long-running workflows. Users can override with `--timeout 0` for no timeout or `--timeout N` for custom.
+- [Directory scanning is imprecise] — scanning parent/sibling dirs is best-effort; it may miss projects in arbitrary locations. Acceptable for a discovery aid.
+- [Listen default change is behavioral] — existing users relying on `tala listen` showing full history will be surprised. Mitigated by documented `--since 0` opt-in.
+- [--new alias compatibility] — keeping `--new` as a hidden alias ensures existing scripts and skills continue working.
+- [Close clearing active session] — when user does `tala close` without args, they probably want to close the active session and have it cleared. Explicit close with `tala close sess_id` preserves the active session.
