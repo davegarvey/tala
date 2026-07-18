@@ -12,8 +12,12 @@ SCENARIO="${1:-cross-project}"
 MAX_LOOPS="${MAX_LOOPS:-5}"
 AGENT_TIMEOUT="${AGENT_TIMEOUT:-1800}"       # 30 min per agent
 OPENCODE_PORT="${OPENCODE_PORT:-0}"          # 0 = random
-MODEL="${MODEL:-}"                            # empty = opencode's default
-VARIANT="${VARIANT:-}"                        # reasoning effort (e.g. high, max, minimal)
+# Priority: env var > state file > empty (opencode default)
+env_model="${MODEL:-}"
+env_variant="${VARIANT:-}"
+state_read 2>/dev/null || true
+MODEL="${env_model:-$MODEL}"
+VARIANT="${env_variant:-$VARIANT}"
 SERVER_LOG="$BASE_DIR/tmp/opencode-server.log"
 HARNESS_LOG="$BASE_DIR/tmp/harness-output.log"
 SERVER_URL=""
