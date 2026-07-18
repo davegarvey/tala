@@ -105,14 +105,17 @@ fn test_auto_target_single_session() {
     let home = tempfile::tempdir().unwrap();
 
     let sess = tala_start(home.path());
-    tala_ok(home.path(), &["use", &sess]);
 
-    tala_ok(home.path(), &["send", "auto-target test"]);
+    tala_ok(
+        home.path(),
+        &["send", "--session", &sess, "auto-target test"],
+    );
 
     let recap = tala_ok(home.path(), &["recap", &sess]);
     assert!(
         recap.contains("auto-target test"),
-        "recap should contain message via auto-target"
+        "recap should contain message via auto-target: {}",
+        recap
     );
 
     tala_stop(home.path());
@@ -973,10 +976,13 @@ fn test_start_sets_active_session() {
     let project = tempfile::tempdir().unwrap();
 
     // Start session from project dir — sets active session there
-    let stdout = tala_in(home.path(), Some(project.path()), &["start"])
-        .0;
+    let stdout = tala_in(home.path(), Some(project.path()), &["start"]).0;
     let sess = stdout.lines().next().unwrap_or("").trim().to_string();
-    assert!(sess.starts_with("sess_"), "should return session ID from first line of: {}", stdout);
+    assert!(
+        sess.starts_with("sess_"),
+        "should return session ID from first line of: {}",
+        stdout
+    );
 
     // Send from same project dir (no --session needed, active session is set)
     tala_in(
@@ -1707,7 +1713,10 @@ fn test_message_file_flag() {
         ],
     );
     assert!(ok, "--message-file should work");
-    assert!(!stderr.contains("deprecated"), "should not show deprecation warning");
+    assert!(
+        !stderr.contains("deprecated"),
+        "should not show deprecation warning"
+    );
     assert!(stdout.contains("Sent message"), "should show confirmation");
 
     let recap = tala_ok(home.path(), &["recap", &sess, "--json"]);

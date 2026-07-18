@@ -400,12 +400,10 @@ pub async fn persist_sessions(sessions: &HashMap<String, Session>) -> anyhow::Re
 pub async fn load_sessions() -> HashMap<String, Session> {
     let path = sessions_path();
     match tokio::fs::read_to_string(&path).await {
-        Ok(content) => {
-            match serde_json::from_str::<SessionsFile>(&content) {
-                Ok(data) => data.sessions,
-                Err(_) => HashMap::new(),
-            }
-        }
+        Ok(content) => match serde_json::from_str::<SessionsFile>(&content) {
+            Ok(data) => data.sessions,
+            Err(_) => HashMap::new(),
+        },
         Err(_) => HashMap::new(),
     }
 }
