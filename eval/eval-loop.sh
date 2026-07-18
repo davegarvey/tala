@@ -590,51 +590,301 @@ PROMPT
   rm -rf "$implement_dir"
 }
 
-wait_for_pr_merge() {
-  local pr_url="$1" branch_name="$2" max_wait="${3:-900}"
-  say "Waiting for CI checks on $branch_name (timeout: ${max_wait}s)..."
-  if ! gh pr checks "$pr_url" --watch --interval 30 -t "$max_wait" 2>/dev/null; then
-    say "ERROR: CI checks failed for $branch_name"
-    gh pr checks "$pr_url" --fail-fast 2>/dev/null || true
-    return 1
-  fi
-  say "CI checks passed for $branch_name"
-  local merge_state
-  merge_state=$(gh pr view "$pr_url" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null || echo "unknown")
-  if [ "$merge_state" = "MERGEABLE" ] || [ "$merge_state" = "CLEAN" ]; then
-    say "PR is mergeable — merging now..."
-    gh pr merge --squash "$pr_url" 2>/dev/null || true
-    local i
-    for i in $(seq 1 30); do
-      local pr_state
-      pr_state=$(gh pr view "$pr_url" --json state --jq '.state' 2>/dev/null || echo "")
-      if [ "$pr_state" = "MERGED" ]; then
-        say "PR merged successfully"
+# Helper: check if PR is merged, return 0 if yes, 1 if still open.
+_pr_is_merged() {
+  local pr_url="$1"
+  local state
+  state=$(gh pr view "$pr_url" --json state --jq '.state' 2>/dev/null || echo "unknown")
+  [ "$state" = "MERGED" ]
+}
+
+# Helper: poll for PR merge up to N attempts at given interval.
+# Returns 0 if merged, 1 if timed out.
+_poll_for_merge() {
+  local pr_url="$1" max_attempts="$2" interval="$3" desc="$4"
+  local i
+  for i in $(seq 1 "$max_attempts"); do
+    if _pr_is_merged "$pr_url"; then
+      return 0
+    fi
+    sleep "$interval"
+  done
+  return 1
+}
+
+# Helper: log PR diagnostics for debugging.
+_log_pr_diagnostics() {
+  local pr_url="$1" label="$2"
+  say "PR diagnostics ($label):"
+  gh pr view "$pr_url" --json state,mergeStateStatus,mergeable,title,headRefName,baseRefName 2>/dev/null \
+    | sed 's/^/  /' >&2 || true
+}
+
+# Helper: attempt to merge a PR with retries.
+# Tries direct squash first; falls back to auto-merge on failure.
+# Returns 0 if merged, 1 if all attempts exhausted.
+_attempt_merge() {
+  local pr_url="$1" branch_name="$2" max_retries="${3:-3}"
+  local retry=0
+
+  while [ "$retry" -lt "$max_retries" ]; do
+    # Re-check state in case it was merged externally
+    if _pr_is_merged "$pr_url"; then
+      say "PR already merged"
+      return 0
+    fi
+
+    local merge_state
+    merge_state=$(gh pr view "$pr_url" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null || echo "unknown")
+    say "Merge attempt $((retry + 1))/$max_retries (state=$merge_state)..."
+
+    if [ "$merge_state" = "MERGEABLE" ] || [ "$merge_state" = "CLEAN" ]; then
+      # Try direct squash merge
+      say "PR is mergeable — merging now..."
+      if gh pr merge --squash "$pr_url"; then
+        if _poll_for_merge "$pr_url" 60 5 "direct-merge"; then
+          say "PR merged successfully"
+          return 0
+        fi
+        say "WARNING: Direct merge commited but PR state did not transition to MERGED"
+      else
+        say "WARNING: Direct merge command failed"
+      fi
+
+      # Fall back to auto-merge
+      say "Setting auto-merge as fallback..."
+      gh pr merge --auto --squash "$pr_url" || true
+      if _poll_for_merge "$pr_url" 60 10 "auto-merge"; then
+        say "PR merged successfully via auto-merge"
         return 0
       fi
-      sleep 5
-    done
-    say "WARNING: Timed out waiting for merge to complete"
-    return 1
-  elif [ "$merge_state" = "DIRTY" ] || [ "$merge_state" = "BLOCKED" ] || [ "$merge_state" = "GATING" ]; then
-    say "WARNING: PR is not mergeable (state=$merge_state). Attempting auto-merge..."
-    gh pr merge --auto --squash "$pr_url" 2>/dev/null || true
-    local i
-    for i in $(seq 1 60); do
-      local pr_state
-      pr_state=$(gh pr view "$pr_url" --json state --jq '.state' 2>/dev/null || echo "")
-      if [ "$pr_state" = "MERGED" ]; then
-        say "PR merged successfully"
+      say "WARNING: Auto-merge also did not complete"
+
+    elif [ "$merge_state" = "DIRTY" ] || [ "$merge_state" = "BLOCKED" ] || [ "$merge_state" = "GATING" ]; then
+      say "WARNING: PR is not immediately mergeable (state=$merge_state). Setting auto-merge..."
+      gh pr merge --auto --squash "$pr_url" || true
+      if _poll_for_merge "$pr_url" 60 10 "auto-merge"; then
+        say "PR merged successfully via auto-merge"
         return 0
       fi
+      say "WARNING: Auto-merge did not complete"
+
+    else
+      say "WARNING: Unknown merge state '$merge_state'. Attempting auto-merge..."
+      gh pr merge --auto --squash "$pr_url" || true
+    fi
+
+    _log_pr_diagnostics "$pr_url" "after attempt $((retry + 1))"
+
+    retry=$((retry + 1))
+    if [ "$retry" -lt "$max_retries" ]; then
+      say "Retrying merge in 10s..."
       sleep 10
-    done
-    say "WARNING: Timed out waiting for PR merge"
-    return 1
+    fi
+  done
+
+  say "ERROR: All $max_retries merge attempts exhausted for $branch_name"
+  return 1
+}
+
+# Collect CI failure details for the remediation agent.
+# Returns a plain-text summary of what failed including log excerpts.
+_collect_ci_failure_details() {
+  local pr_url="$1" branch_name="$2"
+  local out=""
+
+  out+="=== Failed Checks ===\n"
+  local failed_checks
+  failed_checks=$(gh pr view "$pr_url" --json statusCheckRollup --jq '
+    .statusCheckRollup[] | select(.conclusion == "FAILURE" or .conclusion == "CANCELLED" or .conclusion == "TIMED_OUT" or .conclusion == "STARTUP_FAILURE")
+    | "\(.name) (\(.conclusion)) - \(.detailsUrl // "no url")"
+  ' 2>/dev/null || echo "(unable to fetch check details)")
+  out+="$failed_checks\n"
+
+  local run_id
+  run_id=$(gh run list --branch "$branch_name" --limit 1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
+  if [ -n "$run_id" ]; then
+    out+="\n=== CI Run Log (failed steps) ===\n"
+    local log_output
+    log_output=$(gh run view "$run_id" --log-failed 2>/dev/null | tail -200 || true)
+    if [ -n "$log_output" ]; then
+      out+="$log_output\n"
+    else
+      out+="(no failed step logs available — trying full log tail)\n"
+      log_output=$(gh run view "$run_id" --log 2>/dev/null | tail -100 || true)
+      out+="$log_output\n"
+    fi
   else
-    say "WARNING: Unknown merge state '$merge_state'"
-    gh pr merge --auto --squash "$pr_url" 2>/dev/null || true
-    return 1
+    out+="\n(no workflow run found for branch)\n"
+  fi
+
+  echo -e "$out"
+}
+
+# Phase: wait for CI → remediate failures via agent → merge.
+# The remediation agent gets full CI failure context and can fix + push.
+phase_pr_merge() {
+  state_read
+  local loop_num="${LOOP:-0}"
+
+  local change_name
+  if [ -f "$BASE_DIR/tmp/change-name-${loop_num}.txt" ]; then
+    change_name=$(cat "$BASE_DIR/tmp/change-name-${loop_num}.txt")
+  else
+    change_name="fix-loop-${loop_num}"
+  fi
+  local branch_name="${change_name}-${loop_num}"
+
+  local pr_url=""
+  if [ -f "$BASE_DIR/tmp/pr-url-${loop_num}.txt" ]; then
+    pr_url=$(cat "$BASE_DIR/tmp/pr-url-${loop_num}.txt")
+  fi
+  if [ -z "$pr_url" ]; then
+    say "ERROR: No PR URL found. Was phase_finalize skipped?"
+    exit 1
+  fi
+
+  cd "$SCRIPT_DIR/.."
+
+  local tmp
+  tmp=$(mktemp)
+
+  local max_remediation=3
+  local attempt=0
+  local merged=false
+  local ci_failed_details=""
+
+  while [ "$attempt" -le "$max_remediation" ]; do
+    say "Waiting for CI checks on $branch_name (attempt $((attempt + 1))/$(($max_remediation + 1)))..."
+    local ci_exit=0
+    _timeout 900 gh pr checks "$pr_url" --watch --interval 30 || ci_exit=$?
+
+    if [ "$ci_exit" -eq 0 ]; then
+      say "CI checks passed for $branch_name"
+      if _attempt_merge "$pr_url" "$branch_name" 3; then
+        merged=true
+        break
+      fi
+      say "ERROR: Merge failed despite CI passing for $branch_name"
+      break
+    fi
+
+    # Check if PR was merged externally while we were waiting
+    if _pr_is_merged "$pr_url"; then
+      say "PR was merged externally"
+      merged=true
+      break
+    fi
+
+    # Timeout (exit 124) means CI is still running — retry without remediation
+    if [ "$ci_exit" -eq 124 ]; then
+      say "CI check timed out — retrying without remediation"
+      attempt=$((attempt + 1))
+      continue
+    fi
+
+    # Actual CI failure — attempt remediation
+    if [ "$attempt" -ge "$max_remediation" ]; then
+      say "ERROR: All $max_remediation remediation attempts exhausted for $branch_name"
+      break
+    fi
+
+    attempt=$((attempt + 1))
+
+    # Fetch origin/main so the diff is current
+    git fetch origin main --quiet 2>/dev/null || true
+
+    # Collect failure context before remediation
+    ci_failed_details=$(_collect_ci_failure_details "$pr_url" "$branch_name")
+    if [ -z "$ci_failed_details" ]; then
+      ci_failed_details="(no CI failure details could be collected)"
+    fi
+
+    # Check diff from main to give the agent context on what changed
+    local diff_summary
+    diff_summary=$(git diff origin/main.."$branch_name" --stat 2>/dev/null || echo "(unable to compute diff)")
+
+    say "Launching CI remediation agent (attempt $attempt/$max_remediation)..."
+    local pre_remediation_head
+    pre_remediation_head=$(git rev-parse HEAD)
+
+    local remediation_dir="$BASE_DIR/tmp/remediation-${loop_num}-${attempt}"
+    mkdir -p "$remediation_dir"
+    local prompt_file="$remediation_dir/prompt.md"
+    cat > "$prompt_file" << REMEDIATE
+# CI Failure Remediation — $branch_name
+
+The eval loop for scenario "${SCENARIO}" is fixing issues found during agent testing.
+PR ${pr_url} has failing CI checks on branch \`${branch_name}\`.
+
+## Changes in this PR
+
+\`\`\`
+${diff_summary}
+\`\`\`
+
+## CI Failure Details
+
+\`\`\`
+${ci_failed_details}
+\`\`\`
+
+## Your Tasks
+
+1. **Investigate** — look at the CI failure details above.
+   - Run \`gh pr checks "${pr_url}" --fail-fast\` for a fresh view
+   - Run \`gh run view --log-failed \$(gh run list --branch "${branch_name}" --limit 1 --json databaseId --jq '.[0].databaseId')\` to see logs
+   - Check \`git diff origin/main..HEAD\` to understand what changed
+   - Reproduce locally (build, run tests)
+
+2. **Diagnose** — what is the root cause? Is it a real bug in the PR, a pre-existing issue, or a test flake?
+
+3. **Fix** — implement the fix:
+   - Edit the source files
+   - Verify with local tests
+   - Run: \`cargo build\` and \`cargo test\`
+
+4. **Commit and push**:
+   - \`git add -A && git commit -m "${change_name}: remediate CI failure attempt ${attempt}"\`
+   - \`git push origin "${branch_name}"\`
+
+5. **Report** — write a JSON summary to: ${remediation_dir}/summary.json
+   \`\`\`json
+   {"investigation": "root cause analysis", "fix": "what you changed", "commit": "sha if committed"}
+   \`\`\`
+
+The eval loop will re-check CI after you finish.
+REMEDIATE
+
+    run_agent "$prompt_file" "CI Remediation (attempt $attempt)" "$SCRIPT_DIR/.."
+    rm -f "$prompt_file"
+
+    # Only push if the agent actually made changes
+    local new_head
+    new_head=$(git rev-parse HEAD)
+    if [ "$new_head" = "$pre_remediation_head" ]; then
+      say "WARNING: Remediation agent did not make any changes — skipping push"
+    else
+      git push origin "$branch_name" 2>/dev/null || git push --force origin "$branch_name" 2>/dev/null || true
+    fi
+
+    # Loop back to wait for CI on the new commit
+  done
+
+  echo "branch: $branch_name" > "$tmp"
+  [ -n "$pr_url" ] && echo "pr: $pr_url" >> "$tmp"
+  echo "merged: $merged" >> "$tmp"
+  echo "remediation_attempts: $attempt" >> "$tmp"
+  report "pr-merge" "$tmp"
+  rm -f "$tmp"
+
+  if [ "$merged" != "true" ]; then
+    say "ERROR: PR was not merged successfully for $branch_name. Stopping loop."
+    if [ -n "$pr_url" ]; then
+      say "Final PR state:"
+      gh pr view "$pr_url" --json state,mergeStateStatus,title,url 2>/dev/null | sed 's/^/  /' || true
+    fi
+    exit 1
   fi
 }
 
@@ -668,32 +918,36 @@ phase_finalize() {
     fi
   fi
 
-  local pr_url=""
+  if ! gh auth status 2>/dev/null; then
+    say "WARNING: gh is not authenticated. Skipping PR."
+    echo "branch: $branch_name" > "$tmp"
+    echo "pr: skipped (no auth)" >> "$tmp"
+    report "finalize" "$tmp"
+    rm -f "$tmp"
+    say "ERROR: Cannot create PR without gh authentication. Stopping loop."
+    exit 1
+  fi
+
   git push origin "$branch_name" 2>/dev/null || {
     say "WARNING: Push failed. Retrying with --force..."
     git push --force origin "$branch_name" 2>/dev/null || true
   }
 
+  local pr_url
   pr_url=$(gh pr create --fill --base main 2>/dev/null || true)
   if [ -z "$pr_url" ]; then
     pr_url=$(gh pr list --head "$branch_name" --json url --jq '.[0].url' 2>/dev/null || true)
   fi
 
-  local merge_ok=false
-  if [ -n "$pr_url" ]; then
-    if wait_for_pr_merge "$pr_url" "$branch_name"; then
-      merge_ok=true
-    fi
-  fi
+  echo "$pr_url" > "$BASE_DIR/tmp/pr-url-${loop_num}.txt"
 
   echo "branch: $branch_name" > "$tmp"
   [ -n "$pr_url" ] && echo "pr: $pr_url" >> "$tmp"
-  echo "merged: $merge_ok" >> "$tmp"
   report "finalize" "$tmp"
   rm -f "$tmp"
 
-  if [ "$merge_ok" != "true" ]; then
-    say "ERROR: PR was not merged successfully for $branch_name. Stopping loop."
+  if [ -z "$pr_url" ]; then
+    say "ERROR: Could not create or find PR for $branch_name. Stopping loop."
     exit 1
   fi
 }
@@ -758,6 +1012,7 @@ main() {
     harness advance spec || true
     phase_implement
     phase_finalize
+    phase_pr_merge
     harness advance pr || true
 
     loop_num=$((loop_num + 1))
