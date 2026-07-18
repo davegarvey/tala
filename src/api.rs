@@ -212,7 +212,7 @@ async fn wait_for_message(
     Query(params): Query<WaitParams>,
 ) -> impl IntoResponse {
     let since = params.since.unwrap_or(0);
-    let wait_timeout = params.timeout_secs.unwrap_or(300);
+    let wait_timeout = params.timeout_secs.unwrap_or(60);
     let limit = params.limit.filter(|&l| l > 0);
     let from = params.from.as_deref();
 
@@ -341,7 +341,7 @@ async fn wait_new_session(
     State(state): State<AppState>,
     Query(params): Query<WaitNewParams>,
 ) -> impl IntoResponse {
-    let timeout_secs = params.timeout_secs.unwrap_or(300);
+    let timeout_secs = params.timeout_secs.unwrap_or(60);
     let mut rx = state.store.subscribe_global();
 
     let existing_count = state.store.list_sessions().await.len();
@@ -392,7 +392,7 @@ async fn wait_all(
     State(state): State<AppState>,
     Query(params): Query<WaitNewParams>,
 ) -> impl IntoResponse {
-    let timeout_secs = params.timeout_secs.unwrap_or(300);
+    let timeout_secs = params.timeout_secs.unwrap_or(60);
     let mut rx = state.store.subscribe_global();
 
     let timeout_dur = Duration::from_secs(timeout_secs);

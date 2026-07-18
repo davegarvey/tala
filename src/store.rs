@@ -426,7 +426,7 @@ pub async fn read_user_config() -> serde_json::Value {
         .and_then(|c| serde_json::from_str(&c).ok())
         .unwrap_or_else(|| {
             serde_json::json!({
-                "default_timeout": 300,
+                "default_timeout": 60,
                 "idle_timeout": 600,
                 "default_host": "127.0.0.1"
             })
@@ -545,7 +545,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_user_config_defaults() {
         let config = read_user_config().await;
-        assert_eq!(config["default_timeout"], 300);
+        assert_eq!(config["default_timeout"], 60);
         assert_eq!(config["idle_timeout"], 600);
         assert_eq!(config["default_host"], "127.0.0.1");
     }

@@ -112,12 +112,13 @@ pub enum Commands {
         json: bool,
         #[arg(long, short = 'q', help = "Suppress confirmation output")]
         quiet: bool,
-        #[arg(long, help = "Seconds to wait for a reply (default: 300)")]
+        #[arg(long, help = "Seconds to wait for a reply (default: 60)")]
         timeout: Option<u64>,
     },
-    /// Wait for new messages in a session
+    /// Wait for new messages in a session (blocking poll — sends an HTTP request every few seconds).
+    /// Use `tala stream` for real-time SSE on a single session, or `tala listen` to observe all sessions.
     #[command(
-        after_help = "See also: tala stream (real-time SSE), tala listen (all sessions), tala whatsup (non-blocking), tala recap (transcript)"
+        after_help = "USAGE:\n  tala wait <session>        Blocking poll for new messages in a single session\n  tala wait --new-session   Wait for a new session to be created\n\nSee also: tala stream (real-time SSE), tala listen (all sessions), tala whatsup (non-blocking), tala recap (transcript)"
     )]
     Wait {
         #[arg(help = "Session ID (uses active session if set)")]
@@ -130,7 +131,7 @@ pub enum Commands {
             help = "Session ID"
         )]
         session_arg: Option<String>,
-        #[arg(long, help = "Seconds to wait before timing out (default: 300)")]
+        #[arg(long, help = "Seconds to wait before timing out (default: 60)")]
         timeout: Option<u64>,
         #[arg(long, help = "Only return messages with ID greater than this")]
         since: Option<u64>,
@@ -149,10 +150,11 @@ pub enum Commands {
         )]
         r#new: bool,
     },
-    /// Stream new messages as they arrive for a single session (SSE). For all sessions use `tala listen`.
+    /// Stream new messages as they arrive for a single session (real-time SSE — stays connected and pushes messages).
+    /// Use `tala wait` for a blocking poll (request/response), or `tala listen` to observe all sessions.
     #[command(
         name = "stream",
-        after_help = "See also: tala listen (all sessions), tala wait (blocking poll), tala whatsup (non-blocking)"
+        after_help = "USAGE:\n  tala stream <session>   Real-time SSE streaming for a single session (stays connected)\n\nSee also: tala listen (all sessions), tala wait (blocking poll), tala whatsup (non-blocking)"
     )]
     Stream {
         #[arg(help = "Session ID (uses active session if set)")]
@@ -244,9 +246,10 @@ pub enum Commands {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
-    /// Observe all sessions for new messages (default timeout: 300s). Use `tala agents` to discover active participants. For a single session use `tala stream`.
+    /// Observe all sessions for new messages (real-time SSE across all sessions).
+    /// Use `tala stream` for a single session, or `tala wait` for a blocking poll.
     #[command(
-        after_help = "See also: tala wait (blocking poll), tala stream (single session SSE), tala whatsup (non-blocking)"
+        after_help = "USAGE:\n  tala listen                Observe new messages across all sessions (real-time SSE)\n  tala listen --from <name>  Filter messages from a specific sender\n  tala listen --match <text> Filter messages containing text\n\nSee also: tala stream (single session SSE), tala wait (blocking poll), tala whatsup (non-blocking)"
     )]
     Listen {
         #[arg(long, help = "Only show messages with ID greater than this")]
@@ -259,7 +262,7 @@ pub enum Commands {
         channel: Option<String>,
         #[arg(
             long,
-            help = "Seconds to stay connected before disconnecting (default: 300, 0 = no timeout)"
+            help = "Seconds to stay connected before disconnecting (default: 60, 0 = no timeout)"
         )]
         timeout: Option<u64>,
         #[arg(long, short = 'j', help = "Output in JSON format")]
@@ -694,7 +697,7 @@ Pipe messages: `echo "msg" | tala send`. All commands support `--json`.
 | Task | Command |
 |---|---|
 | Broadcast FYI | `tala send "status: done"` |
-| Request + wait | `tala send --wait "need help" --timeout 300` |
+| Request + wait | `tala send --wait "need help" --timeout 60` |
 | Wait for incoming | `sess=$(tala wait --new-session --timeout 600)` |
 | Read transcript | `tala recap` |
 | Named session | `tala start --name "my-project"` |
@@ -1034,11 +1037,22 @@ async fn cmd_send(
     let session_id = if let Some(id) = session_arg.clone() {
         id
     } else if let Some(id) = store::read_active_session().await {
-        // Validate active session still exists
+        // Validate active session still exists and is open
         let check_url = daemon_url(&host, port, &format!("/api/sessions/{}", id));
         let check = reqwest::Client::new().get(&check_url).send().await;
         match check {
-            Ok(r) if r.status().is_success() => id,
+            Ok(r) if r.status().is_success() => {
+                let session: Session = r.json().await?;
+                if session.closed {
+                    store::clear_active_session().await?;
+                    let msg = format!(
+                        "Session {} is closed. Use `tala session reopen {}` to reopen it, or `tala start` to create a new one.",
+                        id, id
+                    );
+                    fail(json_output, &msg, "SESSION_CLOSED");
+                }
+                id
+            }
             _ => {
                 // Stale active session — replace with a new one
                 store::clear_active_session().await?;
@@ -1092,12 +1106,18 @@ async fn cmd_send(
 
     if !resp.status().is_success() {
         let err: ErrorResponse = resp.json().await?;
-        let code = if err.error.contains("closed") {
-            "SESSION_CLOSED"
+        let (msg, code) = if err.error.contains("closed") {
+            (
+                format!(
+                    "Session {} is closed. Use `tala session reopen {}` to reopen it, or `tala start` to create a new one.",
+                    session_id, session_id
+                ),
+                "SESSION_CLOSED",
+            )
         } else {
-            "SESSION_NOT_FOUND"
+            (err.error, "SESSION_NOT_FOUND")
         };
-        fail(json_output, &err.error, code);
+        fail(json_output, &msg, code);
     }
 
     let msg: SendMessageResponse = resp.json().await?;
@@ -1178,18 +1198,18 @@ async fn cmd_wait(
     let client = reqwest::Client::new();
 
     let config = store::read_user_config().await;
-    let default_timeout = config["default_timeout"].as_u64().unwrap_or(300);
+    let default_timeout = config["default_timeout"].as_u64().unwrap_or(60);
     let wait_timeout = timeout_secs.unwrap_or(default_timeout);
 
     loop {
         let sid = if let Some(id) = session_arg.clone() {
             if !json_output {
-                eprintln!("Waiting for messages in session {}...", id);
+                eprintln!("Waiting for messages in session {} (timeout: {}s)...", id, wait_timeout);
             }
             id
         } else if let Some(id) = store::read_active_session().await {
             if !json_output {
-                eprintln!("Waiting for messages in session {}...", id);
+                eprintln!("Waiting for messages in session {} (timeout: {}s)...", id, wait_timeout);
             }
             id
         } else {
@@ -1201,7 +1221,7 @@ async fn cmd_wait(
             match active.len() {
                 0 => {
                     if !json_output {
-                        eprintln!("No active sessions. Waiting for a new session...");
+                        eprintln!("No active sessions. Waiting for a new session (timeout: {}s)...", wait_timeout);
                     }
                     let new_url = daemon_url(
                         &host,
@@ -1238,7 +1258,7 @@ async fn cmd_wait(
                 1 => {
                     let sid_val = active[0].id.clone();
                     if !json_output {
-                        eprintln!("Waiting for new messages in session {}...", sid_val);
+                        eprintln!("Waiting for new messages in session {} (timeout: {}s)...", sid_val, wait_timeout);
                     }
                     sid_val
                 }
@@ -1504,8 +1524,8 @@ async fn cmd_listen(
     if let Some(ref ch) = channel {
         path = format!("{}&channel={}", path, ch);
     }
-    // Default timeout to 300s if not specified, unless explicitly set to 0
-    let timeout_secs = timeout.filter(|&t| t != 0).or(Some(300u64));
+    // Default timeout to 60s if not specified, unless explicitly set to 0
+    let timeout_secs = timeout.filter(|&t| t != 0).or(Some(60u64));
     if let Some(t) = timeout_secs {
         path = format!("{}&timeout_secs={}", path, t);
     }
@@ -1735,7 +1755,8 @@ async fn compute_session_unread(
     if cursor == 0 && session.message_count == 0 {
         return 0;
     }
-    let local_agent = store::read_project_config().await;
+    let local_agent = store::read_project_config().await
+        .or_else(|| Some(store::get_default_sender()));
     let client = reqwest::Client::new();
     let msgs_url = daemon_url(
         host,
@@ -2063,7 +2084,7 @@ async fn cmd_session_reopen(session_id: String, json_output: bool) -> anyhow::Re
 
 async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
-    let timeout = timeout_secs.unwrap_or(300);
+    let timeout = timeout_secs.unwrap_or(60);
     let url = daemon_url(
         &host,
         port,
