@@ -68,6 +68,18 @@ state_read() {
 
 state_write() {
   local tmp="$STATE_FILE.tmp"
+  # Preserve existing MODEL/VARIANT from state if not being explicitly set
+  local existing_model="" existing_variant=""
+  if [ -f "$STATE_FILE" ]; then
+    while IFS='=' read -r key value; do
+      case "$key" in
+        MODEL) existing_model="$value" ;;
+        VARIANT) existing_variant="$value" ;;
+      esac
+    done < "$STATE_FILE"
+  fi
+  local write_model="${MODEL:-${existing_model:-}}"
+  local write_variant="${VARIANT:-${existing_variant:-}}"
   {
     echo "HARNESS_VERSION=${HARNESS_VERSION:-1}"
     echo "STATE=${STATE:-initial}"
@@ -75,8 +87,8 @@ state_write() {
     echo "LOOP=${LOOP:-0}"
     echo "MAX_LOOPS=${MAX_LOOPS:-5}"
     echo "HARNESS_PID=${HARNESS_PID:-}"
-    echo "MODEL=${MODEL:-}"
-    echo "VARIANT=${VARIANT:-}"
+    echo "MODEL=${write_model}"
+    echo "VARIANT=${write_variant}"
   } > "$tmp"
   mv "$tmp" "$STATE_FILE"
 }
