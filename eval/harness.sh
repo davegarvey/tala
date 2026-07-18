@@ -106,15 +106,23 @@ precond_spec() {
     echo "Proceeding anyway (manual confirmation assumed)." >&2
     return 0
   fi
-  local total
+  local total p2
   total=$(python3 -c "
 import json,sys
 d=json.load(open('$loop_file'))
 print(len(d.get('p0',[])) + len(d.get('p1',[])))
 " 2>/dev/null || echo "0")
+  p2=$(python3 -c "
+import json,sys
+d=json.load(open('$loop_file'))
+print(len(d.get('p2',[])))
+" 2>/dev/null || echo "0")
   if [ "$total" -eq 0 ] 2>/dev/null; then
-    echo "Warning: Critic found no P0 or P1 items (P0+P1=0)." >&2
-    echo "Consider 'advance exit' instead." >&2
+    if [ "$p2" -gt 0 ] 2>/dev/null; then
+      echo "Warning: Critic found only P2 items ($p2). These will be triaged during implementation." >&2
+    else
+      echo "Warning: Critic found no items. Consider 'advance exit' instead." >&2
+    fi
   fi
 }
 
@@ -129,16 +137,24 @@ precond_exit_criteria() {
   fi
   local loop_file="$AGENT_TASKS_DIR/$SCENARIO/critic-output-loop-${LOOP}.json"
   if [ -f "$loop_file" ]; then
-    local total
-    total=$(python3 -c "
+    local p0p1 p2
+    p0p1=$(python3 -c "
 import json,sys
 d=json.load(open('$loop_file'))
 print(len(d.get('p0',[])) + len(d.get('p1',[])))
 " 2>/dev/null || echo "1")
-    if [ "$total" -eq 0 ] 2>/dev/null; then
+    p2=$(python3 -c "
+import json,sys
+d=json.load(open('$loop_file'))
+print(len(d.get('p2',[])))
+" 2>/dev/null || echo "0")
+    if [ "$p0p1" -eq 0 ] 2>/dev/null; then
+      if [ "$p2" -gt 0 ] 2>/dev/null; then
+        say "$p2 P2 item(s) remain (not blocking exit)."
+      fi
       return 0
     fi
-    echo "Warning: $total material issue(s) remain (P0+P1 > 0)." >&2
+    echo "Warning: $p0p1 material issue(s) remain (P0+P1 > 0)." >&2
     echo "Use 'advance spec' to address them." >&2
     return 1
   fi
@@ -149,8 +165,13 @@ print(len(d.get('p0',[])) + len(d.get('p1',[])))
 
 advance_setup() {
   local scenario="${SCENARIO}"
+  cd "$SCRIPT_DIR/.."
+  git checkout main 2>/dev/null || true
+  git pull origin main 2>/dev/null || true
+  # Prune merged branches
+  git branch --merged main | grep -v '^\*\|main$' | xargs -r git branch -d 2>/dev/null || true
+  cd "$SCRIPT_DIR"
   mkdir -p "$BASE_DIR/tmp"
-  clean_scenario "$scenario"
   local setup_func="setup_${scenario//-/_}"
   if declare -f "$setup_func" > /dev/null 2>&1; then
     if [ "$AUTO_MODE" = true ]; then
@@ -262,13 +283,23 @@ advance_analyzing() {
     status_line "P1_COUNT" "$p1_count"
     status_line "P2_COUNT" "$p2_count"
     [ -n "$summary" ] && status_line "CRITIC_SUMMARY" "$summary"
+    local all_total=$((p0_count + p1_count + p2_count))
     if [ "${p0_count}" != "?" ] && [ "$p0_count" -eq 0 ] && [ "$p1_count" -eq 0 ]; then
-      say "No P0 or P1 items. Exit criteria met."
-      say "Run: ./eval/harness.sh advance exit"
-      status_line "EXIT_CRITERIA_MET" "true"
-      status_line "RECOMMENDED_NEXT" "exit"
+      if [ "$p2_count" -gt 0 ] 2>/dev/null; then
+        say "No P0 or P1 items. $p2_count P2 item(s) remain — implementation will triage them."
+        say "Run: ./eval/harness.sh advance spec (to triage P2s)"
+        say "Run: ./eval/harness.sh advance exit (to skip P2s)"
+        status_line "EXIT_CRITERIA_MET" "true"
+        status_line "P2_ONLY" "$p2_count"
+        status_line "RECOMMENDED_NEXT" "spec or exit"
+      else
+        say "No items remain. Exit criteria met."
+        say "Run: ./eval/harness.sh advance exit"
+        status_line "EXIT_CRITERIA_MET" "true"
+        status_line "RECOMMENDED_NEXT" "exit"
+      fi
     else
-      say "${p0_count} P0 + ${p1_count} P1 = $((p0_count + p1_count)) material issue(s) found."
+      say "${p0_count} P0 + ${p1_count} P1 + ${p2_count} P2 = $all_total item(s) found."
       say "To fix them: ./eval/harness.sh advance spec"
       say "To exit anyway: ./eval/harness.sh advance exit"
       status_line "EXIT_CRITERIA_MET" "false"
@@ -527,10 +558,15 @@ cmd_reset() {
   local old_scenario="$SCENARIO"
   state_reset
   say "State reset to initial."
+  STATE=initial
+  LOOP=0
+  HARNESS_PID=""
   if [ -n "$old_scenario" ]; then
     SCENARIO="$old_scenario"
     state_write
     say "Preserved scenario: $old_scenario"
+  else
+    state_write
   fi
   status_line "STATE" "initial"
 }

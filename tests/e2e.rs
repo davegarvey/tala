@@ -890,12 +890,18 @@ fn test_use_set_and_clear() {
     let out = tala_in(home.path(), Some(project.path()), &["use", "--clear"]).0;
     assert!(out.contains("cleared"), "should confirm clear: {}", out);
 
-    // Verify cleared
+    // Verify cleared — should list available sessions (not active)
     let (stdout, _stderr, ok) = tala_in(home.path(), Some(project.path()), &["use"]);
     assert!(ok);
     assert!(
-        !stdout.contains(&sess),
-        "should not show session after clear"
+        stdout.contains("Available sessions"),
+        "should list available sessions: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(&sess),
+        "should show session in listing: {}",
+        stdout
     );
 
     tala_stop(home.path());

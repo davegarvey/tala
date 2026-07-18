@@ -8,6 +8,9 @@ source "$SCRIPT_DIR/lib.sh"
 
 setup_cross_project() {
   clean_scenario "cross-project"
+  # Clean agent prompt files and feedback (but preserve critic output)
+  rm -f "$AGENT_TASKS_DIR/cross-project"/agent-*.md
+  rm -rf "$AGENT_TASKS_DIR/cross-project/feedback"
   local tmp_dir="$BASE_DIR/tmp/cross-project"
   mkdir -p "$tmp_dir"/{project-alpha,project-beta}
 
