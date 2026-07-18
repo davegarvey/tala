@@ -47,6 +47,8 @@ pub struct CreateSessionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSessionResponse {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_message_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +121,11 @@ pub enum DaemonEvent {
     SessionClosed,
     SessionCreated(String),
     SessionReopened(String),
+    SessionRenamed {
+        id: String,
+        old_name: String,
+        new_name: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -57,6 +57,9 @@ pub enum Commands {
         name: Option<String>,
     },
     /// Start a new messaging session
+    #[command(
+        after_help = "Use --wait / -w to block until the first reply arrives.\nAlias: tala send --wait (send to existing session)"
+    )]
     Start {
         #[arg(help = "Optional initial message to send")]
         message: Option<String>,
@@ -68,6 +71,14 @@ pub enum Commands {
         name: Option<String>,
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
+        #[arg(
+            long,
+            short = 'w',
+            help = "Wait for a reply after creating the session"
+        )]
+        wait: bool,
+        #[arg(long, short = 't', help = "Seconds to wait for a reply (default: 60)")]
+        timeout: Option<u64>,
     },
     /// Set or show the active session for this project directory
     #[command(
@@ -398,7 +409,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             message,
             name,
             json,
-        } => cmd_start(message, name, json).await,
+            wait,
+            timeout,
+        } => cmd_start(message, name, json, wait, timeout).await,
         Commands::Use {
             session_id,
             clear,
@@ -603,7 +616,15 @@ async fn ensure_daemon_running() -> anyhow::Result<(String, u16)> {
                 }
             }
 
-            bail!("daemon failed to start within 5 seconds (looked for daemon.json at {}/daemon.json)", home);
+            let daemon_path = store::tala_home().join("daemon.json");
+            if !daemon_path.exists() {
+                bail!(
+                    "Daemon not found at {}/daemon.json. Check TALA_HOME is set correctly.",
+                    home
+                );
+            } else {
+                bail!("daemon failed to start within 5 seconds (daemon.json exists at {}/daemon.json but daemon is not reachable)", home);
+            }
         }
     }
 }
@@ -896,10 +917,13 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_start(
     message: Option<String>,
     session_name: Option<String>,
     json_output: bool,
+    should_wait: bool,
+    wait_timeout: Option<u64>,
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
     let client = reqwest::Client::new();
@@ -937,6 +961,67 @@ async fn cmd_start(
             println!("→ Message sent as \"{}\"", sender);
         }
     }
+
+    if !should_wait {
+        return Ok(());
+    }
+
+    // Wait for the first reply
+    let since = session.first_message_id.unwrap_or(0);
+    let wait_path = if let Some(to) = wait_timeout {
+        format!(
+            "/api/sessions/{}/wait?since={}&timeout_secs={}",
+            session.id, since, to
+        )
+    } else {
+        format!("/api/sessions/{}/wait?since={}", session.id, since)
+    };
+    let wait_url = daemon_url(&host, port, &wait_path);
+
+    let spinner = if !json_output {
+        eprint!("⏎ Waiting for reply");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        let spinner = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                eprint!(".");
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+            }
+        });
+        Some(spinner)
+    } else {
+        None
+    };
+
+    let wait_resp = client.get(&wait_url).send().await?;
+
+    if let Some(s) = spinner {
+        s.abort();
+        let _ = s.await;
+    }
+
+    let result: WaitResponse = wait_resp.json().await?;
+
+    if json_output {
+        println!("{}", serde_json::to_string(&result).unwrap());
+        if result.timeout {
+            process::exit(2);
+        }
+    } else if result.closed {
+        println!("[session closed]");
+    } else if result.timeout {
+        println!(
+            "[timeout after {}s, no reply]",
+            result.timeout_after.unwrap_or(0)
+        );
+        process::exit(2);
+    } else {
+        for m in &result.messages {
+            println!("{}: {}", m.sender, m.content);
+        }
+    }
+
     Ok(())
 }
 
@@ -1688,6 +1773,7 @@ async fn cmd_recap(
             );
         }
     }
+    store::write_cursor(recap.cursor.unwrap_or(0)).await?;
     Ok(())
 }
 
@@ -1859,7 +1945,7 @@ async fn cmd_discover(json_output: bool) -> anyhow::Result<()> {
         if tala_config.exists() && checked.insert(dir.to_path_buf()) {
             if let Some(config) = try_read_json(&tala_config).await {
                 let agent_name = config["name"].as_str().unwrap_or("unknown").to_string();
-                let daemon_path = dir.join(".tala").join("daemon.json");
+                let daemon_path = store::tala_home().join("daemon.json");
                 let mut daemon_running = false;
                 let mut agents: Vec<AgentSummary> = Vec::new();
                 if let Some(dinfo) = try_read_json(&daemon_path).await {
@@ -1889,7 +1975,7 @@ async fn cmd_discover(json_output: bool) -> anyhow::Result<()> {
                             if let Some(config) = try_read_json(&sibling_config).await {
                                 let agent_name =
                                     config["name"].as_str().unwrap_or("unknown").to_string();
-                                let daemon_path = path.join(".tala").join("daemon.json");
+                                let daemon_path = store::tala_home().join("daemon.json");
                                 let mut daemon_running = false;
                                 let mut agents: Vec<AgentSummary> = Vec::new();
                                 if let Some(dinfo) = try_read_json(&daemon_path).await {

@@ -57,8 +57,14 @@ async fn create_session(
 ) -> impl IntoResponse {
     let sender = req.sender.unwrap_or_else(|| "unknown".to_string());
     let initial = req.message.map(|msg| (sender, msg));
-    let id = state.store.create_session(initial, req.name).await;
-    (StatusCode::CREATED, Json(CreateSessionResponse { id }))
+    let (id, first_message_id) = state.store.create_session(initial, req.name).await;
+    (
+        StatusCode::CREATED,
+        Json(CreateSessionResponse {
+            id,
+            first_message_id,
+        }),
+    )
 }
 
 async fn list_sessions(State(state): State<AppState>) -> impl IntoResponse {
@@ -312,7 +318,11 @@ async fn wait_for_message(
                 Ok(DaemonEvent::SessionClosed) => {
                     return wrap_wait(vec![], false, None, true);
                 }
-                Ok(DaemonEvent::SessionCreated(_) | DaemonEvent::SessionReopened(_)) => continue,
+                Ok(
+                    DaemonEvent::SessionCreated(_)
+                    | DaemonEvent::SessionReopened(_)
+                    | DaemonEvent::SessionRenamed { .. },
+                ) => continue,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => {
                     return wrap_wait(vec![], false, None, true);
@@ -369,6 +379,7 @@ async fn wait_new_session(
                 }
                 Ok((_sid, DaemonEvent::SessionClosed)) => continue,
                 Ok((_sid, DaemonEvent::SessionReopened(_))) => continue,
+                Ok((_sid, DaemonEvent::SessionRenamed { .. })) => continue,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => {
                     return serde_json::json!({"error": "daemon shutting down"});
@@ -402,9 +413,12 @@ async fn wait_all(
                 Ok((_sid, DaemonEvent::NewMessage(msg))) => {
                     return wrap_wait(vec![msg], false, None, false);
                 }
-                Ok((_sid, DaemonEvent::SessionCreated(_) | DaemonEvent::SessionReopened(_))) => {
-                    continue
-                }
+                Ok((
+                    _sid,
+                    DaemonEvent::SessionCreated(_)
+                    | DaemonEvent::SessionReopened(_)
+                    | DaemonEvent::SessionRenamed { .. },
+                )) => continue,
                 Ok((_sid, DaemonEvent::SessionClosed)) => continue,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => {
@@ -581,7 +595,11 @@ async fn stream_events(
             Ok(DaemonEvent::SessionClosed) => Some(Ok::<_, Infallible>(
                 Event::default().event("closed").data("{}"),
             )),
-            Ok(DaemonEvent::SessionCreated(_) | DaemonEvent::SessionReopened(_)) => None,
+            Ok(
+                DaemonEvent::SessionCreated(_)
+                | DaemonEvent::SessionReopened(_)
+                | DaemonEvent::SessionRenamed { .. },
+            ) => None,
             Err(_) => None,
         }
     });
@@ -756,6 +774,25 @@ async fn observe_events(
                             Some(
                                 Event::default()
                                     .event("reopened")
+                                    .data(serde_json::to_string(&observe).unwrap()),
+                            )
+                        }
+                        DaemonEvent::SessionRenamed {
+                            id,
+                            old_name: _,
+                            new_name: _,
+                        } => {
+                            let session = state.store.get_session(&id).await;
+                            let name = session.and_then(|s| s.name);
+                            let observe = ObserveEvent {
+                                session_id: id,
+                                session_name: name,
+                                r#type: "renamed".to_string(),
+                                message: None,
+                            };
+                            Some(
+                                Event::default()
+                                    .event("renamed")
                                     .data(serde_json::to_string(&observe).unwrap()),
                             )
                         }

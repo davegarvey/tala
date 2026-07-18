@@ -57,7 +57,7 @@ impl Store {
         &self,
         initial_message: Option<(String, String)>,
         name: Option<String>,
-    ) -> String {
+    ) -> (String, Option<u64>) {
         let id = loop {
             let candidate = generate_session_id();
             let sessions = self.sessions.read().await;
@@ -86,12 +86,14 @@ impl Store {
             .global_tx
             .send((id.clone(), DaemonEvent::SessionCreated(id.clone())));
 
-        if let Some((sender, content)) = initial_message {
+        let first_msg_id = if let Some((sender, content)) = initial_message {
             drop(sessions);
-            self.add_message(&id, &sender, &content).await;
-        }
+            self.add_message(&id, &sender, &content).await.map(|m| m.id)
+        } else {
+            None
+        };
 
-        id
+        (id, first_msg_id)
     }
 
     pub async fn add_message(
@@ -207,6 +209,7 @@ impl Store {
     ) -> Result<bool, String> {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(session_id) {
+            let old_name = session.name.clone().unwrap_or_default();
             session.name = Some(name.to_string());
             // Persist session name to disk
             let mut names: HashMap<String, String> = HashMap::new();
@@ -217,6 +220,25 @@ impl Store {
             }
             drop(sessions);
             let _ = write_sessions_json(&names).await;
+
+            let sid = session_id.to_string();
+            let event = DaemonEvent::SessionRenamed {
+                id: sid.clone(),
+                old_name: old_name.clone(),
+                new_name: name.to_string(),
+            };
+            if let Some(tx) = self.broadcast.read().await.get(&sid) {
+                let _ = tx.send(event);
+            }
+            let _ = self.global_tx.send((
+                sid.clone(),
+                DaemonEvent::SessionRenamed {
+                    id: sid,
+                    old_name,
+                    new_name: name.to_string(),
+                },
+            ));
+
             Ok(true)
         } else {
             Ok(false)
@@ -440,7 +462,7 @@ mod tests {
     #[tokio::test]
     async fn test_store_create_session() {
         let store = Store::new();
-        let id = store.create_session(None, None).await;
+        let (id, _) = store.create_session(None, None).await;
         assert!(
             id.starts_with("sess_"),
             "session ID should start with sess_"
@@ -454,7 +476,7 @@ mod tests {
     #[tokio::test]
     async fn test_store_add_and_retrieve_messages() {
         let store = Store::new();
-        let id = store.create_session(None, None).await;
+        let (id, _) = store.create_session(None, None).await;
 
         let msg = store.add_message(&id, "agent-a", "hello").await;
         assert!(msg.is_some());
@@ -473,7 +495,7 @@ mod tests {
     #[tokio::test]
     async fn test_store_messages_since() {
         let store = Store::new();
-        let id = store.create_session(None, None).await;
+        let (id, _) = store.create_session(None, None).await;
 
         store.add_message(&id, "a", "first").await;
         store.add_message(&id, "b", "second").await;
@@ -493,7 +515,7 @@ mod tests {
     #[tokio::test]
     async fn test_store_close_session() {
         let store = Store::new();
-        let id = store.create_session(None, None).await;
+        let (id, _) = store.create_session(None, None).await;
 
         assert!(store.close_session(&id).await);
         assert!(!store.close_session(&id).await);
@@ -520,9 +542,10 @@ mod tests {
     #[tokio::test]
     async fn test_store_create_with_initial_message() {
         let store = Store::new();
-        let id = store
+        let (id, first_msg_id) = store
             .create_session(Some(("init-agent".into(), "initial message".into())), None)
             .await;
+        assert_eq!(first_msg_id, Some(1), "first message should have ID 1");
 
         let messages = store.get_messages_since(&id, 0).await;
         assert_eq!(messages.len(), 1);
