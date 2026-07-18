@@ -10,6 +10,10 @@ use crate::store::{read_user_config, remove_daemon_json, tala_home, write_daemon
 
 pub async fn run_daemon() -> anyhow::Result<()> {
     let store = Arc::new(Store::new());
+
+    // Load persisted sessions from disk
+    store.load_persisted().await;
+
     let app = create_router(store.clone());
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -21,7 +25,7 @@ pub async fn run_daemon() -> anyhow::Result<()> {
 
     let idle_timeout = {
         let config = read_user_config().await;
-        config["idle_timeout"].as_u64().unwrap_or(3600)
+        config["idle_timeout"].as_u64().unwrap_or(86400)
     };
 
     let store_clone = store.clone();
@@ -51,6 +55,8 @@ pub async fn run_daemon() -> anyhow::Result<()> {
 
                     if elapsed > max_idle {
                         info!("idle timeout reached, shutting down");
+                        // Persist open sessions before exit
+                        let _ = store_clone.persist().await;
                         std::process::exit(0);
                     }
                 }
@@ -63,6 +69,8 @@ pub async fn run_daemon() -> anyhow::Result<()> {
         .await?;
 
     idle_handle.abort();
+    // Persist open sessions on graceful shutdown
+    let _ = store.persist().await;
     remove_daemon_json().await;
     info!("tala daemon stopped");
     Ok(())

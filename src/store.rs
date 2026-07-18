@@ -308,6 +308,29 @@ impl Store {
     pub fn subscribe_global(&self) -> broadcast::Receiver<(String, DaemonEvent)> {
         self.global_tx.subscribe()
     }
+
+    pub async fn persist(&self) -> anyhow::Result<()> {
+        let sessions = self.sessions.read().await;
+        persist_sessions(&sessions).await
+    }
+
+    pub async fn load_persisted(&self) {
+        let loaded = load_sessions().await;
+        if loaded.is_empty() {
+            return;
+        }
+        let mut sessions = self.sessions.write().await;
+        let mut broadcast = self.broadcast.write().await;
+        let mut msg_ids = self.next_msg_id.write().await;
+        for (id, session) in loaded {
+            if !sessions.contains_key(&id) {
+                sessions.insert(id.clone(), session);
+                let (tx, _) = broadcast::channel(32);
+                broadcast.insert(id.clone(), tx);
+                msg_ids.insert(id.clone(), 1);
+            }
+        }
+    }
 }
 
 pub async fn read_daemon_json() -> anyhow::Result<DaemonInfo> {
@@ -354,6 +377,37 @@ pub async fn write_sessions_json(names: &HashMap<String, String>) -> anyhow::Res
     tokio::fs::write(&tmp, &content).await?;
     tokio::fs::rename(&tmp, &path).await?;
     Ok(())
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SessionsFile {
+    sessions: HashMap<String, Session>,
+}
+
+pub async fn persist_sessions(sessions: &HashMap<String, Session>) -> anyhow::Result<()> {
+    let path = sessions_path();
+    let tmp = tala_home().join("sessions.json.tmp");
+    let data = SessionsFile {
+        sessions: sessions.clone(),
+    };
+    let content = serde_json::to_string_pretty(&data)?;
+    tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+    tokio::fs::write(&tmp, &content).await?;
+    tokio::fs::rename(&tmp, &path).await?;
+    Ok(())
+}
+
+pub async fn load_sessions() -> HashMap<String, Session> {
+    let path = sessions_path();
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => {
+            match serde_json::from_str::<SessionsFile>(&content) {
+                Ok(data) => data.sessions,
+                Err(_) => HashMap::new(),
+            }
+        }
+        Err(_) => HashMap::new(),
+    }
 }
 
 pub fn local_active_session_path() -> PathBuf {
@@ -449,7 +503,7 @@ pub async fn read_user_config() -> serde_json::Value {
         .unwrap_or_else(|| {
             serde_json::json!({
                 "default_timeout": 60,
-                "idle_timeout": 600,
+                "idle_timeout": 86400,
                 "default_host": "127.0.0.1"
             })
         })
@@ -569,7 +623,7 @@ mod tests {
     async fn test_read_user_config_defaults() {
         let config = read_user_config().await;
         assert_eq!(config["default_timeout"], 60);
-        assert_eq!(config["idle_timeout"], 600);
+        assert_eq!(config["idle_timeout"], 86400);
         assert_eq!(config["default_host"], "127.0.0.1");
     }
 }

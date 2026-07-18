@@ -973,11 +973,10 @@ fn test_start_sets_active_session() {
     let project = tempfile::tempdir().unwrap();
 
     // Start session from project dir — sets active session there
-    let sess = tala_in(home.path(), Some(project.path()), &["start"])
-        .0
-        .trim()
-        .to_string();
-    assert!(sess.starts_with("sess_"), "should return session ID");
+    let stdout = tala_in(home.path(), Some(project.path()), &["start"])
+        .0;
+    let sess = stdout.lines().next().unwrap_or("").trim().to_string();
+    assert!(sess.starts_with("sess_"), "should return session ID from first line of: {}", stdout);
 
     // Send from same project dir (no --session needed, active session is set)
     tala_in(
@@ -1669,6 +1668,81 @@ fn test_session_reopen_json() {
     assert!(ok, "reopen --json should succeed");
     let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(val["status"], "reopened", "json status should be reopened");
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_start_delivery_indication() {
+    let home = tempfile::tempdir().unwrap();
+
+    let (stdout, _stderr, ok) = tala(home.path(), &["start", "delivery test"]);
+    assert!(ok, "start should succeed");
+
+    assert!(
+        stdout.contains("agents listening"),
+        "start should include delivery indication with agent count: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_message_file_flag() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    let msg_path = home.path().join("msg.txt");
+    std::fs::write(&msg_path, "message via --message-file").unwrap();
+
+    let (stdout, stderr, ok) = tala(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--message-file",
+            msg_path.to_str().unwrap(),
+        ],
+    );
+    assert!(ok, "--message-file should work");
+    assert!(!stderr.contains("deprecated"), "should not show deprecation warning");
+    assert!(stdout.contains("Sent message"), "should show confirmation");
+
+    let recap = tala_ok(home.path(), &["recap", &sess, "--json"]);
+    assert!(
+        recap.contains("message via --message-file"),
+        "file content should be in recap"
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_file_deprecation_warning() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    let msg_path = home.path().join("msg.txt");
+    std::fs::write(&msg_path, "deprecated --file").unwrap();
+
+    let (_stdout, stderr, ok) = tala(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--file",
+            msg_path.to_str().unwrap(),
+        ],
+    );
+    assert!(ok, "--file (deprecated) should still work");
+    assert!(
+        stderr.contains("deprecated"),
+        "should emit deprecation warning: {}",
+        stderr
+    );
 
     tala_stop(home.path());
 }

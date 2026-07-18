@@ -33,7 +33,7 @@ fn fail(json: bool, msg: impl std::fmt::Display, code: &str) -> ! {
 #[command(
     name = "tala",
     about = "Agent-to-agent messaging for AI coding tools",
-    long_about = "tala is a lightweight messaging tool for AI agents working across projects.\n\nStart a session with `tala start`, send messages with `tala send`,\nwait for replies with `tala wait`, stream a session with `tala stream`,\nor observe all sessions with `tala listen`.\n\nEvery command supports --json for structured output.",
+    long_about = "tala is a lightweight messaging tool for AI agents working across projects.\n\nStart a session with `tala start`, send messages with `tala send`,\nwait for replies with `tala wait`, stream a session with `tala stream`,\nor observe all sessions with `tala listen`.\n\nUse `tala wait --new-session` to wait for another agent to create a session.\n\nEvery command supports --json for structured output.",
     version
 )]
 pub struct Cli {
@@ -102,8 +102,14 @@ pub enum Commands {
         #[arg(help = "Message content (omit to read from piped stdin)")]
         message: Option<String>,
         #[arg(
-            long,
+            long = "message-file",
             help = "Read message content from a file (use - for filename to use piped stdin)"
+        )]
+        message_file: Option<String>,
+        #[arg(
+            long = "file",
+            hide = true,
+            help = "Read message content from a file (deprecated: use --message-file)"
         )]
         file: Option<String>,
         #[arg(
@@ -421,6 +427,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             session,
             session_arg,
             message,
+            message_file,
             file,
             stdin,
             wait,
@@ -445,10 +452,20 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             if stdin && resolved_message.is_some() {
                 eprintln!("Warning: --stdin is set, ignoring positional message argument");
             }
+            // Resolve message file source with deprecation warning
+            let resolved_file = if file.is_some() && message_file.is_some() {
+                eprintln!("Warning: both --file and --message-file provided, using --message-file");
+                message_file
+            } else if file.is_some() {
+                eprintln!("Warning: --file is deprecated and will be removed in a future release. Use --message-file instead.");
+                file
+            } else {
+                message_file
+            };
             cmd_send(
                 resolved_session,
                 resolved_message,
-                file,
+                resolved_file,
                 stdin,
                 wait,
                 sender_name.as_deref(),
@@ -948,8 +965,21 @@ async fn cmd_start(
 
     store::write_active_session(&session.id).await?;
 
+    // Check delivery: how many agents are actively listening?
+    let agents_url = daemon_url(&host, port, "/api/agents");
+    let agents_listening = match reqwest::get(&agents_url).await {
+        Ok(r) => match r.json::<Vec<AgentSummary>>().await {
+            Ok(a) => a.len(),
+            Err(_) => 0,
+        },
+        Err(_) => 0,
+    };
+
     if json_output {
-        let mut out = serde_json::json!({"session_id": session.id});
+        let mut out = serde_json::json!({
+            "session_id": session.id,
+            "agents_listening": agents_listening
+        });
         if message.is_some() {
             out["message_sent"] = serde_json::json!(true);
         }
@@ -959,6 +989,11 @@ async fn cmd_start(
         if message.is_some() {
             let sender = store::get_sender_name(None);
             println!("→ Message sent as \"{}\"", sender);
+        }
+        if agents_listening == 0 {
+            println!("→ No agents currently listening");
+        } else {
+            println!("→ {} agents listening", agents_listening);
         }
     }
 
