@@ -82,6 +82,7 @@ start_server() {
 }
 
 # Run an opencode agent with a given prompt, wait for completion, return stdout.
+# Shows a live progress indicator with the agent's latest thinking line.
 # Always returns 0 (prints warnings on failure) — never kills the parent script.
 run_agent() {
   local prompt_file="$1" desc="$2" dir="${3:-}"
@@ -101,19 +102,45 @@ run_agent() {
 
   local start_time
   start_time=$(date +%s)
-  local heartbeat_mark=0
+  local spinner='-\|/'
+  local sp_i=0
+  local last_line=""
+  local err_size=0
 
   while kill -0 "$agent_pid" 2>/dev/null; do
     local now elapsed
     now=$(date +%s)
     elapsed=$((now - start_time))
-    local minutes=$((elapsed / 60))
-    if [ "$minutes" -gt "$heartbeat_mark" ]; then
-      heartbeat_mark=$minutes
-      say "$desc still running (${elapsed}s)..."
+
+    # Check for new agent output
+    if [ -f "$err_file" ]; then
+      local new_size
+      new_size=$(stat -f%z "$err_file" 2>/dev/null || stat -c%s "$err_file" 2>/dev/null || echo "0")
+      if [ "$new_size" -gt "$err_size" ]; then
+        err_size=$new_size
+        local fresh
+        local esc=$'\x1b'
+        fresh=$(grep -v -E '(MaxListenersExceededWarning|overflowWarning|node:events|ExperimentalWarning|\(node:\d+|\(Bun:|Bun v|^build|^ar|^$)' "$err_file" 2>/dev/null | sed "s/${esc}\[[0-9;]*[a-zA-Z]//g" | tail -1 || true)
+        if [ -n "$fresh" ]; then
+          last_line="$fresh"
+        fi
+      fi
     fi
-    sleep 10
+
+    local sp="${spinner:$sp_i:1}"
+    sp_i=$(( (sp_i + 1) % 4 ))
+    if [ -n "$last_line" ]; then
+      # Truncate long lines to fit terminal
+      local display="${last_line:0:80}"
+      printf "\r  [%s] %s (%ds) %s" "$sp" "$desc" "$elapsed" "$display" >&2
+    else
+      printf "\r  [%s] %s (%ds)" "$sp" "$desc" "$elapsed" >&2
+    fi
+    sleep 2
   done
+
+  # Clear the progress line
+  printf "\r%80s\r" "" >&2
 
   wait "$agent_pid" || true
   local end_time elapsed
