@@ -757,7 +757,7 @@ phase_pr_merge() {
   while [ "$attempt" -le "$max_remediation" ]; do
     say "Waiting for CI checks on $branch_name (attempt $((attempt + 1))/$(($max_remediation + 1)))..."
     local ci_exit=0
-    gh pr checks "$pr_url" --watch --interval 30 -t 900 || ci_exit=$?
+    _timeout 900 gh pr checks "$pr_url" --watch --interval 30 || ci_exit=$?
 
     if [ "$ci_exit" -eq 0 ]; then
       say "CI checks passed for $branch_name"
@@ -776,8 +776,8 @@ phase_pr_merge() {
       break
     fi
 
-    # Timeout (exit 2) means CI is still running — retry without remediation
-    if [ "$ci_exit" -eq 2 ]; then
+    # Timeout (exit 124) means CI is still running — retry without remediation
+    if [ "$ci_exit" -eq 124 ]; then
       say "CI check timed out — retrying without remediation"
       attempt=$((attempt + 1))
       continue
