@@ -11,6 +11,8 @@ The cross-project eval identified four P1 UX issues in tala 0.25.0's core CLI. T
 - Improve `tala observe` deprecation to error-level stderr message
 - Update help text descriptions for `listen` and `stream` to clarify one-session vs all-sessions
 - Improve `tala send` error when `--stdin` is missing to mention the flag by name
+- Fix `tala status` to verify daemon liveliness via HTTP health check, not just file presence
+- Make `tala session rename` idempotent (rename without `--force` just works)
 
 **Non-Goals:**
 - Renaming `tala wait` (different semantics from stream — long-poll, not SSE)
@@ -30,6 +32,14 @@ The cross-project eval identified four P1 UX issues in tala 0.25.0's core CLI. T
 ### Watch empty output
 - **Approach**: In `cmd_watch`, when the SSE stream ends without producing any message events (only possible events: closed, message, or end-of-stream), print a notice. In text mode: `[no messages received]`. In JSON mode: output an empty JSON array `[]`.
 - **Detection**: Track whether any message event was received. After the loop, if count is 0, emit the notice.
+
+### Status health check
+- **Approach**: In `cmd_status`, after reading `daemon.json`, make a GET request to `http://{host}:{port}/api/status`. If the request fails, report "daemon not running (stale daemon.json)" instead of "daemon running". This prevents false "daemon running" reports when the daemon has crashed but left its marker file.
+- **No daemon.json**: Report "no daemon running" as before (status is inspection-only, does not auto-start).
+
+### Session rename idempotent
+- **Approach**: Remove the `force` requirement: `rename_session` in `store.rs` will allow renaming a session regardless of whether it already has a name. The `--force` flag is kept in the CLI for backward compatibility but is ignored.
+- **Rationale**: Renaming is an explicit user action — requiring `--force` to perform a rename is surprising and counterintuitive. The operation is already reversible (user can rename again).
 
 ## Risks / Trade-offs
 

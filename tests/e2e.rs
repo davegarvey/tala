@@ -1523,7 +1523,7 @@ fn test_stream_limit_zero_is_unlimited() {
 }
 
 #[test]
-fn test_rename_rejects_overwrite_without_force() {
+fn test_rename_succeeds_without_force() {
     let home = tempfile::tempdir().unwrap();
     let sess = tala_start(home.path());
 
@@ -1532,15 +1532,10 @@ fn test_rename_rejects_overwrite_without_force() {
         &["session", "rename", &sess, "original-name", "--force"],
     );
 
-    let (_stdout, stderr, ok) = tala(home.path(), &["session", "rename", &sess, "new-name"]);
+    let (_stdout, _stderr, ok) = tala(home.path(), &["session", "rename", &sess, "new-name"]);
     assert!(
-        !ok,
-        "rename without --force should fail when session has a name"
-    );
-    assert!(
-        stderr.contains("already has name") || stderr.contains("--force"),
-        "error should mention existing name: {}",
-        stderr
+        ok,
+        "rename without --force should succeed when session has a name"
     );
 
     tala_stop(home.path());
@@ -1551,16 +1546,10 @@ fn test_rename_noop_same_name() {
     let home = tempfile::tempdir().unwrap();
     let sess = tala_start(home.path());
 
-    tala_ok(
-        home.path(),
-        &["session", "rename", &sess, "test-name", "--force"],
-    );
+    tala_ok(home.path(), &["session", "rename", &sess, "test-name"]);
 
-    let (_stdout, _stderr, ok) = tala(
-        home.path(),
-        &["session", "rename", &sess, "test-name", "--force"],
-    );
-    assert!(ok, "rename to same name with --force should succeed");
+    let (_stdout, _stderr, ok) = tala(home.path(), &["session", "rename", &sess, "test-name"]);
+    assert!(ok, "rename to same name without --force should succeed");
 
     tala_stop(home.path());
 }

@@ -23,3 +23,16 @@
 ## 6. Send missing stdin error hint
 
 - [x] 6.1 Add mention of `--stdin` to the error messages in `cmd_send` when no message source is found
+
+## 7. Fix tala status daemon health check
+
+- [x] 7.1 Modify `cmd_status` to HTTP-verify daemon is alive after reading daemon.json
+- [x] 7.2 When daemon.json is stale (file exists but HTTP fails), report accordingly
+- [x] 7.3 When daemon.json is missing, report "no daemon running" (no auto-start)
+- [x] 7.4 Update tests for status command
+
+## 8. Fix session rename idempotency
+
+- [x] 8.1 Remove `force` gate in `store.rs` `rename_session` — always allow rename regardless of existing name
+- [x] 8.2 Keep `--force` CLI flag as no-op for backward compatibility
+- [x] 8.3 Update tests: remove `--force` requirement from rename tests

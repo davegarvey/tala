@@ -203,20 +203,10 @@ impl Store {
         &self,
         session_id: &str,
         name: &str,
-        force: bool,
+        _force: bool,
     ) -> Result<bool, String> {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(session_id) {
-            if session.name.as_deref() == Some(name) {
-                return Ok(true);
-            }
-            if session.name.is_some() && !force {
-                return Err(format!(
-                    "Session {} already has name '{}'. Use --force to override",
-                    session_id,
-                    session.name.as_deref().unwrap()
-                ));
-            }
             session.name = Some(name.to_string());
             Ok(true)
         } else {

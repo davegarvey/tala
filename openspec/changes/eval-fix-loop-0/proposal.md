@@ -11,6 +11,8 @@ The cross-project eval revealed four P1 UX issues that erode user trust in tala'
 - Change `tala listen` description to clarify it covers all sessions (vs stream for one session)
 - Improve `tala session rename` error message to hint at `--force`
 - Change `tala send` to default to `--wait` when no explicit message source is given and stdin is a TTY
+- Fix `tala status` to verify daemon is alive via HTTP health check, not just read daemon.json from disk
+- Make `tala session rename` idempotent without `--force` (rename always succeeds, `--force` becomes a no-op)
 
 ## Capabilities
 

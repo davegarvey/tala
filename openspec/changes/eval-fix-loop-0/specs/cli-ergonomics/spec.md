@@ -61,3 +61,29 @@ When no message is provided and `--stdin` is not passed, `tala send` SHALL menti
 #### Scenario: error suggests --stdin
 - **WHEN** user runs `tala send` with no message, no `--file`, no piped input, and no `--stdin`
 - **THEN** the error message SHALL mention `--stdin` as a way to read from stdin
+
+### Requirement: Status SHALL verify daemon is alive
+`tala status` SHALL verify the daemon is actually running by hitting its HTTP API, not just by checking for the daemon.json marker file on disk.
+
+#### Scenario: daemon running
+- **WHEN** user runs `tala status` and the daemon is running
+- **THEN** the system SHALL show daemon info (PID, port, uptime) as before
+
+#### Scenario: stale daemon.json
+- **WHEN** user runs `tala status` and daemon.json exists but the daemon is not reachable
+- **THEN** the system SHALL report that the daemon is not running and indicate the marker file is stale
+
+#### Scenario: no daemon.json
+- **WHEN** user runs `tala status` and daemon.json does not exist
+- **THEN** the system SHALL report "no daemon running" (status is inspection-only, does not start the daemon)
+
+### Requirement: Session rename SHALL be idempotent
+Renaming a session SHALL always succeed regardless of whether the session already has a name. The `--force` flag SHALL be accepted for backward compatibility but SHALL be a no-op.
+
+#### Scenario: rename without --force
+- **WHEN** user runs `tala session rename <id> "newname"` on a session that already has a name
+- **THEN** the rename SHALL succeed without requiring `--force`
+
+#### Scenario: rename with --force (backward compat)
+- **WHEN** user runs `tala session rename <id> "newname" --force`
+- **THEN** the rename SHALL succeed (identical behavior to without --force)

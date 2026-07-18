@@ -1682,28 +1682,45 @@ async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::R
 }
 
 async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
-    match store::read_daemon_json().await {
-        Ok(info) => {
-            if json_output {
-                println!("{}", serde_json::to_string(&info).unwrap());
-            } else {
-                println!("daemon running:");
-                println!("  PID:  {}", info.pid);
-                println!("  Port: {}", info.port);
-                println!("  Host: {}", info.host);
-                println!("  Since: {}", info.started_at.format("%Y-%m-%d %H:%M:%S"));
-            }
-            Ok(())
-        }
+    let info = match store::read_daemon_json().await {
+        Ok(info) => info,
         Err(_) => {
             if json_output {
                 println!("{}", serde_json::json!({"running": false}));
             } else {
                 println!("no daemon running");
             }
-            Ok(())
+            return Ok(());
         }
+    };
+
+    let status_url = daemon_url(&info.host, info.port, "/api/status");
+    let alive = reqwest::Client::new()
+        .get(&status_url)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+
+    if alive {
+        if json_output {
+            println!("{}", serde_json::to_string(&info).unwrap());
+        } else {
+            println!("daemon running:");
+            println!("  PID:  {}", info.pid);
+            println!("  Port: {}", info.port);
+            println!("  Host: {}", info.host);
+            println!("  Since: {}", info.started_at.format("%Y-%m-%d %H:%M:%S"));
+        }
+    } else if json_output {
+        println!(
+            "{}",
+            serde_json::json!({"running": false, "stale_daemon_json": true})
+        );
+    } else {
+        println!("daemon.json found but daemon is not reachable (may have crashed)");
     }
+    Ok(())
 }
 
 async fn cmd_stop() -> anyhow::Result<()> {
