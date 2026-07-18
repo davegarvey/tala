@@ -100,6 +100,9 @@ run_agent() {
   _timeout "$AGENT_TIMEOUT" "${cmd[@]}" "$prompt" > "$out_file" 2> "$err_file" &
   local agent_pid=$!
 
+  # Register for external progress monitoring
+  echo "$err_file" > "$BASE_DIR/tmp/.agent-${agent_pid}.err"
+
   local start_time
   start_time=$(date +%s)
   local spinner='-\|/'
@@ -145,6 +148,7 @@ run_agent() {
   printf "\r%80s\r" "" >&2
 
   wait "$agent_pid" || true
+  rm -f "$BASE_DIR/tmp/.agent-${agent_pid}.err"
   local end_time elapsed
   end_time=$(date +%s)
   elapsed=$((end_time - start_time))
@@ -240,12 +244,28 @@ phase_launch() {
   start_time=$(date +%s)
   local spinner='-\|/'
   local sp_i=0
+  local sizes_file
+  sizes_file=$(mktemp)
+  for pid in "${pids[@]}"; do echo "$pid:0" >> "$sizes_file"; done
 
   while true; do
-    local running=0
+    local running=0 activity=0
     for pid in "${pids[@]}"; do
       if kill -0 "$pid" 2>/dev/null; then
         running=$((running + 1))
+        local watch="$BASE_DIR/tmp/.agent-${pid}.err"
+        if [ -f "$watch" ]; then
+          local epath
+          epath=$(cat "$watch")
+          local cur_size
+          cur_size=$(stat -f%z "$epath" 2>/dev/null || stat -c%s "$epath" 2>/dev/null || echo "0")
+          local prev_size
+          prev_size=$(grep "^${pid}:" "$sizes_file" 2>/dev/null | cut -d: -f2 || echo "0")
+          if [ "$cur_size" -gt "$prev_size" ]; then
+            sed -i '' "s/^${pid}:.*/${pid}:${cur_size}/" "$sizes_file"
+            activity=$((activity + 1))
+          fi
+        fi
       fi
     done
     [ "$running" -eq 0 ] && break
@@ -256,11 +276,16 @@ phase_launch() {
     done_count=$(( ${#pids[@]} - running ))
     local sp="${spinner:$sp_i:1}"
     sp_i=$(( (sp_i + 1) % 4 ))
-    printf "\r  [%s] %d sub-agent(s) running (%ds) %d/%d done" "$sp" "$running" "$elapsed" "$done_count" "${#pids[@]}" >&2
+    if [ "$activity" -gt 0 ]; then
+      printf "\r  [%s] %d sub-agent(s) running (%ds) %d/%d done ▸▸▸" "$sp" "$running" "$elapsed" "$done_count" "${#pids[@]}" >&2
+    else
+      printf "\r  [%s] %d sub-agent(s) running (%ds) %d/%d done ···" "$sp" "$running" "$elapsed" "$done_count" "${#pids[@]}" >&2
+    fi
     sleep 3
   done
 
   printf "\r%80s\r" "" >&2
+  rm -f "$sizes_file"
 
   for pid in "${pids[@]}"; do
     if ! wait "$pid" 2>/dev/null; then
