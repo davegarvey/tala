@@ -783,6 +783,17 @@ async fn agents(State(state): State<AppState>) -> impl IntoResponse {
     let sessions = state.store.list_sessions().await;
     let mut agent_map: BTreeMap<String, (chrono::DateTime<chrono::Utc>, usize)> = BTreeMap::new();
 
+    // Include the local agent as a participant in any open session
+    if let Some(local_agent) = crate::store::read_project_config().await {
+        for summary in &sessions {
+            if !summary.closed {
+                agent_map
+                    .entry(local_agent.clone())
+                    .or_insert_with(|| (summary.created_at, 0));
+            }
+        }
+    }
+
     for summary in &sessions {
         if summary.closed {
             continue;

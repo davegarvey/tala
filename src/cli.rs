@@ -134,6 +134,8 @@ pub enum Commands {
         timeout: Option<u64>,
         #[arg(long, help = "Only return messages with ID greater than this")]
         since: Option<u64>,
+        #[arg(long, help = "Alias for --since (last seen cursor)")]
+        cursor: Option<u64>,
         #[arg(long, help = "Maximum number of messages to return (0 = unlimited)")]
         limit: Option<usize>,
         #[arg(long, help = "Only return messages from this sender")]
@@ -444,6 +446,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             session_arg,
             timeout,
             since,
+            cursor,
             limit,
             from,
             json,
@@ -452,7 +455,15 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             if r#new {
                 cmd_wait_new(timeout, json).await
             } else {
-                cmd_wait(session.or(session_arg), timeout, since, limit, from, json).await
+                cmd_wait(
+                    session.or(session_arg),
+                    timeout,
+                    since.or(cursor),
+                    limit,
+                    from,
+                    json,
+                )
+                .await
             }
         }
         Commands::Stream {
@@ -756,10 +767,14 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
             if json_output {
                 println!(
                     "{}",
-                    serde_json::json!({"session_id": id, "status": "active"})
+                    serde_json::json!({"session_id": id, "name": name_matches[0].name, "message_count": name_matches[0].message_count, "status": "active"})
                 );
             } else {
-                println!("Active session: {}", id);
+                let name = name_matches[0].name.as_deref().unwrap_or("-");
+                println!(
+                    "Active session: {}  ({})  {} msgs",
+                    id, name, name_matches[0].message_count
+                );
             }
             return Ok(());
         } else if name_matches.len() > 1 {
@@ -782,10 +797,14 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
             if json_output {
                 println!(
                     "{}",
-                    serde_json::json!({"session_id": id, "status": "active"})
+                    serde_json::json!({"session_id": id, "name": id_matches[0].name, "message_count": id_matches[0].message_count, "status": "active"})
                 );
             } else {
-                println!("Active session: {}", id);
+                let name = id_matches[0].name.as_deref().unwrap_or("-");
+                println!(
+                    "Active session: {}  ({})  {} msgs",
+                    id, name, id_matches[0].message_count
+                );
             }
             return Ok(());
         } else if id_matches.len() > 1 {
@@ -814,6 +833,30 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
 
     match store::read_active_session().await {
         Some(id) => {
+            let (host, port) = ensure_daemon_running().await?;
+            let url = daemon_url(&host, port, &format!("/api/sessions/{}", id));
+            let resp = reqwest::Client::new().get(&url).send().await;
+            match resp {
+                Ok(r) if r.status().is_success() => {
+                    if let Ok(session) = r.json::<SessionSummary>().await {
+                        if json_output {
+                            println!(
+                                "{}",
+                                serde_json::json!({"session_id": id, "name": session.name, "message_count": session.message_count})
+                            );
+                        } else {
+                            let name = session.name.as_deref().unwrap_or("-");
+                            println!(
+                                "Active session: {}  ({})  {} msgs",
+                                id, name, session.message_count
+                            );
+                        }
+                        return Ok(());
+                    }
+                }
+                _ => {}
+            }
+            // Fallback if API call fails
             if json_output {
                 println!("{}", serde_json::json!({"session_id": id}));
             } else {
@@ -916,10 +959,30 @@ async fn cmd_send(
     chat_timeout: Option<u64>,
 ) -> anyhow::Result<()> {
     let content = if let Some(f) = file {
-        tokio::fs::read_to_string(&f)
-            .await?
-            .trim_end_matches('\n')
-            .to_string()
+        if f == "-" {
+            if std::io::stdin().is_terminal() {
+                anyhow::bail!("No piped input. Use `--stdin` for explicit stdin, or provide a filename for --file");
+            }
+            let read = tokio::task::spawn_blocking(|| {
+                let mut buf = String::new();
+                std::io::stdin().read_to_string(&mut buf).ok()?;
+                let trimmed = buf.trim_end_matches('\n').to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            });
+            match tokio::time::timeout(Duration::from_secs(3600), read).await {
+                Ok(Ok(Some(content))) => content,
+                _ => anyhow::bail!("No piped input. Use `--stdin` for explicit stdin, or provide a filename for --file")
+            }
+        } else {
+            tokio::fs::read_to_string(&f)
+                .await?
+                .trim_end_matches('\n')
+                .to_string()
+        }
     } else if stdin_flag {
         if std::io::stdin().is_terminal() {
             anyhow::bail!("No message provided via stdin (use `--stdin` flag with piped input)");
@@ -1672,6 +1735,7 @@ async fn compute_session_unread(
     if cursor == 0 && session.message_count == 0 {
         return 0;
     }
+    let local_agent = store::read_project_config().await;
     let client = reqwest::Client::new();
     let msgs_url = daemon_url(
         host,
@@ -1679,8 +1743,34 @@ async fn compute_session_unread(
         &format!("/api/sessions/{}/messages?since={}", session.id, cursor),
     );
     match client.get(&msgs_url).send().await {
-        Ok(resp) => resp.json::<Vec<Message>>().await.unwrap_or_default().len(),
+        Ok(resp) => {
+            let msgs: Vec<Message> = resp.json().await.unwrap_or_default();
+            if let Some(ref agent) = local_agent {
+                msgs.iter().filter(|m| m.sender != *agent).count()
+            } else {
+                msgs.len()
+            }
+        }
         Err(_) => 0,
+    }
+}
+
+async fn check_tcp_port(host: &str, port: u16) -> bool {
+    tokio::net::TcpStream::connect((host, port)).await.is_ok()
+}
+
+async fn probe_daemon(host: &str, port: u16, agents: &mut Vec<AgentSummary>) -> bool {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_default();
+    let url = format!("http://{}:{}/api/agents", host, port);
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            *agents = resp.json::<Vec<AgentSummary>>().await.unwrap_or_default();
+            true
+        }
+        _ => check_tcp_port(host, port).await,
     }
 }
 
@@ -1722,17 +1812,7 @@ async fn cmd_discover(json_output: bool) -> anyhow::Result<()> {
                     let host = dinfo["host"].as_str().unwrap_or("127.0.0.1");
                     let port = dinfo["port"].as_u64().unwrap_or(0) as u16;
                     if port > 0 {
-                        let client = reqwest::Client::builder()
-                            .timeout(std::time::Duration::from_secs(2))
-                            .build()?;
-                        let url = format!("http://{}:{}/api/agents", host, port);
-                        match client.get(&url).send().await {
-                            Ok(resp) if resp.status().is_success() => {
-                                daemon_running = true;
-                                agents = resp.json::<Vec<AgentSummary>>().await.unwrap_or_default();
-                            }
-                            _ => {}
-                        }
+                        daemon_running = probe_daemon(host, port, &mut agents).await;
                     }
                 }
                 discovered.push(DiscoveredProject {
@@ -1762,20 +1842,8 @@ async fn cmd_discover(json_output: bool) -> anyhow::Result<()> {
                                     let host = dinfo["host"].as_str().unwrap_or("127.0.0.1");
                                     let port = dinfo["port"].as_u64().unwrap_or(0) as u16;
                                     if port > 0 {
-                                        let client = reqwest::Client::builder()
-                                            .timeout(std::time::Duration::from_secs(2))
-                                            .build()?;
-                                        let url = format!("http://{}:{}/api/agents", host, port);
-                                        match client.get(&url).send().await {
-                                            Ok(resp) if resp.status().is_success() => {
-                                                daemon_running = true;
-                                                agents = resp
-                                                    .json::<Vec<AgentSummary>>()
-                                                    .await
-                                                    .unwrap_or_default();
-                                            }
-                                            _ => {}
-                                        }
+                                        daemon_running =
+                                            probe_daemon(host, port, &mut agents).await;
                                     }
                                 }
                                 discovered.push(DiscoveredProject {
@@ -2089,6 +2157,7 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
 }
 
 async fn compute_total_unread(host: &str, port: u16, cursor: u64) -> usize {
+    let local_agent = store::read_project_config().await;
     let client = reqwest::Client::new();
     let url = daemon_url(host, port, "/api/sessions");
     match client.get(&url).send().await {
@@ -2103,7 +2172,11 @@ async fn compute_total_unread(host: &str, port: u16, cursor: u64) -> usize {
                 );
                 if let Ok(resp) = client.get(&msgs_url).send().await {
                     if let Ok(msgs) = resp.json::<Vec<Message>>().await {
-                        total += msgs.len();
+                        if let Some(ref agent) = local_agent {
+                            total += msgs.iter().filter(|m| m.sender != *agent).count();
+                        } else {
+                            total += msgs.len();
+                        }
                     }
                 }
             }
