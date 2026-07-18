@@ -4,6 +4,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 state_read
+config_read
 loop_num="${LOOP:-0}"
 critic_file="$AGENT_TASKS_DIR/$SCENARIO/critic-output-loop-${loop_num}.json"
 
