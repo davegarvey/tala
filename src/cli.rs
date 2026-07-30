@@ -56,14 +56,20 @@ pub enum Commands {
     },
     /// Send a message to a session. Use `tala session create` to create a session without a message.
     #[command(
-        after_help = "Use --wait / -w to block until a reply arrives.\nUse `tala session create --name` to create a named session."
+        after_help = "Use --wait / -w to block until a reply arrives.\nUse `tala session create --name` to create a named session.\nUse --stdin or pipe content for messages with special characters (backticks, quotes, leading dashes).\nUse `--` to separate options from message content, e.g. `tala send -- --my-flags`."
     )]
     Send {
-        #[arg(help = "Session ID (positional, or use --session/-s)")]
+        #[arg(
+            allow_hyphen_values = true,
+            help = "Session ID (positional, or use --session/-s)"
+        )]
         session: Option<String>,
         #[arg(long = "session", short, alias = "session-id", help = "Session ID")]
         session_arg: Option<String>,
-        #[arg(help = "Message content (omit to read from piped stdin)")]
+        #[arg(
+            allow_hyphen_values = true,
+            help = "Message content (omit to read from piped stdin)"
+        )]
         message: Option<String>,
         #[arg(
             long = "message-file",
@@ -440,49 +446,50 @@ fn daemon_home_display() -> String {
 }
 
 async fn ensure_daemon_running() -> anyhow::Result<(String, u16)> {
-    match store::read_daemon_json().await {
-        Ok(info) => {
-            let alive = reqwest::Client::new()
-                .get(format!("http://{}:{}/api/status", info.host, info.port))
-                .send()
-                .await
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
-            if !alive {
-                bail!(
-                    "daemon.json found at {}/daemon.json but daemon is not reachable (may have crashed). Try `tala stop` then run your command again.",
-                    daemon_home_display()
-                );
-            }
-            Ok((info.host, info.port))
+    // Check if daemon.json exists and daemon is reachable
+    if let Ok(info) = store::read_daemon_json().await {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap_or_default();
+        let alive = client
+            .get(format!("http://{}:{}/api/status", info.host, info.port))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        if alive {
+            return Ok((info.host, info.port));
         }
-        Err(_) => {
-            let home = daemon_home_display();
-            std::process::Command::new(std::env::current_exe()?)
-                .arg("daemon")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .stdin(std::process::Stdio::null())
-                .spawn()
-                .context("failed to start daemon")?;
+        // Stale daemon.json — clean up and restart
+        store::remove_daemon_json().await;
+    }
 
-            for _ in 0..50 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                if let Ok(info) = store::read_daemon_json().await {
-                    return Ok((info.host, info.port));
-                }
-            }
+    // Start daemon
+    let home = daemon_home_display();
+    std::process::Command::new(std::env::current_exe()?)
+        .arg("daemon")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .context("failed to start daemon")?;
 
-            let daemon_path = store::tala_home().join("daemon.json");
-            if !daemon_path.exists() {
-                bail!(
-                    "Daemon not found at {}/daemon.json. Check TALA_HOME is set correctly.",
-                    home
-                );
-            } else {
-                bail!("daemon failed to start within 5 seconds (daemon.json exists at {}/daemon.json but daemon is not reachable)", home);
-            }
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Ok(info) = store::read_daemon_json().await {
+            return Ok((info.host, info.port));
         }
+    }
+
+    let daemon_path = store::tala_home().join("daemon.json");
+    if !daemon_path.exists() {
+        bail!(
+            "Daemon not found at {}/daemon.json. Check TALA_HOME is set correctly.",
+            home
+        );
+    } else {
+        bail!("daemon failed to start within 5 seconds (daemon.json exists at {}/daemon.json but daemon is not reachable)", home);
     }
 }
 
@@ -604,6 +611,9 @@ Pipe messages: `echo "msg" | tala send`. All commands support `--json`.
 - Use **markdown** in messages — code blocks, file refs `path/file:line`.
 - Include relevant context: errors, stack traces, snippets.
 - Sessions are ephemeral (in-memory daemon).
+- **Shell safety:** Use single quotes for messages with backticks or special chars: `tala send 'msg with \`code\`'`.
+  For long or multi-line content, use `--stdin` or `--message-file` to avoid shell interpretation.
+  If your message starts with `--`, add a `--` separator: `tala send -- --my-flag-value`.
 "#;
     tokio::fs::write(&skill_path, skill).await?;
     println!("Created .opencode/skills/tala/SKILL.md");
@@ -779,7 +789,6 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 async fn auto_create_session(
     host: &str,
     port: u16,
@@ -814,7 +823,11 @@ async fn try_read_piped_stdin() -> Option<String> {
             let mut buf = String::new();
             std::io::stdin().read_to_string(&mut buf).ok()?;
             let trimmed = buf.trim_end_matches('\n').to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         })
         .await
         .ok()?
@@ -839,14 +852,12 @@ async fn cmd_send(
 
     let has_content = message.is_some() || message_file.is_some() || stdin_flag;
 
-    if !has_content && session_arg.is_none()
-        && store::read_active_session().await.is_none()
-    {
+    if !has_content && session_arg.is_none() && store::read_active_session().await.is_none() {
         let mut hint = String::new();
         if let Ok(req) = reqwest::get(&daemon_url(&host, port, "/api/sessions")).await {
             if let Ok(sessions) = req.json::<Vec<SessionSummary>>().await {
                 let active: Vec<_> = sessions.iter().filter(|s| !s.closed).collect();
-                if active.len() >= 1 {
+                if !active.is_empty() {
                     hint = format!("\nActive session: {} {}. Set it with `tala use` or target it with `tala send --session <id>`.",
                         active[0].id,
                         active[0].name.as_deref().unwrap_or(""),
@@ -854,7 +865,17 @@ async fn cmd_send(
                 }
             }
         }
-        anyhow::bail!("Nothing to send. Use `tala session create` to create a session without a message.{}", hint);
+        anyhow::bail!(
+            "Nothing to send. Use `tala session create` to create a session without a message.{}",
+            hint
+        );
+    }
+
+    // Warn if positional message starts with -- (likely shell confusion)
+    if let Some(ref msg) = message {
+        if msg.starts_with("--") && !quiet && !json_output {
+            eprintln!("Warning: message starts with '--' which can be misinterpreted as a flag. Use '--' before the message, e.g. `tala send -- \"{}\"`, or use --stdin/--message-file.", msg);
+        }
     }
 
     // Resolve content
@@ -870,8 +891,9 @@ async fn cmd_send(
                 .to_string()
         }
     } else if stdin_flag {
-        try_read_piped_stdin().await
-            .ok_or_else(|| anyhow::anyhow!("No message provided via stdin (use `--stdin` flag with piped input)"))?
+        try_read_piped_stdin().await.ok_or_else(|| {
+            anyhow::anyhow!("No message provided via stdin (use `--stdin` flag with piped input)")
+        })?
     } else if let Some(msg) = &message {
         if msg.is_empty() {
             anyhow::bail!("Message cannot be empty.");
@@ -921,7 +943,11 @@ async fn cmd_send(
             }
             1 => {
                 if !quiet && !json_output {
-                    eprintln!("Using session {}", active[0].id);
+                    let name = active[0].name.as_deref().unwrap_or("-");
+                    eprintln!(
+                        "Sending to session {} ({})  {} msgs",
+                        active[0].id, name, active[0].message_count
+                    );
                 }
                 active[0].id.clone()
             }
@@ -937,9 +963,21 @@ async fn cmd_send(
         }
     };
 
-    send_content(session_id, &content, sender_override, should_wait, chat_timeout, json_output, quiet, &host, port).await
+    send_content(
+        session_id,
+        &content,
+        sender_override,
+        should_wait,
+        chat_timeout,
+        json_output,
+        quiet,
+        &host,
+        port,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_content(
     session_id: String,
     content: &str,
@@ -953,7 +991,11 @@ async fn send_content(
 ) -> anyhow::Result<()> {
     let sender = store::get_sender_name(sender_override);
     let client = reqwest::Client::new();
-    let url = daemon_url(host, port, &format!("/api/sessions/{}/messages", session_id));
+    let url = daemon_url(
+        host,
+        port,
+        &format!("/api/sessions/{}/messages", session_id),
+    );
 
     let req = SendMessageRequest {
         sender,
@@ -1954,10 +1996,7 @@ async fn cmd_session_reopen(session_id: String, json_output: bool) -> anyhow::Re
     Ok(())
 }
 
-async fn cmd_session_create(
-    session_name: Option<String>,
-    json_output: bool,
-) -> anyhow::Result<()> {
+async fn cmd_session_create(session_name: Option<String>, json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
     auto_create_session(&host, port, None, false, json_output, session_name).await?;
     Ok(())
@@ -2184,10 +2223,17 @@ async fn cmd_stop() -> anyhow::Result<()> {
             }
         };
         use std::process::Command;
-        Command::new("kill")
+        let kill_status = Command::new("kill")
             .arg(info.pid.to_string())
             .status()
-            .context("failed to send SIGTERM")?;
+            .context("failed to run kill")?;
+
+        if !kill_status.success() {
+            // Process already gone — clean up stale daemon.json
+            store::remove_daemon_json().await;
+            println!("daemon stopped");
+            return Ok(());
+        }
 
         for _ in 0..20 {
             if store::read_daemon_json().await.is_err() {
@@ -2196,6 +2242,9 @@ async fn cmd_stop() -> anyhow::Result<()> {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        bail!("daemon did not stop in time");
+        // Timed out — clean up stale daemon.json and report success
+        store::remove_daemon_json().await;
+        println!("daemon stopped (stale daemon.json cleaned up)");
+        Ok(())
     }
 }
