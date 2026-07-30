@@ -47,7 +47,11 @@ fn tala_start(home: &std::path::Path) -> String {
     let project = home.join(format!("p-{}", n));
     std::fs::create_dir_all(&project).unwrap();
     let (stdout, _stderr, ok) = tala_in(home, Some(&project), &["session", "create"]);
-    assert!(ok, "tala session create failed\nstdout: {}\nstderr: {}", stdout, _stderr);
+    assert!(
+        ok,
+        "tala session create failed\nstdout: {}\nstderr: {}",
+        stdout, _stderr
+    );
     stdout.lines().next().unwrap_or("").trim().to_string()
 }
 
@@ -190,11 +194,7 @@ fn test_init_with_custom_name() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
 
-    run_init_in(
-        project.path(),
-        home.path(),
-        &["init", "my-custom-project"],
-    );
+    run_init_in(project.path(), home.path(), &["init", "my-custom-project"]);
 
     let config_path = project.path().join(".tala").join("config.json");
     let config = std::fs::read_to_string(&config_path).unwrap();
@@ -467,14 +467,24 @@ fn test_recap_from_filter() {
 
     tala_ok(
         home.path(),
-        &["send", "--session", &sess, "--sender", "alpha", "only-alpha"],
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--sender",
+            "alpha",
+            "only-alpha",
+        ],
     );
     tala_ok(
         home.path(),
         &["send", "--session", &sess, "--sender", "beta", "only-beta"],
     );
 
-    let (stdout, _stderr, ok) = tala(home.path(), &["history", &sess, "--json", "--from", "alpha"]);
+    let (stdout, _stderr, ok) = tala(
+        home.path(),
+        &["history", &sess, "--json", "--from", "alpha"],
+    );
     assert!(ok, "recap --from should succeed");
     assert!(stdout.contains("only-alpha"), "should include alpha msg");
     assert!(!stdout.contains("only-beta"), "should exclude beta msg");
@@ -807,7 +817,6 @@ fn test_send_quiet_flag() {
     tala_stop(home.path());
 }
 
-#[test]
 #[test]
 fn test_use_set_and_clear() {
     let home = tempfile::tempdir().unwrap();
@@ -1152,11 +1161,25 @@ fn test_listen_streams_all_sessions() {
 
     tala_ok(
         home.path(),
-        &["send", "--session", &sess1, "--sender", "alpha", "listen-msg-1"],
+        &[
+            "send",
+            "--session",
+            &sess1,
+            "--sender",
+            "alpha",
+            "listen-msg-1",
+        ],
     );
     tala_ok(
         home.path(),
-        &["send", "--session", &sess2, "--sender", "beta", "listen-msg-2"],
+        &[
+            "send",
+            "--session",
+            &sess2,
+            "--sender",
+            "beta",
+            "listen-msg-2",
+        ],
     );
 
     std::thread::sleep(std::time::Duration::from_secs(2));
@@ -1398,7 +1421,14 @@ fn test_stream_streams_messages() {
 
     tala_ok(
         home.path(),
-        &["send", "--session", &sess, "--sender", "streamer", "live-msg"],
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--sender",
+            "streamer",
+            "live-msg",
+        ],
     );
 
     std::thread::sleep(std::time::Duration::from_secs(2));
@@ -1677,7 +1707,6 @@ fn test_message_file_flag() {
     tala_stop(home.path());
 }
 
-#[test]
 #[test]
 fn test_close_quiet() {
     let home = tempfile::tempdir().unwrap();
