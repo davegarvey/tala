@@ -262,6 +262,145 @@ fn test_init_does_not_install_opencode_skills_without_harness() {
 }
 
 #[test]
+fn test_init_installs_repo_skill_docs() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    std::fs::create_dir_all(project.path().join(".opencode")).unwrap();
+
+    run_init_in(project.path(), home.path(), &["init"]);
+
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_skill = std::fs::read_to_string(repo.join(".opencode/skills/tala/SKILL.md")).unwrap();
+    let installed =
+        std::fs::read_to_string(project.path().join(".opencode/skills/tala/SKILL.md")).unwrap();
+    assert_eq!(
+        installed, repo_skill,
+        "installed SKILL.md must be byte-identical to the repo file (single source of truth)"
+    );
+    assert!(
+        !installed.contains("tala start"),
+        "installed SKILL.md must not reference removed `tala start`"
+    );
+    assert!(
+        !installed.contains("tala recap"),
+        "installed SKILL.md must not reference removed `tala recap`"
+    );
+
+    let repo_cmd = repo.join(".opencode/commands/tala.md");
+    let installed_cmd =
+        std::fs::read_to_string(project.path().join(".opencode/commands/tala.md")).unwrap();
+    assert_eq!(
+        installed_cmd,
+        std::fs::read_to_string(repo_cmd).unwrap(),
+        "installed tala.md must match the repo file"
+    );
+}
+
+/// Collect every `tala <command>` first-token referenced inside backtick spans and
+/// fenced code blocks of a markdown doc. This mirrors how an agent would read the docs.
+fn extract_doc_commands(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_fence = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            // Whole line is code — scan every word pair.
+            let words: Vec<&str> = trimmed.split_whitespace().collect();
+            for w in words.windows(2) {
+                if w[0] == "tala" {
+                    out.push(w[1].trim_start_matches('-').to_string());
+                }
+            }
+        } else {
+            // Inline backtick spans: odd-indexed segments after splitting on '`'.
+            let parts: Vec<&str> = line.split('`').collect();
+            for (i, seg) in parts.iter().enumerate() {
+                if i % 2 == 1 {
+                    let words: Vec<&str> = seg.split_whitespace().collect();
+                    for w in words.windows(2) {
+                        if w[0] == "tala" {
+                            out.push(w[1].trim_start_matches('-').to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn test_docs_reference_only_real_commands() {
+    let home = tempfile::tempdir().unwrap();
+    let help = tala_ok(home.path(), &["--help"]);
+
+    // Parse the real command set from `tala --help`'s Commands: block.
+    let mut commands = std::collections::BTreeSet::new();
+    let mut in_commands = false;
+    for line in help.lines() {
+        if line.trim_start().starts_with("Commands:") {
+            in_commands = true;
+            continue;
+        }
+        if in_commands {
+            if line.trim().is_empty()
+                || line.trim_start().starts_with("Options:")
+                || line.trim_start().starts_with("Arguments:")
+            {
+                in_commands = false;
+                continue;
+            }
+            if let Some(name) = line.trim_start().split_whitespace().next() {
+                if !name.starts_with('-') {
+                    commands.insert(name.to_string());
+                }
+            }
+        }
+    }
+    assert!(
+        commands.contains("send") && commands.contains("session"),
+        "help parsing should find known commands, got: {:?}",
+        commands
+    );
+
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let docs = [
+        repo.join("README.md"),
+        repo.join(".opencode/skills/tala/SKILL.md"),
+        repo.join(".opencode/commands/tala.md"),
+    ];
+
+    // `tala-cli` (cargo binstall) and `tala <command>`-style placeholders are the only
+    // non-subcommand tokens the docs legitimately contain.
+    let allowlist = ["cli"];
+
+    let mut failures: Vec<String> = Vec::new();
+    for doc in &docs {
+        let text =
+            std::fs::read_to_string(doc).unwrap_or_else(|e| panic!("{}: {}", doc.display(), e));
+        for token in extract_doc_commands(&text) {
+            if token.is_empty() || token.starts_with('-') {
+                continue;
+            }
+            if commands.contains(&token) || allowlist.contains(&token.as_str()) {
+                continue;
+            }
+            failures.push(format!("{}: unknown `tala {}`", doc.display(), token));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "docs reference commands that do not exist in the binary:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
 fn test_close_session() {
     let home = tempfile::tempdir().unwrap();
 

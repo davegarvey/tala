@@ -563,69 +563,16 @@ async fn install_opencode_skills() -> anyhow::Result<()> {
     tokio::fs::create_dir_all(&skill_dir).await?;
 
     let skill_path = skill_dir.join("SKILL.md");
-    let skill = r#"---
-name: tala
-description: Agent-to-agent messaging for AI coding tools. Use to communicate with agents across projects, terminals, or sessions.
-license: MIT
-compatibility: Requires tala CLI v0.23+
-metadata:
-  author: tala
-  version: "2.1"
----
-# tala — Agent-to-Agent Messaging
-
-Send messages with `tala send "msg"`. Request replies with `tala send --wait "question"`.
-Wait for incoming sessions with `tala wait --new-session`. View history with `tala history`.
-Pipe messages: `echo "msg" | tala send`. All commands support `--json`.
-
-## Common Patterns
-
-| Task | Command |
-|---|---|
-| Broadcast FYI | `tala send "status: done"` |
-| Request + wait | `tala send --wait "need help" --timeout 60` |
-| Wait for incoming | `sess=$(tala wait --new-session --timeout 600)` |
-| Read transcript | `tala history` |
-| Named session | `tala session create --name "my-project"` |
-| Watch all | `tala listen` |
-| Filtered watch | `tala listen --from "alpha" --match "urgent"` |
-| Override sender | `tala send --sender "bot" "hello"` |
-| Check messages | `tala check` |
-| Discover agents | `tala agents` |
-| Cross-project discovery | `tala discover` |
-
-## Key Behaviors (v0.23+)
-- Send returns immediately by default (fire-and-forget). Use `-w`/`--wait` to block.
-- If no session exists and you provide a message, auto-creates a session.
-- Use `tala session create` to create a session without a message.
-- Active session is auto-set per project directory (`.tala/active-session`).
-- `tala wait` without `--since` only waits for new messages (no history replay).
-- `tala wait --new-session` blocks until another agent creates a session.
-- `tala listen` watches all sessions.
-- `tala check` shows new messages since last check (non-blocking).
-- `tala agents` lists active participants.
-- `tala discover` finds agents in other projects.
-- `TALA_HOME` env var overrides `~/.tala` for isolated daemon instances.
-
-## Guidelines
-- Use **markdown** in messages — code blocks, file refs `path/file:line`.
-- Include relevant context: errors, stack traces, snippets.
-- Sessions are ephemeral (in-memory daemon).
-- **Shell safety:** Use single quotes for messages with backticks or special chars: `tala send 'msg with \`code\`'`.
-  For long or multi-line content, use `--stdin` or `--message-file` to avoid shell interpretation.
-  If your message starts with `--`, add a `--` separator: `tala send -- --my-flag-value`.
-"#;
+    // Canonical docs live in the repo (.opencode/...) and are embedded at build time
+    // so the binary always ships exactly the docs that are committed.
+    let skill = include_str!("../.opencode/skills/tala/SKILL.md");
     tokio::fs::write(&skill_path, skill).await?;
     println!("Created .opencode/skills/tala/SKILL.md");
 
     let commands_dir = opencode_dir.join("commands");
     tokio::fs::create_dir_all(&commands_dir).await?;
     let command_path = commands_dir.join("tala.md");
-    let command = r#"---
-description: Use tala for agent-to-agent messaging — cross-project, cross-terminal, cross-agent communication.
----
-Run tala for agent-to-agent messaging. Send messages with `tala send "msg"`. Request replies with `tala send --wait "question"`. Receive sessions with `tala wait --new-session`. Watch all activity with `tala listen`. Read transcripts with `tala history`. Check for new messages with `tala check`. Discover cross-project agents with `tala discover`. Pipe messages via stdin. All commands support `--json`. By default, `tala send` returns immediately (use `-w`/`--wait` to block).
-"#;
+    let command = include_str!("../.opencode/commands/tala.md");
     tokio::fs::write(&command_path, command).await?;
     println!("Created .opencode/commands/tala.md");
     Ok(())
@@ -2222,17 +2169,24 @@ async fn cmd_stop() -> anyhow::Result<()> {
                 return Ok(());
             }
         };
-        use std::process::Command;
-        let kill_status = Command::new("kill")
-            .arg(info.pid.to_string())
-            .status()
-            .context("failed to run kill")?;
-
-        if !kill_status.success() {
-            // Process already gone — clean up stale daemon.json
-            store::remove_daemon_json().await;
-            println!("daemon stopped");
-            return Ok(());
+        use libc::kill;
+        let pid = info.pid as libc::pid_t;
+        // Send SIGTERM directly via the syscall — no external `kill` binary needed.
+        // (Containers/slim systems may not ship /bin/kill.)
+        let ret = unsafe { kill(pid, libc::SIGTERM) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                // Process already gone — clean up stale daemon.json
+                store::remove_daemon_json().await;
+                println!("daemon stopped");
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!(
+                "failed to kill daemon (pid {}): {}",
+                pid,
+                err
+            ));
         }
 
         for _ in 0..20 {
