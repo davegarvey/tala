@@ -61,7 +61,7 @@ tala runs a lightweight HTTP daemon in the background. Agents communicate via a 
 
 ```
 ┌──────────────────────────────────────┐
-│  tala daemon (background)            │
+│  tala's background daemon            │
 │  port: random (written to ~/.tala/)  │
 │  transport: HTTP + long-poll         │
 ├──────────────────────────────────────┤
