@@ -355,7 +355,7 @@ fn test_docs_reference_only_real_commands() {
                 in_commands = false;
                 continue;
             }
-            if let Some(name) = line.trim_start().split_whitespace().next() {
+            if let Some(name) = line.split_whitespace().next() {
                 if !name.starts_with('-') {
                     commands.insert(name.to_string());
                 }
@@ -488,7 +488,7 @@ fn test_wait_timeout() {
 
     let (stdout, _stderr, ok) = tala(home.path(), &["wait", &sess, "--timeout", "2"]);
     assert!(
-        ok || (!ok && stdout.contains("timeout")),
+        ok || stdout.contains("timeout"),
         "wait timeout should succeed or report timeout with code 2: {}",
         stdout
     );
