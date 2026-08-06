@@ -26,7 +26,7 @@ fn fail(json: bool, msg: impl std::fmt::Display, code: &str) -> ! {
 #[command(
     name = "tala",
     about = "Agent-to-agent messaging for AI coding tools",
-    long_about = "tala is a lightweight messaging tool for AI agents working across projects.\n\nSend messages with `tala send`, wait for replies with `tala wait`, stream a session with `tala stream`,\nor listen to all sessions with `tala listen`.\n\nUse `tala wait --new-session` to wait for another agent to create a session.\n\nEvery command supports --json for structured output.",
+    long_about = "tala is a lightweight messaging tool for AI agents working across projects.\n\nSend messages with `tala send`, wait for replies with `tala wait`, stream a session with `tala stream`,\nor listen to all sessions with `tala listen`.\n\nUse `tala wait --new-session` to wait for a session with an incoming message from another agent.\n\nEvery command supports --json for structured output.",
     version
 )]
 pub struct Cli {
@@ -98,9 +98,9 @@ pub enum Commands {
     },
     /// Wait for new messages in a session (blocking poll — sends an HTTP request every few seconds).
     /// Use `tala stream` for real-time SSE on a single session, or `tala listen` to observe all sessions.
-    /// Use `tala wait --new-session` to wait for another agent to create a session.
+    /// Use `tala wait --new-session` to wait for a session with an incoming message from another agent.
     #[command(
-        after_help = "USAGE:\n  tala wait <session>          Blocking poll — sends periodic HTTP requests\n  tala wait --new-session     Wait for another agent to create a session\n\nCOMPARISON:\n  tala stream   Real-time SSE — stays connected, pushes messages immediately (single session)\n  tala listen   Real-time SSE — observe all sessions at once\n  tala check    Non-blocking — show new messages and return immediately\n\nSee also: tala history (transcript), tala session (manage sessions)"
+        after_help = "USAGE:\n  tala wait <session>          Blocking poll — sends periodic HTTP requests\n  tala wait --new-session     Wait for a session with an incoming message from another agent\n\nCOMPARISON:\n  tala stream   Real-time SSE — stays connected, pushes messages immediately (single session)\n  tala listen   Real-time SSE — observe all sessions at once\n  tala check    Non-blocking — show new messages and return immediately\n\nSee also: tala history (transcript), tala session (manage sessions)"
     )]
     Wait {
         #[arg(help = "Session ID (uses active session if set)")]
@@ -1079,10 +1079,20 @@ async fn cmd_wait(
                             wait_timeout
                         );
                     }
+                    let sender = store::read_project_config()
+                        .await
+                        .or_else(|| Some(store::get_default_sender()));
+                    let sender_param = match sender {
+                        Some(s) => format!("&sender={}", s),
+                        None => String::new(),
+                    };
                     let new_url = daemon_url(
                         &host,
                         port,
-                        &format!("/api/sessions/wait-new?timeout_secs={}", wait_timeout),
+                        &format!(
+                            "/api/sessions/wait-new?timeout_secs={}{}",
+                            wait_timeout, sender_param
+                        ),
                     );
                     let resp = client.get(&new_url).send().await?;
                     let result: serde_json::Value = resp.json().await?;
@@ -1955,10 +1965,22 @@ async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::R
     if !json_output {
         eprintln!("Waiting for a new session (timeout: {}s)...", timeout);
     }
+    // B003: identify ourselves so the daemon only delivers sessions with an
+    // incoming message from ANOTHER agent (not our own creates).
+    let sender = store::read_project_config()
+        .await
+        .or_else(|| Some(store::get_default_sender()));
+    let sender_param = match sender {
+        Some(s) => format!("&sender={}", s),
+        None => String::new(),
+    };
     let url = daemon_url(
         &host,
         port,
-        &format!("/api/sessions/wait-new?timeout_secs={}", timeout),
+        &format!(
+            "/api/sessions/wait-new?timeout_secs={}{}",
+            timeout, sender_param
+        ),
     );
     let client = reqwest::Client::new();
     let resp = client.get(&url).send().await?;

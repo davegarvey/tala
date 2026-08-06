@@ -600,6 +600,120 @@ fn test_wait_limit_cap() {
 }
 
 #[test]
+fn test_wait_new_returns_preexisting_incoming_session() {
+    let home = tempfile::tempdir().unwrap();
+    let alpha_proj = home.path().join("alpha-proj");
+    let beta_proj = home.path().join("beta-proj");
+    std::fs::create_dir_all(&alpha_proj).unwrap();
+    std::fs::create_dir_all(&beta_proj).unwrap();
+    run_init_in(&alpha_proj, home.path(), &["init", "alpha"]);
+    run_init_in(&beta_proj, home.path(), &["init", "beta"]);
+
+    // alpha creates a session and asks a question BEFORE beta starts waiting
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha session create failed: {}", sout);
+    let alpha_sess = sout.trim().to_string();
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &alpha_sess, "question-from-alpha"],
+    );
+    assert!(ok, "alpha send failed: {}", sout);
+
+    // beta waits --new-session AFTER the session exists: must get alpha's question
+    let (stdout, _stderr, ok) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["wait", "--new-session", "--timeout", "10", "--json"],
+    );
+    assert!(ok, "wait --new-session should succeed: {}", stdout);
+    assert!(
+        stdout.contains(&alpha_sess),
+        "should return alpha's session: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("question-from-alpha"),
+        "should include alpha's message: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_wait_new_ignores_own_session_create() {
+    let home = tempfile::tempdir().unwrap();
+    let alpha_proj = home.path().join("alpha-proj");
+    let beta_proj = home.path().join("beta-proj");
+    std::fs::create_dir_all(&alpha_proj).unwrap();
+    std::fs::create_dir_all(&beta_proj).unwrap();
+    run_init_in(&alpha_proj, home.path(), &["init", "alpha"]);
+    run_init_in(&beta_proj, home.path(), &["init", "beta"]);
+
+    // Start the daemon and give alpha a session (empty, no message)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha session create failed: {}", sout);
+
+    // beta waits for an incoming session in the background
+    let mut child = std::process::Command::new(tala_bin())
+        .env("HOME", home.path())
+        .current_dir(&beta_proj)
+        .args(["wait", "--new-session", "--timeout", "15", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to start wait --new-session");
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    // beta creates its OWN session: the wait must NOT fire on it
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["session", "create"]);
+    assert!(ok, "beta session create failed: {}", sout);
+    let beta_sess = sout.trim().to_string();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "wait --new-session must not fire on the waiter's own session create"
+    );
+
+    // alpha creates a NEW session and asks a question: the wait should fire now
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha second session create failed: {}", sout);
+    let alpha_sess2 = sout.trim().to_string();
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &alpha_sess2, "question-from-alpha"],
+    );
+    assert!(ok, "alpha send failed: {}", sout);
+
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "wait --new-session should exit 0: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(&alpha_sess2),
+        "should return alpha's new session: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains(&beta_sess),
+        "must not return beta's own session: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("question-from-alpha"),
+        "should include the question: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
 fn test_recap_from_filter() {
     let home = tempfile::tempdir().unwrap();
     let sess = tala_start(home.path());
