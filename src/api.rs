@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -675,6 +676,7 @@ async fn stream_events(
 #[derive(Deserialize)]
 struct ObserveParams {
     since: Option<u64>,
+    since_map: Option<String>,
     r#match: Option<String>,
     from: Option<String>,
     channel: Option<String>,
@@ -686,6 +688,14 @@ async fn observe_events(
     Query(params): Query<ObserveParams>,
 ) -> impl IntoResponse {
     let since = params.since.unwrap_or(0);
+    // Optional per-session since map (URL-encoded JSON) for read-cursor-aware
+    // replay: each session is replayed from ITS OWN last-seen id (B014).
+    let since_map: HashMap<String, u64> = params
+        .since_map
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let since_for = |sid: &str| since_map.get(sid).copied().unwrap_or(since);
     let match_str = params.r#match;
     let from = params.from;
     let channel = params.channel;
@@ -702,7 +712,10 @@ async fn observe_events(
                 _ => {}
             }
         }
-        let msgs = state.store.get_messages_since(&session.id, since).await;
+        let msgs = state
+            .store
+            .get_messages_since(&session.id, since_for(&session.id))
+            .await;
         for msg in &msgs {
             if let Some(ref f) = from {
                 if msg.sender != *f {
@@ -774,7 +787,9 @@ async fn observe_events(
 
                     let opt = match event {
                         DaemonEvent::NewMessage(msg) => {
-                            if msg.id <= since {
+                            let msg_since =
+                                since_map.get(&msg.session_id).copied().unwrap_or(since);
+                            if msg.id <= msg_since {
                                 continue;
                             }
                             if let Some(ref f) = from {

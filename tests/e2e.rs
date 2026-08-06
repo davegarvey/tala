@@ -2832,6 +2832,163 @@ fn test_daemon_restart_preserves_messages() {
     tala_stop(home.path());
 }
 
+// ---- cycle-05: per-session read cursors (B014 / B023 / B025) ----
+
+fn run_two_agents(home: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let alpha_proj = home.join("alpha-proj");
+    let beta_proj = home.join("beta-proj");
+    std::fs::create_dir_all(&alpha_proj).unwrap();
+    std::fs::create_dir_all(&beta_proj).unwrap();
+    run_init_in(&alpha_proj, home, &["init", "alpha"]);
+    run_init_in(&beta_proj, home, &["init", "beta"]);
+    (alpha_proj, beta_proj)
+}
+
+fn line_for<'a>(out: &'a str, sess: &str) -> &'a str {
+    out.lines().find(|l| l.contains(sess)).unwrap_or("")
+}
+
+#[test]
+fn test_unread_is_per_session_new_session_msg_visible() {
+    // B014: beta reads session A fully (its cursor for A = 3); alpha then sends
+    // ONE message to a brand-new session B (per-session id 1 — below any
+    // inflated global cursor). beta's `list` must show B with "(1 new)" and
+    // `check` must report the message.
+    let home = tempfile::tempdir().unwrap();
+    let (alpha_proj, beta_proj) = run_two_agents(home.path());
+
+    // alpha: session A with 3 messages (per-session ids 1..3)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha session create failed: {}", sout);
+    let sess_a = sout.trim().to_string();
+    for m in ["a-one", "a-two", "a-three"] {
+        let (sout, _serr, ok) = tala_in(
+            home.path(),
+            Some(&alpha_proj),
+            &["send", "--session", &sess_a, m],
+        );
+        assert!(ok, "alpha send failed: {}", sout);
+    }
+
+    // beta reads session A fully -> beta's cursor for A = 3
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["history", &sess_a]);
+    assert!(ok, "beta history failed: {}", sout);
+    assert!(
+        sout.contains("a-three"),
+        "beta should see all of A: {}",
+        sout
+    );
+
+    // alpha: brand-new session B + 1 message (per-session id 1)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha second session create failed: {}", sout);
+    let sess_b = sout.trim().to_string();
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &sess_b, "fresh-msg-for-beta"],
+    );
+    assert!(ok, "alpha send to B failed: {}", sout);
+
+    // beta: list must show B as "(1 new)" and A as fully read
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["list"]);
+    assert!(ok, "beta list failed: {}", sout);
+    let a_line = line_for(&sout, &sess_a);
+    let b_line = line_for(&sout, &sess_b);
+    assert!(
+        !a_line.contains("(1 new)"),
+        "session A must not show unread after being read: {}",
+        a_line
+    );
+    assert!(
+        b_line.contains("(1 new)"),
+        "session B must show (1 new) for its fresh message: {}",
+        b_line
+    );
+
+    // beta: check --json must report the fresh message and a per-session cursors map
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["check", "--json"]);
+    assert!(ok, "beta check failed: {}", sout);
+    assert!(
+        sout.contains("fresh-msg-for-beta"),
+        "check must report B's fresh message: {}",
+        sout
+    );
+    assert!(
+        sout.contains("\"cursors\""),
+        "check JSON must include cursors map: {}",
+        sout
+    );
+    assert!(
+        sout.contains(&format!("\"{}\":1", sess_b)),
+        "cursors map must track B at 1: {}",
+        sout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_empty_session_history_does_not_reset_other_sessions_read_state() {
+    // B025: reading an EMPTY session must not touch any other session's read
+    // state (the old global cursor was reset to 0 by `history` on empty
+    // sessions, re-marking everything unread).
+    let home = tempfile::tempdir().unwrap();
+    let (alpha_proj, beta_proj) = run_two_agents(home.path());
+
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha session create failed: {}", sout);
+    let sess_a = sout.trim().to_string();
+    for m in ["a-one", "a-two", "a-three"] {
+        let _ = tala_in(
+            home.path(),
+            Some(&alpha_proj),
+            &["send", "--session", &sess_a, m],
+        );
+    }
+
+    // beta reads A fully
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["history", &sess_a]);
+    assert!(ok, "beta history failed: {}", sout);
+
+    // alpha creates an EMPTY session (no message)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha empty session create failed: {}", sout);
+    let sess_empty = sout.trim().to_string();
+
+    // beta reads the empty session -> must not reset anything
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["history", &sess_empty]);
+    assert!(ok, "beta history on empty session failed: {}", sout);
+    assert!(
+        sout.contains("(no messages yet)"),
+        "empty history should say so: {}",
+        sout
+    );
+
+    // A must still show no unread for beta
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["list"]);
+    assert!(ok, "beta list failed: {}", sout);
+    let a_line = line_for(&sout, &sess_a);
+    assert!(
+        !a_line.contains("(1 new)"),
+        "reading an empty session must not re-mark A as unread: {}",
+        a_line
+    );
+
+    // and the persisted cursors map must still track A at 3
+    let cursors_file = beta_proj.join(".tala").join("cursors.json");
+    let content = std::fs::read_to_string(&cursors_file)
+        .unwrap_or_else(|e| panic!("cursors.json should exist: {}", e));
+    assert!(
+        content.contains(&format!("\"{}\":3", sess_a)),
+        "cursors.json must keep A's read marker at 3: {}",
+        content
+    );
+
+
+    tala_stop(home.path());
+}
+
 #[test]
 fn test_message_ids_resume_after_restart() {
     // Per-session ids must continue after a restart — no reuse, no gaps.
@@ -2976,5 +3133,183 @@ fn test_send_to_session_without_messages_after_restart() {
         "history should show the message: {}",
         recap
     );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_to_one_session_does_not_hide_unread_elsewhere() {
+    // B023: sending a message writes the SENDER's cursor for THAT session only.
+    // It must not inflate any global state that hides unread in other sessions.
+    let home = tempfile::tempdir().unwrap();
+    let (alpha_proj, beta_proj) = run_two_agents(home.path());
+
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha session create failed: {}", sout);
+    let sess_a = sout.trim().to_string();
+    for m in ["a-one", "a-two", "a-three"] {
+        let _ = tala_in(
+            home.path(),
+            Some(&alpha_proj),
+            &["send", "--session", &sess_a, m],
+        );
+    }
+    // beta reads A (cursor A = 3)
+    let _ = tala_in(home.path(), Some(&beta_proj), &["history", &sess_a]);
+
+    // alpha: new session B with 1 message (per-session id 1)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha session B create failed: {}", sout);
+    let sess_b = sout.trim().to_string();
+    let _ = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &sess_b, "fresh-msg-for-beta"],
+    );
+
+    // beta SENDS a message into session A (per-session id 4): under the old
+    // model this wrote 4 into the GLOBAL cursor and hid B's msg (id 1 <= 4).
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["send", "--session", &sess_a, "beta reply in a"],
+    );
+    assert!(ok, "beta send failed: {}", sout);
+
+    // B must STILL show (1 new)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["list"]);
+    assert!(ok, "beta list failed: {}", sout);
+    let b_line = line_for(&sout, &sess_b);
+    assert!(
+        b_line.contains("(1 new)"),
+        "sending in A must not hide B's unread: {}",
+        b_line
+    );
+    // and check must still report B's message
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["check", "--json"]);
+    assert!(ok, "beta check failed: {}", sout);
+    assert!(
+        sout.contains("fresh-msg-for-beta"),
+        "check must still report B's message: {}",
+        sout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_check_updates_per_session_cursors_then_reports_nothing_new() {
+    let home = tempfile::tempdir().unwrap();
+    let (alpha_proj, beta_proj) = run_two_agents(home.path());
+
+    // alpha: two sessions, A with 3 msgs, B with 1 msg
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "create A failed: {}", sout);
+    let sess_a = sout.trim().to_string();
+    for m in ["a-one", "a-two", "a-three"] {
+        let _ = tala_in(
+            home.path(),
+            Some(&alpha_proj),
+            &["send", "--session", &sess_a, m],
+        );
+    }
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "create B failed: {}", sout);
+    let sess_b = sout.trim().to_string();
+    let _ = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &sess_b, "b-one"],
+    );
+
+    // beta: first check reports both sessions with a per-session cursors map
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["check", "--json"]);
+    assert!(ok, "first check failed: {}", sout);
+    assert!(
+        sout.contains("a-one"),
+        "first check should show A msgs: {}",
+        sout
+    );
+    assert!(
+        sout.contains("b-one"),
+        "first check should show B msgs: {}",
+        sout
+    );
+    assert!(
+        sout.contains(&format!("\"{}\":3", sess_a)),
+        "cursors map must track A at 3: {}",
+        sout
+    );
+    assert!(
+        sout.contains(&format!("\"{}\":1", sess_b)),
+        "cursors map must track B at 1: {}",
+        sout
+    );
+
+    // beta: second check reports nothing new
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["check", "--json"]);
+    assert!(ok, "second check failed: {}", sout);
+    assert!(
+        !sout.contains("a-one") && !sout.contains("b-one"),
+        "second check must report nothing new: {}",
+        sout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_listen_replays_new_session_message_without_since() {
+    // B014-for-listen: with no --since, `listen` must replay a NEW session's
+    // message even though its per-session id (1) is below another session's
+    // read cursor. The old default (single global cursor) skipped it.
+    let home = tempfile::tempdir().unwrap();
+    let (alpha_proj, beta_proj) = run_two_agents(home.path());
+
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "create A failed: {}", sout);
+    let sess_a = sout.trim().to_string();
+    let _ = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &sess_a, "old-a-msg"],
+    );
+    // beta reads A -> beta's cursor for A = 1
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["history", &sess_a]);
+    assert!(ok, "beta history failed: {}", sout);
+
+    // alpha: new session B + message id 1 (below A's cursor but a different session)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "create B failed: {}", sout);
+    let sess_b = sout.trim().to_string();
+    let _ = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &sess_b, "fresh-listen-msg"],
+    );
+
+    // beta: listen with no --since must replay B's message but not A's read ones
+    let child = std::process::Command::new(tala_bin())
+        .env("HOME", home.path())
+        .current_dir(&beta_proj)
+        .args(["listen", "--timeout", "3"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to start listen");
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "listen should exit 0: {}", stdout);
+    assert!(
+        stdout.contains("fresh-listen-msg"),
+        "listen must replay the new session's message: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("old-a-msg"),
+        "listen must not replay session A (already read): {}",
+        stdout
+    );
+
     tala_stop(home.path());
 }

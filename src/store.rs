@@ -515,22 +515,35 @@ pub async fn clear_active_session() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn local_cursor_path() -> PathBuf {
-    PathBuf::from(".tala").join("cursor")
+/// Per-session read cursors: map of session_id -> last-seen message id.
+///
+/// Message ids are PER-SESSION (every session's ids start at 1), so a single
+/// global cursor compared against per-session ids is unsound (backlog B014,
+/// B023, B025). The legacy `.tala/cursor` single-value file is ignored;
+/// `.tala/cursors.json` holds the per-session map.
+pub fn cursors_path() -> PathBuf {
+    PathBuf::from(".tala").join("cursors.json")
 }
 
-pub async fn read_cursor() -> u64 {
-    let path = local_cursor_path();
+pub async fn read_cursors() -> HashMap<String, u64> {
+    let path = cursors_path();
     match tokio::fs::read_to_string(&path).await {
-        Ok(content) => content.trim().parse().unwrap_or(0),
-        Err(_) => 0,
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => HashMap::new(),
     }
 }
 
-pub async fn write_cursor(cursor: u64) -> anyhow::Result<()> {
-    let path = local_cursor_path();
+pub async fn read_cursor(session_id: &str) -> u64 {
+    read_cursors().await.get(session_id).copied().unwrap_or(0)
+}
+
+pub async fn write_cursor(session_id: &str, cursor: u64) -> anyhow::Result<()> {
+    let mut cursors = read_cursors().await;
+    cursors.insert(session_id.to_string(), cursor);
+    let path = cursors_path();
     tokio::fs::create_dir_all(path.parent().unwrap()).await?;
-    tokio::fs::write(&path, cursor.to_string()).await?;
+    let content = serde_json::to_string(&cursors)?;
+    tokio::fs::write(&path, content).await?;
     Ok(())
 }
 
