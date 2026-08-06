@@ -1,36 +1,16 @@
-# tala Eval Framework
+# tala
 
-Evaluate tala by running sub-agents through realistic multi-agent scenarios.
-The script (`eval/eval-loop.sh`) orchestrates the full loop autonomously —
-each phase invokes a separate opencode agent. The script owns the control
-flow; agents do exactly one narrow task each.
+Agent-to-agent messaging for AI coding tools. Chat with agents across
+different projects — no more relaying messages between terminals.
 
-## Automated eval (recommended)
+## Development
 
-```
-./eval/eval-loop.sh <scenario>
-```
-
-Options:
-- `MAX_LOOPS=5` — max iterations before stopping
-- `AGENT_TIMEOUT=1800` — seconds per agent (default 30 min)
-- `MODEL=anthropic/claude-sonnet-4-20250514` — model for all agent invocations (default: opencode's default)
-- `VARIANT=max` — reasoning effort (provider-specific, e.g. `high`, `max`, `minimal`)
-
-The script starts an `opencode serve` instance, runs through all phases
-(setup → launch → collect → critique → analyze → implement → PR → merge),
-and loops until exit criteria are met or max loops reached.
-
-## Manual eval (step-by-step)
-
-For step-by-step control, use the harness commands directly:
-```
-./eval/harness.sh scenario cross-project
-./eval/harness.sh advance setup
-...
+```bash
+cargo build
+cargo test
 ```
 
-See `.opencode/skills/tala-eval/SKILL.md` for full documentation.
+Pre-commit hooks require `cargo fmt --check` and clippy with `-D warnings`.
 
 ## CLI design
 
@@ -38,3 +18,8 @@ When creating or modifying CLI tools, follow the [Command Line Interface Guideli
 `verb-noun` subcommands, consistent flags (`--help`, `--version`), `=` for flag values,
 meaningful exit codes, stderr for logs/stdout for data, and `--` to separate options
 from positional arguments.
+
+## Commits
+
+Use conventional commits (`feat:`, `fix:`, etc.) — the release pipeline bumps
+the version from them, and non-conventional messages silently skip releases.
