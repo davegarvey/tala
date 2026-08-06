@@ -2056,3 +2056,107 @@ fn test_stream_alias_works() {
 
     tala_stop(home.path());
 }
+
+#[test]
+fn test_list_status_column_shows_open_not_active() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    // The status column must say "open" (not "active") for a non-closed session:
+    // "active" is reserved for the selected session, shown via the `*` marker.
+    let list = tala_in(home.path(), Some(project.path()), &["list"]).0;
+    assert!(
+        list.contains("open"),
+        "list should show 'open' status column: {}",
+        list
+    );
+    assert!(
+        !list.contains("active"),
+        "list status column must not use the word 'active' for open sessions: {}",
+        list
+    );
+
+    // The selected session carries the `*` marker.
+    tala_in(home.path(), Some(project.path()), &["use", &sess]);
+    let list = tala_in(home.path(), Some(project.path()), &["list"]).0;
+    let row = list
+        .lines()
+        .find(|l| l.contains(&sess))
+        .unwrap_or_else(|| panic!("session row missing: {}", list));
+    assert!(
+        row.trim_end().ends_with('*'),
+        "active session row should end with '*': {}",
+        row
+    );
+    assert!(
+        !list.contains("active"),
+        "list must not contain 'active' even with a selected session: {}",
+        list
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_history_empty_session_shows_no_messages_note() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path()); // created empty via `session create`
+
+    let recap = tala_ok(home.path(), &["history", &sess]);
+    assert!(
+        recap.contains("no messages yet"),
+        "history on an empty session should say so: {}",
+        recap
+    );
+
+    // Even with a since far ahead of any message the note should appear.
+    tala_ok(home.path(), &["send", "--session", &sess, "one message"]);
+    let recap = tala_ok(home.path(), &["history", "--since", "999", &sess]);
+    assert!(
+        recap.contains("no messages yet"),
+        "history with nothing in range should say so: {}",
+        recap
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_reopen_does_not_change_active_session() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let sess_a = tala_start(home.path());
+    let sess_b = tala_start(home.path());
+
+    // Work in sess_a; sess_b is a closed session we only want to reopen.
+    tala_in(home.path(), Some(project.path()), &["use", &sess_a]);
+    tala_ok(home.path(), &["close", &sess_b]);
+
+    let out = tala_ok(home.path(), &["session", "reopen", &sess_b]);
+    assert!(out.contains("reopened"), "should mention reopened: {}", out);
+
+    let active = tala_in(home.path(), Some(project.path()), &["use"]).0;
+    assert!(
+        active.contains(&sess_a),
+        "active session must remain sess_a after reopening sess_b: {}",
+        active
+    );
+
+    // And a bare send still targets sess_a (not the reopened sess_b).
+    let (stdout, _stderr, ok) = tala_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "still working in a"],
+    );
+    assert!(ok, "send via active session should succeed: {}", stdout);
+    let recap = tala_ok(home.path(), &["history", &sess_a]);
+    assert!(
+        recap.contains("still working in a"),
+        "message should land in sess_a: {}",
+        recap
+    );
+
+    tala_stop(home.path());
+}

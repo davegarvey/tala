@@ -522,7 +522,7 @@ async fn resolve_session_id(
         _ => {
             let ids: Vec<&str> = active.iter().map(|s| s.id.as_str()).collect();
             bail!(
-                "Multiple active sessions: {}. Specify one with `tala {} <session>` or set one with `tala use <session>`",
+                "Multiple open sessions: {}. Specify one with `tala {} <session>` or set one with `tala use <session>`",
                 ids.join(", "),
                 cmd_name
             );
@@ -666,7 +666,9 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
             .collect();
         if !closed_match.is_empty() {
             bail!(
-                "Session '{}' is closed. Use `tala session reopen` to continue",
+                "Session '{}' is closed. Use `tala session reopen {}` to open it, then `tala use {}` to make it active",
+                closed_match[0].id,
+                closed_match[0].id,
                 closed_match[0].id
             );
         }
@@ -716,7 +718,7 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
                     if let Ok(sessions) = resp.json::<Vec<SessionSummary>>().await {
                         let active: Vec<_> = sessions.iter().filter(|s| !s.closed).collect();
                         if active.is_empty() {
-                            println!("No active sessions. Start one with `tala send`.");
+                            println!("No open sessions. Start one with `tala send`.");
                         } else {
                             println!("Available sessions:\n");
                             for s in &active {
@@ -1515,14 +1517,18 @@ async fn cmd_recap(
             println!("cursor: {}", c);
         }
         println!();
-        for msg in &recap.messages {
-            println!(
-                "[{}] {} ({}):\n    {}\n",
-                msg.id,
-                msg.sender,
-                msg.timestamp.format("%H:%M:%S"),
-                msg.content
-            );
+        if recap.messages.is_empty() {
+            println!("(no messages yet)");
+        } else {
+            for msg in &recap.messages {
+                println!(
+                    "[{}] {} ({}):\n    {}\n",
+                    msg.id,
+                    msg.sender,
+                    msg.timestamp.format("%H:%M:%S"),
+                    msg.content
+                );
+            }
         }
     }
     store::write_cursor(recap.cursor.unwrap_or(0)).await?;
@@ -1569,7 +1575,7 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
             .unwrap_or(1)
             .max(4);
         for s in &sessions {
-            let status = if s.closed { "closed" } else { "active" };
+            let status = if s.closed { "closed" } else { "open" };
             let name = s.name.as_deref().unwrap_or("-");
             let marker = if active_session.as_deref() == Some(&s.id) {
                 " *"
@@ -1884,7 +1890,7 @@ async fn cmd_session_show(session_id: String, json_output: bool) -> anyhow::Resu
         );
         println!(
             "  Status: {}",
-            if session.closed { "closed" } else { "active" }
+            if session.closed { "closed" } else { "open" }
         );
     }
     Ok(())
@@ -1942,13 +1948,13 @@ async fn cmd_session_reopen(session_id: String, json_output: bool) -> anyhow::Re
     }
 
     let result: serde_json::Value = resp.json().await?;
-    store::write_active_session(&session_id).await?;
     if json_output {
-        let mut out = result;
-        out["active"] = serde_json::json!(true);
-        println!("{}", serde_json::to_string(&out).unwrap());
+        println!("{}", serde_json::to_string(&result).unwrap());
     } else {
-        println!("Session {} reopened (now active)", session_id);
+        println!(
+            "Session {} reopened (use `tala use {}` to make it active)",
+            session_id, session_id
+        );
     }
     Ok(())
 }
