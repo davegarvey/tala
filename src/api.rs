@@ -345,6 +345,10 @@ async fn wait_for_message(
 #[derive(Deserialize)]
 struct WaitNewParams {
     timeout_secs: Option<u64>,
+    /// The waiting agent's own identity (from .tala/config.json or the default
+    /// sender). When present, the wait only returns sessions that carry a
+    /// message from a DIFFERENT agent, and ignores the waiter's own creates.
+    sender: Option<String>,
 }
 
 async fn wait_new_session(
@@ -352,6 +356,20 @@ async fn wait_new_session(
     Query(params): Query<WaitNewParams>,
 ) -> impl IntoResponse {
     let timeout_secs = params.timeout_secs.unwrap_or(60);
+    let caller = params.sender;
+
+    // B003: when the waiter identifies itself, first scan for sessions that
+    // ALREADY exist with an incoming message from another agent. The event loop
+    // below only reacts to future events, so a session created before the wait
+    // started would otherwise be missed forever.
+    if let Some(ref me) = caller {
+        if let Some((sid, msg)) = find_incoming_session(&state.store, me).await {
+            let mut resp = serde_json::json!({"session_id": sid});
+            resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
+            return (StatusCode::OK, Json(resp)).into_response();
+        }
+    }
+
     let mut rx = state.store.subscribe_global();
 
     let existing_count = state.store.list_sessions().await.len();
@@ -361,6 +379,14 @@ async fn wait_new_session(
         loop {
             match rx.recv().await {
                 Ok((_sid, DaemonEvent::SessionCreated(id))) => {
+                    // When the waiter identifies itself, a session create alone
+                    // must NOT satisfy the wait (B003: it fires on your OWN
+                    // `session create`). Wait for an incoming NewMessage from
+                    // another agent instead. Without identity, keep legacy
+                    // behavior (any new session counts).
+                    if caller.is_some() {
+                        continue;
+                    }
                     let msgs = state.store.get_messages_since(&id, 0).await;
                     let first = msgs.first().cloned();
                     let mut resp = serde_json::json!({"session_id": id});
@@ -370,6 +396,17 @@ async fn wait_new_session(
                     return resp;
                 }
                 Ok((_sid, DaemonEvent::NewMessage(msg))) => {
+                    if let Some(ref me) = caller {
+                        // Only incoming messages from OTHER agents satisfy the
+                        // wait; our own sends (including the initial message of
+                        // a session we create) are ignored.
+                        if msg.sender == *me {
+                            continue;
+                        }
+                        let mut resp = serde_json::json!({"session_id": msg.session_id});
+                        resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
+                        return resp;
+                    }
                     let sessions = state.store.list_sessions().await;
                     if sessions.len() > existing_count {
                         let mut resp = serde_json::json!({"session_id": msg.session_id});
@@ -397,6 +434,34 @@ async fn wait_new_session(
         )
             .into_response(),
     }
+}
+
+/// Find the session (if any) that already has a message from an agent other
+/// than `me`, preferring the most recently active one. Used by
+/// `wait_new_session` so a pre-existing session with an incoming question is
+/// returned immediately (B003).
+async fn find_incoming_session(store: &Arc<Store>, me: &str) -> Option<(String, Message)> {
+    let sessions = store.list_sessions().await;
+    let mut best: Option<(String, Message)> = None;
+    for s in sessions {
+        if s.closed {
+            continue;
+        }
+        let msgs = store.get_messages_since(&s.id, 0).await;
+        for m in msgs {
+            if m.sender == me {
+                continue;
+            }
+            let is_better = match &best {
+                Some((_, bm)) => m.timestamp > bm.timestamp,
+                None => true,
+            };
+            if is_better {
+                best = Some((s.id.clone(), m));
+            }
+        }
+    }
+    best
 }
 
 async fn wait_all(

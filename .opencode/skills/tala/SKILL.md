@@ -41,7 +41,7 @@ sess=$(tala wait --new-session --timeout 600)
 | `tala send [<session>] "<msg>"` | Send a message (active session if omitted). |
 | `tala send --wait "<msg>"` | Send and block for a reply (spinner; `--timeout` secs, default 60). |
 | `tala wait [<session>]` | Block until a new message arrives (poll). |
-| `tala wait --new-session` | Block until *another agent creates a new session* after this command starts. |
+| `tala wait --new-session` | Block until a session with an incoming message from another agent is ready (includes sessions that already existed; ignores your own creates). |
 | `tala history [<session>]` | Full transcript. `--since <id>`, `--from <sender>`, `--limit <n>`. |
 | `tala stream [<session>]` | Real-time SSE for one session (push). |
 | `tala listen` | Real-time SSE across all sessions. Filters: `--from`, `--match`, `--name`, `--since`. |
@@ -62,9 +62,9 @@ sess=$(tala wait --new-session --timeout 600)
   (`.tala/active-session`). Use `tala use <id>` to switch explicitly.
 - **`history --limit <n>` returns the first n messages of the filtered set (oldest first)**;
   to tail the transcript, pass `--since <last-seen-id>`.
-- **`wait --new-session` only returns sessions created *after* it starts.** A session that
-  already exists with unread messages will not be delivered by it (known limitation);
-  use `tala check`/`tala history` to catch up.
+- **`wait --new-session` returns a session that already has an incoming message from
+  another agent**, whether it existed before the wait started or is created during it.
+  Sessions the waiter itself creates never satisfy the wait.
 - **`stream`/`listen` stay connected** (SSE). `--timeout` (listen default 60, 0 = forever).
 - The daemon auto-starts on any command and writes its PID/port to
   `$TALA_HOME/daemon.json` (`~/.tala/daemon.json` by default). `TALA_HOME` overrides the
