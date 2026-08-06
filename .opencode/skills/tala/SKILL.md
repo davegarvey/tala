@@ -76,7 +76,7 @@ tala recap
 - **`TALA_HOME` env var** overrides `~/.tala` for isolated daemon instances.
 - **`tala start --name "proj"`** creates a named session for easier identification.
 
-## Best Practices (from eval validation)
+## Best Practices
 
 ### FYI messages (broadcast)
 ```bash
@@ -135,7 +135,7 @@ tala send "progress update"   # uses active session
 tala send "done"              # uses active session
 ```
 
-### Two-agent collaboration (eval-validated)
+### Two-agent collaboration
 ```bash
 # Agent A (sending request):
 tala send --wait "need help with X" --timeout 300
