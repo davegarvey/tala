@@ -338,23 +338,21 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             quiet,
             timeout,
         } => {
-            // A non-sess_ positional alongside a message means the user typo'd the
-            // target (or forgot -s/--session): error instead of silently sending
-            // to the active session (B026 family).
-            if let (Some(target), Some(_)) = (&session, &message) {
-                if !target.starts_with("sess_") {
-                    anyhow::bail!(
-                        "Unknown session '{}'. Session IDs look like 'sess_...' (use `tala list` to see them, or `-s/--session` for the flag form).",
-                        target
-                    );
-                }
-            }
             let session_flag = session_arg.is_some();
-            let resolved_session = session_arg
-                .or_else(|| session.as_ref().filter(|s| s.starts_with("sess_")).cloned());
+            // A positional session ref may be an id OR a name (B035). A lone
+            // positional is a message unless it starts with sess_; when a
+            // message positional is also present, the first positional is a
+            // session ref (id or name).
+            let resolved_session = session_arg.or_else(|| {
+                session
+                    .clone()
+                    .filter(|s| s.starts_with("sess_") || message.is_some())
+            });
             let resolved_message = message.or_else(|| {
                 if session_flag {
                     session
+                } else if resolved_session.is_some() {
+                    None
                 } else {
                     session.filter(|s| !s.starts_with("sess_"))
                 }
@@ -523,6 +521,22 @@ async fn wait_new_seen_param() -> String {
     }
 }
 
+/// Resolve a session ref for a command, emitting a proper (possibly JSON)
+/// error instead of a plain anyhow error (B031-adjacent: --json paths must
+/// not leak human text).
+async fn resolve_session_id_or_fail(
+    host: &str,
+    port: u16,
+    session_arg: Option<&str>,
+    cmd_name: &str,
+    json_output: bool,
+) -> String {
+    match resolve_session_id(host, port, session_arg, cmd_name).await {
+        Ok(id) => id,
+        Err(e) => fail(json_output, e.to_string(), "SESSION_NOT_FOUND"),
+    }
+}
+
 async fn resolve_session_id(
     host: &str,
     port: u16,
@@ -530,7 +544,7 @@ async fn resolve_session_id(
     cmd_name: &str,
 ) -> anyhow::Result<String> {
     if let Some(id) = session_arg {
-        return Ok(id.to_string());
+        return resolve_session_ref(host, port, id, cmd_name).await;
     }
 
     if let Some(id) = store::read_active_session().await {
@@ -554,6 +568,65 @@ async fn resolve_session_id(
             );
         }
     }
+}
+
+/// Resolve a user-supplied session reference (name, full id, or unique id
+/// prefix) to a session id. Errors loudly on no-match or ambiguity — never
+/// silently falls back to another session (B035).
+async fn resolve_session_ref(
+    host: &str,
+    port: u16,
+    input: &str,
+    cmd_name: &str,
+) -> anyhow::Result<String> {
+    let url = daemon_url(host, port, "/api/sessions");
+    let resp = reqwest::get(&url).await?;
+    let sessions: Vec<SessionSummary> = resp.json().await?;
+
+    // 1. Exact name match
+    let name_matches: Vec<&SessionSummary> = sessions
+        .iter()
+        .filter(|s| s.name.as_deref() == Some(input))
+        .collect();
+    if name_matches.len() == 1 {
+        return Ok(name_matches[0].id.clone());
+    }
+    if name_matches.len() > 1 {
+        let ids: Vec<&str> = name_matches.iter().map(|s| s.id.as_str()).collect();
+        bail!(
+            "Multiple sessions named '{}': {}. Use session ID instead.",
+            input,
+            ids.join(", ")
+        );
+    }
+
+    // 2. Exact id match
+    if let Some(s) = sessions.iter().find(|s| s.id == input) {
+        return Ok(s.id.clone());
+    }
+
+    // 3. Unique id-prefix match
+    let prefix_matches: Vec<&SessionSummary> = sessions
+        .iter()
+        .filter(|s| s.id.starts_with(input))
+        .collect();
+    if prefix_matches.len() == 1 {
+        return Ok(prefix_matches[0].id.clone());
+    }
+    if prefix_matches.len() > 1 {
+        let ids: Vec<&str> = prefix_matches.iter().map(|s| s.id.as_str()).collect();
+        bail!(
+            "Multiple sessions match '{}': {}. Use the full session ID.",
+            input,
+            ids.join(", ")
+        );
+    }
+
+    bail!(
+        "session '{}' not found. Use `tala {} <session-id>` or `tala use <session-id>` to target an existing session.",
+        input,
+        cmd_name
+    )
 }
 
 async fn cmd_init(name: Option<String>) -> anyhow::Result<()> {
@@ -883,9 +956,14 @@ async fn cmd_send(
             .ok_or_else(|| anyhow::anyhow!("No message provided. Use a positional argument, --message-file <path>, --stdin, or pipe to stdin"))?
     };
 
-    // Resolve session: explicit, active, stale-replace, or auto-create
+    // Resolve session: explicit (id or name, B035), active, stale-replace, or auto-create
     let session_id = if let Some(id) = session_arg.clone() {
-        id
+        // Explicit ref: resolve name/prefix to an id; error loudly if it does
+        // not match anything (never silently fall back to the active session).
+        match resolve_session_ref(&host, port, &id, "send").await {
+            Ok(sid) => sid,
+            Err(e) => fail(json_output, e.to_string(), "SESSION_NOT_FOUND"),
+        }
     } else if let Some(id) = store::read_active_session().await {
         // Validate active session still exists and is open
         let check_url = daemon_url(&host, port, &format!("/api/sessions/{}", id));
@@ -1088,6 +1166,16 @@ async fn cmd_wait(
             .or_else(|| Some(store::get_default_sender()))
             .unwrap_or_else(|| "unknown".to_string())
     );
+
+    // Resolve an explicit session ref (id or name, B035) once up front.
+    let session_arg = match session_arg {
+        Some(id) => Some(
+            resolve_session_ref(&host, port, &id, "wait")
+                .await
+                .unwrap_or_else(|e| fail(json_output, e.to_string(), "SESSION_NOT_FOUND")),
+        ),
+        None => None,
+    };
 
     loop {
         let sid = if let Some(id) = session_arg.clone() {
@@ -1309,7 +1397,9 @@ async fn cmd_watch(
     timeout: Option<u64>,
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
-    let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "stream").await?;
+    let session_id =
+        resolve_session_id_or_fail(&host, port, session_arg.as_deref(), "stream", json_output)
+            .await;
 
     let since_id = since.unwrap_or(0);
     let mut path = format!("/api/sessions/{}/events?since={}", session_id, since_id);
@@ -1587,7 +1677,8 @@ async fn cmd_recap(
     json_output: bool,
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
-    let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "recap").await?;
+    let session_id =
+        resolve_session_id_or_fail(&host, port, session_arg.as_deref(), "recap", json_output).await;
 
     // B021: identify the reader so the daemon records read receipts.
     let sender_param = format!(
@@ -1965,7 +2056,8 @@ async fn cmd_close(
     quiet: bool,
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
-    let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "close").await?;
+    let session_id =
+        resolve_session_id_or_fail(&host, port, session_arg.as_deref(), "close", json_output).await;
 
     let client = reqwest::Client::new();
     let url = daemon_url(&host, port, &format!("/api/sessions/{}", session_id));
@@ -2008,6 +2100,9 @@ async fn cmd_close(
 
 async fn cmd_session_show(session_id: String, json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
+    let session_id = resolve_session_ref(&host, port, &session_id, "show")
+        .await
+        .unwrap_or_else(|e| fail(json_output, e.to_string(), "SESSION_NOT_FOUND"));
 
     let client = reqwest::Client::new();
     let url = daemon_url(&host, port, &format!("/api/sessions/{}", session_id));
@@ -2050,6 +2145,9 @@ async fn cmd_session_rename(
     force: bool,
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
+    let session_id = resolve_session_ref(&host, port, &session_id, "rename")
+        .await
+        .unwrap_or_else(|e| fail(json_output, e.to_string(), "SESSION_NOT_FOUND"));
 
     let client = reqwest::Client::new();
     let url = daemon_url(&host, port, &format!("/api/sessions/{}/rename", session_id));
@@ -2083,6 +2181,9 @@ async fn cmd_session_rename(
 
 async fn cmd_session_reopen(session_id: String, json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
+    let session_id = resolve_session_ref(&host, port, &session_id, "reopen")
+        .await
+        .unwrap_or_else(|e| fail(json_output, e.to_string(), "SESSION_NOT_FOUND"));
 
     let client = reqwest::Client::new();
     let url = daemon_url(&host, port, &format!("/api/sessions/{}/reopen", session_id));
