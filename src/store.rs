@@ -186,7 +186,10 @@ impl Store {
             })
             .unwrap_or_default();
         if let Some(limit) = limit {
-            result.into_iter().take(limit).collect()
+            // Return the NEWEST N matching messages (tail semantics): keep the
+            // last `limit` items in ascending-id order (B016).
+            let len = result.len();
+            result.into_iter().skip(len.saturating_sub(limit)).collect()
         } else {
             result
         }
