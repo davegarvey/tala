@@ -173,6 +173,8 @@ async fn send_message(
 #[derive(Deserialize)]
 struct GetMessagesParams {
     since: Option<u64>,
+    /// Identity of the reader; used to record read receipts (B021).
+    sender: Option<String>,
 }
 
 async fn get_messages(
@@ -182,6 +184,9 @@ async fn get_messages(
 ) -> impl IntoResponse {
     let since = params.since.unwrap_or(0);
     let messages = state.store.get_messages_since(&id, since).await;
+    if let (Some(sender), Some(max)) = (&params.sender, messages.iter().map(|m| m.id).max()) {
+        state.store.record_read(&id, sender, max).await;
+    }
     (StatusCode::OK, Json(messages))
 }
 
@@ -191,6 +196,8 @@ struct WaitParams {
     timeout_secs: Option<u64>,
     limit: Option<usize>,
     from: Option<String>,
+    /// Identity of the reader; used to record read receipts (B021).
+    sender: Option<String>,
 }
 
 fn compute_cursor(messages: &[Message]) -> Option<u64> {
@@ -234,6 +241,9 @@ async fn wait_for_message(
         .get_messages_filtered(&id, since, limit, from)
         .await;
     if !existing.is_empty() {
+        if let (Some(sender), Some(max)) = (&params.sender, existing.iter().map(|m| m.id).max()) {
+            state.store.record_read(&id, sender, max).await;
+        }
         return (
             StatusCode::OK,
             Json(wrap_wait(existing, false, None, is_closed)),
@@ -284,6 +294,9 @@ async fn wait_for_message(
         .get_messages_filtered(&id, since, limit, from)
         .await;
     if !existing.is_empty() {
+        if let (Some(sender), Some(max)) = (&params.sender, existing.iter().map(|m| m.id).max()) {
+            state.store.record_read(&id, sender, max).await;
+        }
         return (
             StatusCode::OK,
             Json(wrap_wait(existing, false, None, is_closed)),
@@ -313,6 +326,11 @@ async fn wait_for_message(
                         };
                         let session = state.store.get_session(&id).await;
                         let closed = session.map(|s| s.closed).unwrap_or(false);
+                        if let (Some(sender), Some(max)) =
+                            (&params.sender, msgs.iter().map(|m| m.id).max())
+                        {
+                            state.store.record_read(&id, sender, max).await;
+                        }
                         return wrap_wait(msgs, false, None, closed);
                     }
                 }
@@ -380,6 +398,7 @@ async fn wait_new_session(
     // sessions the waiter already knows never satisfies `wait --new-session`.
     if let Some(ref me) = caller {
         if let Some((sid, msg)) = find_incoming_session(&state.store, me, &seen).await {
+            state.store.record_read(&sid, me, msg.id).await;
             let mut resp = serde_json::json!({"session_id": sid});
             resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
             return (StatusCode::OK, Json(resp)).into_response();
@@ -419,6 +438,7 @@ async fn wait_new_session(
                         if msg.sender == *me {
                             continue;
                         }
+                        state.store.record_read(&msg.session_id, me, msg.id).await;
                         let mut resp = serde_json::json!({"session_id": msg.session_id});
                         resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
                         return resp;
@@ -502,6 +522,9 @@ async fn wait_all(
         loop {
             match rx.recv().await {
                 Ok((_sid, DaemonEvent::NewMessage(msg))) => {
+                    if let Some(ref me) = params.sender {
+                        state.store.record_read(&msg.session_id, me, msg.id).await;
+                    }
                     return wrap_wait(vec![msg], false, None, false);
                 }
                 Ok((
@@ -555,6 +578,11 @@ async fn recap_session(
         .get_messages_filtered(&id, since, params.limit, from)
         .await;
     let cursor = compute_cursor(&messages);
+
+    // B021: a recap is a read — record the reader's receipt.
+    if let (Some(sender), Some(max)) = (&params.sender, messages.iter().map(|m| m.id).max()) {
+        state.store.record_read(&id, sender, max).await;
+    }
 
     (
         StatusCode::OK,

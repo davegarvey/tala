@@ -3678,3 +3678,186 @@ fn test_wait_new_session_timeout_exits_3() {
     tala_stop(home.path());
 }
 
+// --- Cycle-12: sender read receipts (B021) ---
+// Daemon-side per-(session, sender) read state, exposed as `read_by` in
+// list/list --json and as a `read: <agent>@<id>` marker in list text.
+
+/// Create a project dir with an identity config and return its path.
+fn tala_identity_dir(home: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let dir = home.join(format!("ident-{}", name));
+    std::fs::create_dir_all(dir.join(".tala")).unwrap();
+    std::fs::write(
+        dir.join(".tala").join("config.json"),
+        format!("{{\"name\": \"{}\"}}", name),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn test_read_receipts_after_history() {
+    let home = tempfile::tempdir().unwrap();
+    let alpha = tala_identity_dir(home.path(), "alpha");
+    let beta = tala_identity_dir(home.path(), "beta");
+
+    // alpha creates a session and sends the question.
+    let sess = tala_start(home.path());
+    tala_ok(
+        home.path(),
+        &["send", "--session", &sess, "question for beta"],
+    );
+
+    // beta reads it via history (identity from beta dir config).
+    tala_in(home.path(), Some(&beta), &["history", &sess]);
+
+    // alpha's list --json must show read_by: {"beta": 1}.
+    let list = tala_in(home.path(), Some(&alpha), &["list", "--json"]).0;
+    let parsed: serde_json::Value = serde_json::from_str(list.trim()).unwrap();
+    let session = parsed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["session_id"] == serde_json::json!(sess))
+        .expect("session in list");
+    assert_eq!(
+        session["read_by"],
+        serde_json::json!({"beta": 1}),
+        "alpha should see beta read msg 1: {}",
+        session
+    );
+
+    // alpha's text list must show the read marker for beta.
+    let text = tala_in(home.path(), Some(&alpha), &["list"]).0;
+    assert!(
+        text.contains("read: beta@1"),
+        "text list should show read: beta@1, got:\n{}",
+        text
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_read_receipts_after_wait() {
+    let home = tempfile::tempdir().unwrap();
+    let alpha = tala_identity_dir(home.path(), "alpha");
+    let beta = tala_identity_dir(home.path(), "beta");
+
+    let sess = tala_start(home.path());
+    tala_ok(home.path(), &["send", "--session", &sess, "question"]);
+
+    // beta wait receives the message (sender=beta via identity config).
+    let wait = tala_in(
+        home.path(),
+        Some(&beta),
+        &[
+            "wait",
+            "--session",
+            &sess,
+            "--since",
+            "0",
+            "--timeout",
+            "10",
+        ],
+    )
+    .0;
+    assert!(wait.contains("question"), "wait should deliver: {}", wait);
+
+    let list = tala_in(home.path(), Some(&alpha), &["list", "--json"]).0;
+    let parsed: serde_json::Value = serde_json::from_str(list.trim()).unwrap();
+    let session = parsed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["session_id"] == serde_json::json!(sess))
+        .unwrap();
+    assert_eq!(
+        session["read_by"],
+        serde_json::json!({"beta": 1}),
+        "wait should record beta@1: {}",
+        session
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_read_receipts_not_recorded_on_send() {
+    let home = tempfile::tempdir().unwrap();
+    let alpha = tala_identity_dir(home.path(), "alpha");
+    let beta = tala_identity_dir(home.path(), "beta");
+
+    let sess = tala_start(home.path());
+    tala_ok(home.path(), &["send", "--session", &sess, "question"]);
+    tala_in(home.path(), Some(&beta), &["history", &sess]); // beta reads msg 1
+
+    // alpha sends a follow-up: sending must NOT advance anyone's read state.
+    tala_ok(home.path(), &["send", "--session", &sess, "follow-up"]);
+
+    let list = tala_in(home.path(), Some(&alpha), &["list", "--json"]).0;
+    let parsed: serde_json::Value = serde_json::from_str(list.trim()).unwrap();
+    let session = parsed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["session_id"] == serde_json::json!(sess))
+        .unwrap();
+    assert_eq!(
+        session["read_by"],
+        serde_json::json!({"beta": 1}),
+        "send must not record read state: {}",
+        session
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_read_receipts_self_read_json_but_not_text() {
+    let home = tempfile::tempdir().unwrap();
+    let alpha = tala_identity_dir(home.path(), "alpha");
+    let beta = tala_identity_dir(home.path(), "beta");
+
+    let sess = tala_start(home.path());
+    tala_ok(home.path(), &["send", "--session", &sess, "question"]);
+    tala_in(home.path(), Some(&beta), &["history", &sess]); // beta reads msg 1
+
+    // alpha re-reads her own session.
+    let recap = tala_in(home.path(), Some(&alpha), &["history", &sess]).0;
+    assert!(
+        recap.contains("question"),
+        "alpha history should work: {}",
+        recap
+    );
+
+    // JSON keeps the full map (self included).
+    let list = tala_in(home.path(), Some(&alpha), &["list", "--json"]).0;
+    let parsed: serde_json::Value = serde_json::from_str(list.trim()).unwrap();
+    let session = parsed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["session_id"] == serde_json::json!(sess))
+        .unwrap();
+    assert_eq!(
+        session["read_by"],
+        serde_json::json!({"alpha": 1, "beta": 1}),
+        "json read_by should include self: {}",
+        session
+    );
+
+    // Text hides self-reads.
+    let text = tala_in(home.path(), Some(&alpha), &["list"]).0;
+    assert!(
+        text.contains("read: beta@1"),
+        "text should show beta reader: {}",
+        text
+    );
+    assert!(
+        !text.contains("read: alpha@"),
+        "text must not show self-reads: {}",
+        text
+    );
+
+    tala_stop(home.path());
+}

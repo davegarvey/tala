@@ -1080,6 +1080,15 @@ async fn cmd_wait(
     let default_timeout = config["default_timeout"].as_u64().unwrap_or(60);
     let wait_timeout = timeout_secs.unwrap_or(default_timeout);
 
+    // B021: identify the reader so the daemon records read receipts.
+    let sender_param = format!(
+        "&sender={}",
+        store::read_project_config()
+            .await
+            .or_else(|| Some(store::get_default_sender()))
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+
     loop {
         let sid = if let Some(id) = session_arg.clone() {
             if !json_output {
@@ -1213,8 +1222,8 @@ async fn cmd_wait(
         };
 
         let mut path = format!(
-            "/api/sessions/{}/wait?since={}&timeout_secs={}",
-            sid, since_id, wait_timeout
+            "/api/sessions/{}/wait?since={}&timeout_secs={}{}",
+            sid, since_id, wait_timeout, sender_param
         );
         if let Some(l) = limit.filter(|&l| l > 0) {
             path = format!("{}&limit={}", path, l);
@@ -1580,8 +1589,20 @@ async fn cmd_recap(
     let (host, port) = ensure_daemon_running().await?;
     let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "recap").await?;
 
+    // B021: identify the reader so the daemon records read receipts.
+    let sender_param = format!(
+        "&sender={}",
+        store::read_project_config()
+            .await
+            .or_else(|| Some(store::get_default_sender()))
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+
     let since_id = since.unwrap_or(0);
-    let mut path = format!("/api/sessions/{}/recap?since={}", session_id, since_id);
+    let mut path = format!(
+        "/api/sessions/{}/recap?since={}{}",
+        session_id, since_id, sender_param
+    );
     if let Some(ref f) = from {
         path = format!("{}&from={}", path, f);
     }
@@ -1683,14 +1704,32 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
             } else {
                 "  "
             };
+            // B021: show readers OTHER than the local identity (self-reads are
+            // noise in text; --json exposes the full read_by map).
+            let local_identity = store::read_project_config()
+                .await
+                .or_else(|| Some(store::get_default_sender()));
+            let mut readers: Vec<String> = s
+                .read_by
+                .iter()
+                .filter(|(sender, _)| local_identity.as_deref() != Some(sender.as_str()))
+                .map(|(sender, id)| format!("{}@{}", sender, id))
+                .collect();
+            readers.sort();
+            let read_suffix = if readers.is_empty() {
+                String::new()
+            } else {
+                format!("  read: {}", readers.join(", "))
+            };
             if s.closed {
                 println!(
-                    "{}  {:width$}  {}  {} msgs{}",
+                    "{}  {:width$}  {}  {} msgs{}{}",
                     s.id,
                     name,
                     status,
                     s.message_count,
                     marker,
+                    read_suffix,
                     width = name_width
                 );
             } else {
@@ -1698,23 +1737,25 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
                 let unread = compute_session_unread(&host, port, s, since_id).await;
                 if unread > 0 {
                     println!(
-                        "{}  {:width$}  {}  {} msgs ({} new){}",
+                        "{}  {:width$}  {}  {} msgs ({} new){}{}",
                         s.id,
                         name,
                         status,
                         s.message_count,
                         unread,
                         marker,
+                        read_suffix,
                         width = name_width
                     );
                 } else {
                     println!(
-                        "{}  {:width$}  {}  {} msgs{}",
+                        "{}  {:width$}  {}  {} msgs{}{}",
                         s.id,
                         name,
                         status,
                         s.message_count,
                         marker,
+                        read_suffix,
                         width = name_width
                     );
                 }
@@ -2224,13 +2265,25 @@ async fn cmd_whatsup(json_output: bool) -> anyhow::Result<()> {
 
     let mut all_messages: Vec<Message> = Vec::new();
 
+    // B021: identify the reader so the daemon records read receipts.
+    let sender_param = format!(
+        "&sender={}",
+        store::read_project_config()
+            .await
+            .or_else(|| Some(store::get_default_sender()))
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+
     // Fetch per session since THAT session's own read cursor (B014).
     for s in &sessions {
         let since_id = cursors.get(&s.id).copied().unwrap_or(0);
         let msgs_url = daemon_url(
             &host,
             port,
-            &format!("/api/sessions/{}/messages?since={}", s.id, since_id),
+            &format!(
+                "/api/sessions/{}/messages?since={}{}",
+                s.id, since_id, sender_param
+            ),
         );
         if let Ok(resp) = client.get(&msgs_url).send().await {
             if let Ok(msgs) = resp.json::<Vec<Message>>().await {
