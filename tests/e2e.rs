@@ -2160,3 +2160,197 @@ fn test_reopen_does_not_change_active_session() {
 
     tala_stop(home.path());
 }
+
+#[test]
+fn test_daemon_restart_preserves_messages() {
+    // B024: a daemon restart must not wipe the transcript. Session metadata
+    // already survived; messages must now survive too (graceful stop path).
+    let home = tempfile::tempdir().unwrap();
+
+    let session = tala_start(home.path());
+    tala_ok(home.path(), &["send", "--session", &session, "message one"]);
+    tala_ok(home.path(), &["send", "--session", &session, "message two"]);
+    tala_ok(
+        home.path(),
+        &["send", "--session", &session, "message three"],
+    );
+
+    let before = tala_ok(home.path(), &["history", &session]);
+    assert!(
+        before.contains("message two"),
+        "pre-restart history should contain the messages: {}",
+        before
+    );
+
+    // Graceful stop, then any command auto-restarts the daemon.
+    tala_stop(home.path());
+
+    let list = tala_ok(home.path(), &["list"]);
+    assert!(
+        list.contains("3 msgs"),
+        "message count must survive daemon restart: {}",
+        list
+    );
+
+    let recap = tala_ok(home.path(), &["history", &session]);
+    for needle in ["message one", "message two", "message three"] {
+        assert!(
+            recap.contains(needle),
+            "history after restart should contain {:?}: {}",
+            needle,
+            recap
+        );
+    }
+    let i1 = recap.find("message one").expect("msg one index");
+    let i3 = recap.find("message three").expect("msg three index");
+    assert!(i1 < i3, "transcript order must be preserved: {}", recap);
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_message_ids_resume_after_restart() {
+    // Per-session ids must continue after a restart — no reuse, no gaps.
+    let home = tempfile::tempdir().unwrap();
+    let session = tala_start(home.path());
+    tala_ok(home.path(), &["send", "--session", &session, "one"]);
+    tala_ok(home.path(), &["send", "--session", &session, "two"]);
+    tala_ok(home.path(), &["send", "--session", &session, "three"]);
+
+    tala_stop(home.path());
+
+    let out = tala_ok(home.path(), &["send", "--session", &session, "four"]);
+    assert!(
+        out.contains("message 4"),
+        "next message id must resume at 4 after restart: {}",
+        out
+    );
+
+    let recap = tala_ok(home.path(), &["history", &session]);
+    assert!(
+        recap.contains("[4]"),
+        "history should show the resumed id 4: {}",
+        recap
+    );
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_daemon_restart_preserves_session_names() {
+    let home = tempfile::tempdir().unwrap();
+    let session = tala_start(home.path());
+    tala_ok(
+        home.path(),
+        &["session", "rename", &session, "durable-name"],
+    );
+
+    let list = tala_ok(home.path(), &["list"]);
+    assert!(
+        list.contains("durable-name"),
+        "rename should apply before restart: {}",
+        list
+    );
+
+    tala_stop(home.path());
+
+    let list = tala_ok(home.path(), &["list"]);
+    assert!(
+        list.contains("durable-name"),
+        "session name must survive daemon restart: {}",
+        list
+    );
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_daemon_crash_after_rename_keeps_sessions() {
+    // B027: `session rename` used to write sessions.json in a legacy name-only
+    // format that load_sessions cannot parse; a crash (SIGKILL) before any
+    // graceful persist therefore lost ALL session metadata on restart.
+    let home = tempfile::tempdir().unwrap();
+    let session = tala_start(home.path());
+    tala_ok(
+        home.path(),
+        &["session", "rename", &session, "crash-durable"],
+    );
+
+    // Hard-kill the daemon (no graceful shutdown).
+    let daemon_json = home.path().join(".tala").join("daemon.json");
+    let info: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&daemon_json).unwrap()).unwrap();
+    let pid = info["pid"].as_u64().unwrap() as i32;
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Next command must auto-restart and still see the session + its name.
+    let list = tala_ok(home.path(), &["list"]);
+    assert!(
+        list.contains(&session),
+        "session must survive crash-after-rename: {}",
+        list
+    );
+    assert!(
+        list.contains("crash-durable"),
+        "renamed session must survive crash-after-rename: {}",
+        list
+    );
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_daemon_restart_with_corrupt_messages_file() {
+    // Backward compat / resilience: a corrupt messages.json must not prevent
+    // the daemon from starting (degrades to empty transcript, sessions intact).
+    let home = tempfile::tempdir().unwrap();
+    let session = tala_start(home.path());
+    tala_ok(home.path(), &["send", "--session", &session, "pre-corrupt"]);
+
+    tala_stop(home.path());
+
+    let messages_path = home.path().join(".tala").join("messages.json");
+    assert!(
+        messages_path.exists(),
+        "messages.json should be persisted on send"
+    );
+    std::fs::write(&messages_path, "{not valid json").unwrap();
+
+    let list = tala_ok(home.path(), &["list"]);
+    assert!(
+        list.contains(&session),
+        "sessions must survive a corrupt messages.json: {}",
+        list
+    );
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_to_session_without_messages_after_restart() {
+    // Regression: after a restart, sending to a session that has no persisted
+    // messages must work (add_message needs a next-id entry even when the
+    // session has an empty transcript).
+    let home = tempfile::tempdir().unwrap();
+    let session = tala_start(home.path()); // created without a message
+
+    tala_stop(home.path());
+    tala_ok(home.path(), &["list"]); // restart
+
+    let out = tala_ok(
+        home.path(),
+        &["send", "--session", &session, "first after restart"],
+    );
+    assert!(
+        out.contains("message 1"),
+        "first send after restart to an empty session should get id 1: {}",
+        out
+    );
+
+    let recap = tala_ok(home.path(), &["history", &session]);
+    assert!(
+        recap.contains("first after restart"),
+        "history should show the message: {}",
+        recap
+    );
+    tala_stop(home.path());
+}

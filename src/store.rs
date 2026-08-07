@@ -90,8 +90,13 @@ impl Store {
             drop(sessions);
             self.add_message(&id, &sender, &content).await.map(|m| m.id)
         } else {
+            drop(sessions);
             None
         };
+
+        // Persist the new session immediately so a crash cannot orphan any
+        // messages that follow (messages are persisted on send).
+        self.persist_state().await;
 
         (id, first_msg_id)
     }
@@ -136,6 +141,12 @@ impl Store {
         let _ = self
             .global_tx
             .send((session_id.to_string(), DaemonEvent::NewMessage(msg.clone())));
+
+        drop(msgs);
+
+        // Best-effort durability: persist the transcript so a daemon restart
+        // or crash does not lose it (B024).
+        self.persist_state().await;
 
         Some(msg)
     }
@@ -211,15 +222,10 @@ impl Store {
         if let Some(session) = sessions.get_mut(session_id) {
             let old_name = session.name.clone().unwrap_or_default();
             session.name = Some(name.to_string());
-            // Persist session name to disk
-            let mut names: HashMap<String, String> = HashMap::new();
-            for (sid, s) in sessions.iter() {
-                if let Some(ref n) = s.name {
-                    names.insert(sid.clone(), n.clone());
-                }
-            }
+            // Persist session name to disk (full sessions map — the legacy
+            // name-only format could not be parsed back by load_sessions).
             drop(sessions);
-            let _ = write_sessions_json(&names).await;
+            self.persist_state().await;
 
             let sid = session_id.to_string();
             let event = DaemonEvent::SessionRenamed {
@@ -310,25 +316,61 @@ impl Store {
     }
 
     pub async fn persist(&self) -> anyhow::Result<()> {
-        let sessions = self.sessions.read().await;
-        persist_sessions(&sessions).await
+        let sessions = self.sessions.read().await.clone();
+        let messages = self.messages.read().await.clone();
+        let next_msg_id = self.next_msg_id.read().await.clone();
+        persist_sessions(&sessions).await?;
+        persist_messages(&messages, &next_msg_id).await
+    }
+
+    /// Best-effort persistence of the full daemon state. Locks are taken one
+    /// at a time (and released before the next) to avoid lock-ordering
+    /// deadlocks with writers that hold multiple locks (e.g. create_session).
+    async fn persist_state(&self) {
+        let sessions = { self.sessions.read().await.clone() };
+        let messages = { self.messages.read().await.clone() };
+        let next_msg_id = { self.next_msg_id.read().await.clone() };
+        let _ = persist_sessions(&sessions).await;
+        let _ = persist_messages(&messages, &next_msg_id).await;
     }
 
     pub async fn load_persisted(&self) {
         let loaded = load_sessions().await;
-        if loaded.is_empty() {
-            return;
-        }
+        let (messages, next_ids) = load_messages().await;
+
         let mut sessions = self.sessions.write().await;
         let mut broadcast = self.broadcast.write().await;
         let mut msg_ids = self.next_msg_id.write().await;
+        let mut msgs = self.messages.write().await;
         for (id, session) in loaded {
             if !sessions.contains_key(&id) {
                 sessions.insert(id.clone(), session);
                 let (tx, _) = broadcast::channel(32);
                 broadcast.insert(id.clone(), tx);
-                msg_ids.insert(id.clone(), 1);
             }
+        }
+
+        // Restore per-session next ids first (stored values are authoritative).
+        for (sid, next) in next_ids {
+            if sessions.contains_key(&sid) {
+                msg_ids.insert(sid, next);
+            }
+        }
+        // Then restore transcripts; derive next ids for sessions that lacked one.
+        for (sid, list) in messages {
+            if sessions.contains_key(&sid) {
+                msgs.entry(sid.clone()).or_insert_with(|| list.clone());
+                msg_ids
+                    .entry(sid)
+                    .or_insert_with(|| list.iter().map(|m| m.id).max().unwrap_or(0) + 1);
+            }
+        }
+        // Sessions with no messages and no stored next id start at 1 (a missing
+        // entry makes add_message return None and the API misreports it as
+        // "session is closed").
+        let session_ids: Vec<String> = sessions.keys().cloned().collect();
+        for sid in session_ids {
+            msg_ids.entry(sid).or_insert(1);
         }
     }
 }
@@ -369,16 +411,6 @@ fn sessions_path() -> PathBuf {
     tala_home().join("sessions.json")
 }
 
-pub async fn write_sessions_json(names: &HashMap<String, String>) -> anyhow::Result<()> {
-    let path = sessions_path();
-    let tmp = tala_home().join("sessions.json.tmp");
-    let content = serde_json::to_string_pretty(names)?;
-    tokio::fs::create_dir_all(path.parent().unwrap()).await?;
-    tokio::fs::write(&tmp, &content).await?;
-    tokio::fs::rename(&tmp, &path).await?;
-    Ok(())
-}
-
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SessionsFile {
     sessions: HashMap<String, Session>,
@@ -405,6 +437,44 @@ pub async fn load_sessions() -> HashMap<String, Session> {
             Err(_) => HashMap::new(),
         },
         Err(_) => HashMap::new(),
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct MessagesFile {
+    messages: HashMap<String, Vec<Message>>,
+    next_msg_id: HashMap<String, u64>,
+}
+
+fn messages_path() -> PathBuf {
+    tala_home().join("messages.json")
+}
+
+pub async fn persist_messages(
+    messages: &HashMap<String, Vec<Message>>,
+    next_msg_id: &HashMap<String, u64>,
+) -> anyhow::Result<()> {
+    let path = messages_path();
+    let tmp = tala_home().join("messages.json.tmp");
+    let data = MessagesFile {
+        messages: messages.clone(),
+        next_msg_id: next_msg_id.clone(),
+    };
+    let content = serde_json::to_string_pretty(&data)?;
+    tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+    tokio::fs::write(&tmp, &content).await?;
+    tokio::fs::rename(&tmp, &path).await?;
+    Ok(())
+}
+
+pub async fn load_messages() -> (HashMap<String, Vec<Message>>, HashMap<String, u64>) {
+    let path = messages_path();
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => match serde_json::from_str::<MessagesFile>(&content) {
+            Ok(data) => (data.messages, data.next_msg_id),
+            Err(_) => (HashMap::new(), HashMap::new()),
+        },
+        Err(_) => (HashMap::new(), HashMap::new()),
     }
 }
 
