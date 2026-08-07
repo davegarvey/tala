@@ -1,0 +1,7 @@
+change:
+  name: restrict-sender-identity
+  summary: "Restrict --sender to the project's configured agent identity (B004 decision)"
+  created: 2026-08-07
+  status: in-progress
+  schema: spec-driven
+  decision: restrict

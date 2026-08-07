@@ -532,6 +532,7 @@ fn test_close_session() {
 #[test]
 fn test_agent_to_agent_conversation() {
     let home = tempfile::tempdir().unwrap();
+    let grubble_proj = init_project(home.path(), "grubble-agent");
 
     let session = tala_start(home.path());
 
@@ -545,17 +546,14 @@ fn test_agent_to_agent_conversation() {
         ],
     );
 
-    tala_ok(
+    // Honest second-agent pattern: send from grubble-agent's own project dir
+    // (B004 restrict: --sender may no longer fake another identity).
+    let (sout, serr, ok) = tala_in(
         home.path(),
-        &[
-            "send",
-            "--session",
-            &session,
-            "--sender",
-            "grubble-agent",
-            "Found it, fix pushed",
-        ],
+        Some(grubble_proj.path()),
+        &["send", "--session", &session, "Found it, fix pushed"],
     );
+    assert!(ok, "grubble-agent send failed: {sout} {serr}");
 
     let recap = tala_ok(home.path(), &["history", &session]);
     assert!(
@@ -636,16 +634,22 @@ fn test_wait_since_returns_existing_messages() {
 #[test]
 fn test_wait_from_filter() {
     let home = tempfile::tempdir().unwrap();
+    let alpha_proj = init_project(home.path(), "alpha");
+    let beta_proj = init_project(home.path(), "beta");
     let sess = tala_start(home.path());
 
-    tala_ok(
+    let (sout, serr, ok) = tala_in(
         home.path(),
-        &["send", "--session", &sess, "--sender", "alpha", "msg-alpha"],
+        Some(alpha_proj.path()),
+        &["send", "--session", &sess, "msg-alpha"],
     );
-    tala_ok(
+    assert!(ok, "alpha send failed: {sout} {serr}");
+    let (sout, serr, ok) = tala_in(
         home.path(),
-        &["send", "--session", &sess, "--sender", "beta", "msg-beta"],
+        Some(beta_proj.path()),
+        &["send", "--session", &sess, "msg-beta"],
     );
+    assert!(ok, "beta send failed: {sout} {serr}");
 
     let (stdout, _stderr, ok) = tala(
         home.path(),
@@ -671,20 +675,17 @@ fn test_wait_from_filter() {
 #[test]
 fn test_wait_limit_cap() {
     let home = tempfile::tempdir().unwrap();
+    let t_proj = init_project(home.path(), "t");
     let sess = tala_start(home.path());
 
-    tala_ok(
-        home.path(),
-        &["send", "--session", &sess, "--sender", "t", "m1"],
-    );
-    tala_ok(
-        home.path(),
-        &["send", "--session", &sess, "--sender", "t", "m2"],
-    );
-    tala_ok(
-        home.path(),
-        &["send", "--session", &sess, "--sender", "t", "m3"],
-    );
+    for m in ["m1", "m2", "m3"] {
+        let (sout, serr, ok) = tala_in(
+            home.path(),
+            Some(t_proj.path()),
+            &["send", "--session", &sess, m],
+        );
+        assert!(ok, "send {m} failed: {sout} {serr}");
+    }
 
     let (stdout, _stderr, ok) = tala(
         home.path(),
@@ -1147,23 +1148,22 @@ fn test_wait_new_prefers_never_seen_over_seen_session() {
 #[test]
 fn test_recap_from_filter() {
     let home = tempfile::tempdir().unwrap();
+    let alpha_proj = init_project(home.path(), "alpha");
+    let beta_proj = init_project(home.path(), "beta");
     let sess = tala_start(home.path());
 
-    tala_ok(
+    let (sout, serr, ok) = tala_in(
         home.path(),
-        &[
-            "send",
-            "--session",
-            &sess,
-            "--sender",
-            "alpha",
-            "only-alpha",
-        ],
+        Some(alpha_proj.path()),
+        &["send", "--session", &sess, "only-alpha"],
     );
-    tala_ok(
+    assert!(ok, "alpha send failed: {sout} {serr}");
+    let (sout, serr, ok) = tala_in(
         home.path(),
-        &["send", "--session", &sess, "--sender", "beta", "only-beta"],
+        Some(beta_proj.path()),
+        &["send", "--session", &sess, "only-beta"],
     );
+    assert!(ok, "beta send failed: {sout} {serr}");
 
     let (stdout, _stderr, ok) = tala(
         home.path(),
@@ -2301,6 +2301,8 @@ fn test_stream_banner() {
 #[test]
 fn test_listen_streams_all_sessions() {
     let home = tempfile::tempdir().unwrap();
+    let alpha_proj = init_project(home.path(), "alpha");
+    let beta_proj = init_project(home.path(), "beta");
     let sess1 = tala_start(home.path());
     let sess2 = tala_start(home.path());
 
@@ -2314,28 +2316,18 @@ fn test_listen_streams_all_sessions() {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    tala_ok(
+    let (sout, serr, ok) = tala_in(
         home.path(),
-        &[
-            "send",
-            "--session",
-            &sess1,
-            "--sender",
-            "alpha",
-            "listen-msg-1",
-        ],
+        Some(alpha_proj.path()),
+        &["send", "--session", &sess1, "listen-msg-1"],
     );
-    tala_ok(
+    assert!(ok, "alpha send failed: {sout} {serr}");
+    let (sout, serr, ok) = tala_in(
         home.path(),
-        &[
-            "send",
-            "--session",
-            &sess2,
-            "--sender",
-            "beta",
-            "listen-msg-2",
-        ],
+        Some(beta_proj.path()),
+        &["send", "--session", &sess2, "listen-msg-2"],
     );
+    assert!(ok, "beta send failed: {sout} {serr}");
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -2362,6 +2354,7 @@ fn test_listen_streams_all_sessions() {
 #[test]
 fn test_listen_channel_filter() {
     let home = tempfile::tempdir().unwrap();
+    let helper_proj = init_project(home.path(), "helper");
     let sess = tala_start(home.path());
 
     tala_ok(
@@ -2379,17 +2372,12 @@ fn test_listen_channel_filter() {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    tala_ok(
+    let (sout, serr, ok) = tala_in(
         home.path(),
-        &[
-            "send",
-            "--session",
-            &sess,
-            "--sender",
-            "helper",
-            "help-request-msg",
-        ],
+        Some(helper_proj.path()),
+        &["send", "--session", &sess, "help-request-msg"],
     );
+    assert!(ok, "helper send failed: {sout} {serr}");
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -2413,6 +2401,8 @@ fn test_listen_channel_filter() {
 #[test]
 fn test_listen_from_filter() {
     let home = tempfile::tempdir().unwrap();
+    let monitor_proj = init_project(home.path(), "monitor");
+    let other_proj = init_project(home.path(), "other");
     let sess = tala_start(home.path());
 
     let mut child = std::process::Command::new(tala_bin())
@@ -2425,28 +2415,18 @@ fn test_listen_from_filter() {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    tala_ok(
+    let (sout, serr, ok) = tala_in(
         home.path(),
-        &[
-            "send",
-            "--session",
-            &sess,
-            "--sender",
-            "monitor",
-            "monitor-only-msg",
-        ],
+        Some(monitor_proj.path()),
+        &["send", "--session", &sess, "monitor-only-msg"],
     );
-    tala_ok(
+    assert!(ok, "monitor send failed: {sout} {serr}");
+    let (sout, serr, ok) = tala_in(
         home.path(),
-        &[
-            "send",
-            "--session",
-            &sess,
-            "--sender",
-            "other",
-            "should-be-filtered",
-        ],
+        Some(other_proj.path()),
+        &["send", "--session", &sess, "should-be-filtered"],
     );
+    assert!(ok, "other send failed: {sout} {serr}");
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -2470,6 +2450,8 @@ fn test_listen_from_filter() {
 #[test]
 fn test_listen_match_filter() {
     let home = tempfile::tempdir().unwrap();
+    let alert_proj = init_project(home.path(), "alert");
+    let chat_proj = init_project(home.path(), "chat");
     let sess = tala_start(home.path());
 
     let mut child = std::process::Command::new(tala_bin())
@@ -2482,28 +2464,18 @@ fn test_listen_match_filter() {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    tala_ok(
+    let (sout, serr, ok) = tala_in(
         home.path(),
-        &[
-            "send",
-            "--session",
-            &sess,
-            "--sender",
-            "alert",
-            "urgent: production issue",
-        ],
+        Some(alert_proj.path()),
+        &["send", "--session", &sess, "urgent: production issue"],
     );
-    tala_ok(
+    assert!(ok, "alert send failed: {sout} {serr}");
+    let (sout, serr, ok) = tala_in(
         home.path(),
-        &[
-            "send",
-            "--session",
-            &sess,
-            "--sender",
-            "chat",
-            "just a normal update",
-        ],
+        Some(chat_proj.path()),
+        &["send", "--session", &sess, "just a normal update"],
     );
+    assert!(ok, "chat send failed: {sout} {serr}");
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -2562,6 +2534,7 @@ fn test_send_stdin() {
 #[test]
 fn test_stream_streams_messages() {
     let home = tempfile::tempdir().unwrap();
+    let streamer_proj = init_project(home.path(), "streamer");
     let sess = tala_start(home.path());
 
     let mut child = Command::new(tala_bin())
@@ -2574,17 +2547,12 @@ fn test_stream_streams_messages() {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    tala_ok(
+    let (sout, serr, ok) = tala_in(
         home.path(),
-        &[
-            "send",
-            "--session",
-            &sess,
-            "--sender",
-            "streamer",
-            "live-msg",
-        ],
+        Some(streamer_proj.path()),
+        &["send", "--session", &sess, "live-msg"],
     );
+    assert!(ok, "streamer send failed: {sout} {serr}");
 
     std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -4171,12 +4139,14 @@ fn tala_in_env(
     (stdout, stderr, output.status.success())
 }
 #[test]
-fn test_send_sender_mismatch_warns_on_stderr() {
+fn test_send_sender_mismatch_rejected() {
+    // B004 (PO decision 2026-08-07): --sender is RESTRICTED to the project's
+    // configured agent name. A mismatched identity is a hard error: nothing is
+    // sent, exit non-zero, stderr names both identities.
     let home = tempfile::tempdir().unwrap();
     let project = init_project(home.path(), "agent-alpha");
     let sess = create_session_in(home.path(), project.path());
 
-    // Mismatched --sender: send still succeeds (exit 0) but warns on stderr.
     let (stdout, stderr, ok) = tala_in(
         home.path(),
         Some(project.path()),
@@ -4190,19 +4160,20 @@ fn test_send_sender_mismatch_warns_on_stderr() {
         ],
     );
     assert!(
-        ok,
-        "send with mismatched --sender must still succeed\nstdout: {stdout}\nstderr: {stderr}"
+        !ok,
+        "send with mismatched --sender must FAIL\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        stderr.contains("Warning: sending as 'spoofed-agent'"),
-        "mismatched --sender should warn on stderr: {stderr}"
+        stderr.contains("spoofed-agent") && stderr.contains("agent-alpha"),
+        "error should name both identities: {stderr}"
     );
+    let recap = tala_ok(home.path(), &["history", &sess]);
     assert!(
-        stderr.contains("agent-alpha"),
-        "warning should name the configured agent: {stderr}"
+        !recap.contains("impersonation probe"),
+        "mismatched --sender must not send the message: {recap}"
     );
 
-    // Matching --sender: no warning.
+    // Matching --sender: still succeeds, no error.
     let (stdout, stderr, ok) = tala_in(
         home.path(),
         Some(project.path()),
@@ -4217,21 +4188,21 @@ fn test_send_sender_mismatch_warns_on_stderr() {
     );
     assert!(ok, "send with matching --sender should succeed: {stdout}");
     assert!(
-        !stderr.contains("Warning: sending as"),
-        "matching --sender must not warn: {stderr}"
+        !stderr.contains("Warning: sending as") && !stderr.contains("Error:"),
+        "matching --sender must not error: {stderr}"
     );
 
     tala_stop(home.path());
 }
 
 #[test]
-fn test_send_sender_mismatch_json_signal() {
+fn test_send_sender_mismatch_json_error() {
+    // B004 --json contract: mismatch emits a machine-readable
+    // {"error": ..., "code": "SENDER_MISMATCH"} on stderr, exit 1, nothing sent.
     let home = tempfile::tempdir().unwrap();
     let project = init_project(home.path(), "agent-alpha");
     let sess = create_session_in(home.path(), project.path());
 
-    // Mismatched --sender with --json: structured signal in the response,
-    // warning still on stderr.
     let (stdout, stderr, ok) = tala_in(
         home.path(),
         Some(project.path()),
@@ -4246,27 +4217,27 @@ fn test_send_sender_mismatch_json_signal() {
         ],
     );
     assert!(
-        ok,
-        "send --json with mismatched --sender should succeed: {stdout}"
+        !ok,
+        "send --json with mismatched --sender must FAIL: {stdout}"
     );
-    let val: serde_json::Value =
-        serde_json::from_str(stdout.trim()).expect("send --json emits JSON");
+    let err: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|_| panic!("--json mismatch must emit JSON error: {stderr}"));
     assert_eq!(
-        val["sender_mismatch"],
-        serde_json::Value::Bool(true),
-        "mismatch must be flagged: {stdout}"
-    );
-    assert_eq!(
-        val["configured_sender"],
-        serde_json::Value::String("agent-alpha".into()),
-        "configured sender must be named: {stdout}"
+        err["code"],
+        serde_json::Value::String("SENDER_MISMATCH".into()),
+        "error code must be SENDER_MISMATCH: {stderr}"
     );
     assert!(
-        stderr.contains("Warning: sending as"),
-        "warning should also appear on stderr in --json mode: {stderr}"
+        err["error"].as_str().unwrap_or("").contains("agent-alpha"),
+        "error must name the configured agent: {stderr}"
+    );
+    let recap = tala_ok(home.path(), &["history", &sess]);
+    assert!(
+        !recap.contains("json probe"),
+        "mismatched --sender must not send in --json mode: {recap}"
     );
 
-    // Matching --sender with --json: no mismatch fields.
+    // Matching --sender with --json: succeeds, no mismatch fields.
     let (stdout, _stderr, _ok) = tala_in(
         home.path(),
         Some(project.path()),
