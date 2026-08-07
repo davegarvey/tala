@@ -946,22 +946,26 @@ async fn cmd_send(
     // arrive via the explicit `--` separator — which is the documented correct
     // usage and needs no warning (B015).
 
-    // B004 interim mitigation: make sender impersonation visible. The final
-    // design (restrict vs authenticate --sender) is an open maintainer
-    // decision; until then, warn when the asserted identity differs from the
-    // project's configured agent name. Non-blocking: sending proceeds.
-    let configured_sender = sender_override.and_then(|s| {
-        let configured = store::get_sender_name(None);
-        if s != configured {
-            eprintln!(
-                "Warning: sending as '{}' which differs from this project's configured agent '{}'. Recipients will see a spoofed sender identity.",
-                s, configured
-            );
-            Some(configured)
-        } else {
-            None
+    // B004 (PO decision 2026-08-07): --sender is RESTRICTED to the project's
+    // configured agent name (`.tala/config.json`). A mismatched identity is a
+    // hard error — nothing is sent. The honest way to speak as another agent
+    // is to operate from that agent's project dir.
+    match sender_override {
+        Some(s) => {
+            let configured = store::get_sender_name(None);
+            if s != configured {
+                fail(
+                    json_output,
+                    &format!(
+                        "Cannot send as '{}': this project is configured as agent '{}'. Use the configured identity or run from the other agent's project directory.",
+                        s, configured
+                    ),
+                    "SENDER_MISMATCH",
+                );
+            }
         }
-    });
+        None => {}
+    }
 
     // Resolve content
     let content = if let Some(f) = message_file {
@@ -1061,7 +1065,6 @@ async fn cmd_send(
         chat_timeout,
         json_output,
         quiet,
-        configured_sender.as_deref(),
         &host,
         port,
     )
@@ -1077,7 +1080,6 @@ async fn send_content(
     chat_timeout: Option<u64>,
     json_output: bool,
     quiet: bool,
-    configured_sender: Option<&str>,
     host: &str,
     port: u16,
 ) -> anyhow::Result<()> {
@@ -1116,11 +1118,7 @@ async fn send_content(
 
     if !should_wait {
         if json_output {
-            let mut val = serde_json::to_value(&msg).unwrap();
-            if let Some(configured) = configured_sender {
-                val["sender_mismatch"] = serde_json::Value::Bool(true);
-                val["configured_sender"] = serde_json::Value::String(configured.to_string());
-            }
+            let val = serde_json::to_value(&msg).unwrap();
             println!("{}", serde_json::to_string(&val).unwrap());
         } else if !quiet {
             println!("✓ Sent message {} to session {}", msg.id, msg.session_id);
