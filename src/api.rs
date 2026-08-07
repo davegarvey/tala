@@ -56,6 +56,18 @@ async fn create_session(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
+    // B017: names are an addressing key — reject duplicates before creating.
+    if let Some(ref name) = req.name {
+        if state.store.session_name_exists(name).await {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: format!("A session named '{}' already exists", name),
+                }),
+            )
+                .into_response();
+        }
+    }
     let sender = req.sender.unwrap_or_else(|| "unknown".to_string());
     let initial = req.message.map(|msg| (sender, msg));
     let (id, first_message_id) = state.store.create_session(initial, req.name).await;
@@ -66,6 +78,7 @@ async fn create_session(
             first_message_id,
         }),
     )
+        .into_response()
 }
 
 async fn list_sessions(State(state): State<AppState>) -> impl IntoResponse {

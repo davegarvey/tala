@@ -202,6 +202,13 @@ impl Store {
         sessions.get(session_id).cloned()
     }
 
+    /// True when any session already carries `name` (B017: names are an
+    /// addressing key and must be unique).
+    pub async fn session_name_exists(&self, name: &str) -> bool {
+        let sessions = self.sessions.read().await;
+        sessions.values().any(|s| s.name.as_deref() == Some(name))
+    }
+
     pub async fn list_sessions(&self) -> Vec<SessionSummary> {
         let sessions = self.sessions.read().await;
         let msgs = self.messages.read().await;
@@ -246,6 +253,14 @@ impl Store {
         _force: bool,
     ) -> Result<bool, String> {
         let mut sessions = self.sessions.write().await;
+        // B017: reject collisions — another session already owns this name.
+        // Renaming a session to its OWN current name stays a no-op success.
+        let collision = sessions
+            .iter()
+            .any(|(sid, s)| *sid != session_id && s.name.as_deref() == Some(name));
+        if collision {
+            return Err(format!("A session named '{}' already exists", name));
+        }
         if let Some(session) = sessions.get_mut(session_id) {
             let old_name = session.name.clone().unwrap_or_default();
             session.name = Some(name.to_string());

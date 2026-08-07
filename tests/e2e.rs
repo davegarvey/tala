@@ -4038,31 +4038,6 @@ fn test_wait_by_name() {
     tala_stop(home.path());
 }
 
-#[test]
-fn test_send_ambiguous_name_errors() {
-    let home = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
-
-    let sess1 = tala_start(home.path());
-    rename_session_by_id(home.path(), &sess1, "dup-name");
-    let sess2 = tala_start(home.path());
-    rename_session_by_id(home.path(), &sess2, "dup-name");
-
-    let (_stdout, stderr, ok) = tala_in(
-        home.path(),
-        Some(project.path()),
-        &["send", "dup-name", "ambiguous message"],
-    );
-    assert!(!ok, "send to ambiguous name should fail");
-    assert!(
-        stderr.contains("dup-name")
-            && (stderr.contains("Multiple") || stderr.contains("ambiguous")),
-        "error should mention ambiguity: {}",
-        stderr
-    );
-
-    tala_stop(home.path());
-}
 
 #[test]
 fn test_lone_positional_is_message_not_session() {
@@ -4331,4 +4306,121 @@ fn create_session_in(home: &std::path::Path, project: &std::path::Path) -> Strin
         "tala session create failed\nstdout: {stdout}\nstderr: {stderr}"
     );
     stdout.lines().next().unwrap_or("").trim().to_string()
+}
+#[test]
+fn test_create_duplicate_name_rejected() {
+    let home = tempfile::tempdir().unwrap();
+    let first = tala_start(home.path());
+
+    tala_ok(
+        home.path(),
+        &["session", "rename", &first, "dup-a", "--force"],
+    );
+
+    // Second create with the same name must fail loudly.
+    let (stdout, stderr, ok) = tala(home.path(), &["session", "create", "--name", "dup-a"]);
+    assert!(!ok, "duplicate name create should fail, got: {}", stdout);
+    assert!(
+        stderr.contains("already exists"),
+        "stderr should explain the duplicate: {}",
+        stderr
+    );
+
+    // A different name still succeeds.
+    let (stdout2, _stderr2, ok2) = tala(home.path(), &["session", "create", "--name", "dup-a2"]);
+    assert!(ok2, "distinct name create should succeed: {}", stdout2);
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_create_duplicate_name_json_error() {
+    let home = tempfile::tempdir().unwrap();
+    let first = tala_start(home.path());
+    tala_ok(
+        home.path(),
+        &["session", "rename", &first, "dup-b", "--force"],
+    );
+
+    let (stdout, stderr, ok) = tala(
+        home.path(),
+        &["session", "create", "--name", "dup-b", "--json"],
+    );
+    assert!(!ok, "duplicate name create --json should fail: {}", stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(
+        parsed["code"],
+        serde_json::json!("SESSION_NAME_TAKEN"),
+        "json error code: {}",
+        stderr
+    );
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("already exists"),
+        "json error message: {}",
+        stderr
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_rename_to_existing_name_rejected() {
+    let home = tempfile::tempdir().unwrap();
+    let s1 = tala_start(home.path());
+    let s2 = tala_start(home.path());
+    tala_ok(home.path(), &["session", "rename", &s1, "n1", "--force"]);
+    tala_ok(home.path(), &["session", "rename", &s2, "n2", "--force"]);
+
+    // Renaming s1 onto s2's name must fail.
+    let (stdout, stderr, ok) = tala(home.path(), &["session", "rename", &s1, "n2"]);
+    assert!(!ok, "rename onto existing name should fail: {}", stdout);
+    assert!(
+        stderr.contains("already exists"),
+        "stderr should explain the duplicate: {}",
+        stderr
+    );
+
+    // Renaming s2 onto s1's name must fail too (symmetric).
+    let (stdout2, _stderr2, ok2) = tala(home.path(), &["session", "rename", &s2, "n1"]);
+    assert!(!ok2, "rename onto existing name should fail: {}", stdout2);
+
+    // Renaming s1 to its OWN current name stays a success (noop).
+    let (stdout3, _stderr3, ok3) = tala(home.path(), &["session", "rename", &s1, "n1"]);
+    assert!(ok3, "rename to own name should succeed: {}", stdout3);
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_rename_duplicate_json_error() {
+    let home = tempfile::tempdir().unwrap();
+    let s1 = tala_start(home.path());
+    let s2 = tala_start(home.path());
+    tala_ok(home.path(), &["session", "rename", &s1, "dup-c", "--force"]);
+    tala_ok(home.path(), &["session", "rename", &s2, "dup-d", "--force"]);
+
+    let (stdout, stderr, ok) = tala(home.path(), &["session", "rename", &s1, "dup-d", "--json"]);
+    assert!(!ok, "duplicate rename --json should fail: {}", stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(
+        parsed["code"],
+        serde_json::json!("SESSION_NAME_TAKEN"),
+        "json error code: {}",
+        stderr
+    );
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("already exists"),
+        "json error message: {}",
+        stderr
+    );
+
+    tala_stop(home.path());
 }
