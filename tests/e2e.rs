@@ -986,6 +986,203 @@ fn test_session_close_alias() {
 }
 
 #[test]
+fn test_session_close_alias_clears_active() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+    // two more open sessions so bare send hits the NO_ACTIVE_SESSION path
+    // (with ≤1 open session left, send auto-targets instead of erroring)
+    tala_start(home.path());
+    tala_start(home.path());
+
+    // Make sess the active session for this project dir
+    let out = tala_in(home.path(), Some(project.path()), &["use", &sess]).0;
+    assert!(
+        out.contains("Active session"),
+        "use should confirm: {}",
+        out
+    );
+
+    // Close the ACTIVE session via the `session close` alias (same CWD as `use`,
+    // since the active-session file is project-relative)
+    let out = tala_in(
+        home.path(),
+        Some(project.path()),
+        &["session", "close", &sess],
+    )
+    .0;
+    assert!(out.contains("closed"), "session close should confirm");
+
+    // The active-session marker must be cleared: `use` should list available
+    // sessions instead of reporting the closed session as active
+    let (stdout, _stderr, ok) = tala_in(home.path(), Some(project.path()), &["use"]);
+    assert!(ok);
+    assert!(
+        stdout.contains("Available sessions"),
+        "use should show available sessions, got: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("Active session:"),
+        "use should not report a stale active session: {}",
+        stdout
+    );
+
+    // list must not show a * marker on the closed row
+    let list = tala_ok(home.path(), &["list"]);
+    assert!(
+        !list.contains(" *"),
+        "list should not show a * marker when active is cleared: {}",
+        list
+    );
+
+    // Bare send must fail with a no-active-session error, not "Session is closed"
+    let (_, stderr, ok) = tala_in(home.path(), Some(project.path()), &["send", "hello"]);
+    assert!(!ok, "bare send after closing active should fail");
+    assert!(
+        stderr.contains("No active session"),
+        "should mention no active session: {}",
+        stderr
+    );
+
+    // list must not show a * marker on the closed row
+    let list = tala_in(home.path(), Some(project.path()), &["list"]).0;
+    assert!(
+        !list.contains(" *"),
+        "list should not show a * marker when active is cleared: {}",
+        list
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_close_explicit_id_clears_active() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+    tala_start(home.path()); // keep an open session so `use` lists available
+
+    let out = tala_in(home.path(), Some(project.path()), &["use", &sess]).0;
+    assert!(
+        out.contains("Active session"),
+        "use should confirm: {}",
+        out
+    );
+
+    // Close the ACTIVE session via top-level `close` with an explicit id
+    let (stdout, stderr, ok) = tala_in(home.path(), Some(project.path()), &["close", &sess]);
+    assert!(ok, "close should succeed: {} {}", stdout, stderr);
+    assert!(
+        stdout.contains("closed"),
+        "close should confirm: {}",
+        stdout
+    );
+    assert!(
+        stderr.contains("cleared"),
+        "close of active should mention clearing: {}",
+        stderr
+    );
+
+    let (stdout, _stderr, ok) = tala_in(home.path(), Some(project.path()), &["use"]);
+    assert!(ok);
+    assert!(
+        stdout.contains("Available sessions"),
+        "use should show available sessions, got: {}",
+        stdout
+    );
+
+    // list must not show a * marker on the closed row
+    let list = tala_in(home.path(), Some(project.path()), &["list"]).0;
+    assert!(
+        !list.contains(" *"),
+        "list should not show a * marker when active is cleared: {}",
+        list
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_close_non_active_keeps_active_marker() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let sess_a = tala_start(home.path());
+    let sess_b = tala_start(home.path());
+
+    let out = tala_in(home.path(), Some(project.path()), &["use", &sess_a]).0;
+    assert!(
+        out.contains("Active session"),
+        "use should confirm: {}",
+        out
+    );
+
+    // Close a NON-active session — the active marker must be untouched
+    tala_in(
+        home.path(),
+        Some(project.path()),
+        &["session", "close", &sess_b],
+    );
+
+    let out = tala_in(home.path(), Some(project.path()), &["use"]).0;
+    assert!(
+        out.contains(&sess_a),
+        "active should still be sess_a: {}",
+        out
+    );
+    assert!(
+        !out.contains(&sess_b),
+        "closed sess_b should not be active: {}",
+        out
+    );
+
+    // Bare send should still target sess_a
+    tala_in(home.path(), Some(project.path()), &["send", "still active"])
+        .2
+        .then_some(())
+        .unwrap();
+    let recap = tala_ok(home.path(), &["history", &sess_a]);
+    assert!(
+        recap.contains("still active"),
+        "message should go to sess_a: {}",
+        recap
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_session_close_alias_json_active_cleared() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+    // one more open session so the closed one isn't the only session
+    tala_start(home.path());
+
+    tala_in(home.path(), Some(project.path()), &["use", &sess]);
+
+    let out = tala_in(
+        home.path(),
+        Some(project.path()),
+        &["session", "close", &sess, "--json"],
+    )
+    .0;
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        parsed["status"], "closed",
+        "status should be closed: {}",
+        out
+    );
+    assert_eq!(
+        parsed["active_cleared"], true,
+        "json should report active_cleared: {}",
+        out
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
 fn test_nonexistent_session_recap_fails() {
     let home = tempfile::tempdir().unwrap();
     tala_start(home.path());

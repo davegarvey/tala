@@ -1830,8 +1830,12 @@ async fn cmd_close(
 
     if resp.status().is_success() {
         let result: CloseSessionResponse = resp.json().await?;
-        let was_active = session_arg.is_none()
-            && store::read_active_session().await.as_deref() == Some(&session_id);
+        // Clear the active marker whenever the CLOSED session is the active one,
+        // regardless of how it was addressed (positional, -s, or `session close`
+        // alias which always passes Some(id)). Previously the alias path computed
+        // was_active=false and left a dangling * marker + stale active-session
+        // file, breaking bare `send` (B028).
+        let was_active = store::read_active_session().await.as_deref() == Some(&session_id);
         if was_active {
             store::clear_active_session().await?;
         }
