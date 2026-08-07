@@ -23,6 +23,12 @@ fn fail(json: bool, msg: impl std::fmt::Display, code: &str) -> ! {
     process::exit(1);
 }
 
+/// Exit code for benign blocking timeouts (wait/send --wait running out of
+/// time with no new messages). Deliberately distinct from clap's usage-error
+/// code 2: a timeout is not a usage error, and scripts must be able to tell
+/// "nothing happened yet" apart from "you called me wrong".
+const EXIT_TIMEOUT: i32 = 3;
+
 #[derive(Parser)]
 #[command(
     name = "tala",
@@ -57,7 +63,7 @@ pub enum Commands {
     },
     /// Send a message to a session. Use `tala session create` to create a session without a message.
     #[command(
-        after_help = "Use --wait / -w to block until a reply arrives.\nUse `tala session create --name` to create a named session.\nUse --stdin or pipe content for messages with special characters (backticks, quotes, leading dashes).\nUse `--` to separate options from message content, e.g. `tala send -- --my-flags`."
+        after_help = "Use --wait / -w to block until a reply arrives.\nUse `tala session create --name` to create a named session.\nUse --stdin or pipe content for messages with special characters (backticks, quotes, leading dashes).\nUse `--` to separate options from message content, e.g. `tala send -- --my-flags`.\n\nEXIT CODES: 0 = sent (or reply received with --wait); 3 = --wait timed out; 1 = error"
     )]
     Send {
         #[arg(help = "Session ID (positional, or use --session/-s)")]
@@ -95,7 +101,7 @@ pub enum Commands {
     /// Use `tala stream` for real-time SSE on a single session, or `tala listen` to observe all sessions.
     /// Use `tala wait --new-session` to wait for a session with an incoming message from another agent.
     #[command(
-        after_help = "USAGE:\n  tala wait <session>          Blocking poll — sends periodic HTTP requests\n  tala wait --new-session     Wait for a session with an incoming message from another agent\n\nCOMPARISON:\n  tala stream   Real-time SSE — stays connected, pushes messages immediately (single session)\n  tala listen   Real-time SSE — observe all sessions at once\n  tala check    Non-blocking — show new messages and return immediately\n\nSee also: tala history (transcript), tala session (manage sessions)"
+        after_help = "USAGE:\n  tala wait <session>          Blocking poll — sends periodic HTTP requests\n  tala wait --new-session     Wait for a session with an incoming message from another agent\n\nCOMPARISON:\n  tala stream   Real-time SSE — stays connected, pushes messages immediately (single session)\n  tala listen   Real-time SSE — observe all sessions at once\n  tala check    Non-blocking — show new messages and return immediately\n\nEXIT CODES: 0 = messages received (or new session found); 3 = benign timeout; 2 = usage error; 1 = error\n\nSee also: tala history (transcript), tala session (manage sessions)"
     )]
     Wait {
         #[arg(help = "Session ID (uses active session if set)")]
@@ -1041,7 +1047,7 @@ async fn send_content(
     if json_output {
         println!("{}", serde_json::to_string(&result).unwrap());
         if result.timeout {
-            process::exit(2);
+            process::exit(EXIT_TIMEOUT);
         }
     } else if result.closed {
         println!("[session closed]");
@@ -1050,7 +1056,7 @@ async fn send_content(
             "[timeout after {}s, no reply]",
             result.timeout_after.unwrap_or(0)
         );
-        process::exit(2);
+        process::exit(EXIT_TIMEOUT);
     } else {
         for m in &result.messages {
             println!("{}: {}", m.sender, m.content);
@@ -1126,7 +1132,7 @@ async fn cmd_wait(
                     if json_output {
                         println!("{}", serde_json::to_string(&result).unwrap());
                         if result.get("timeout") == Some(&serde_json::json!(true)) {
-                            process::exit(2);
+                            process::exit(EXIT_TIMEOUT);
                         }
                         return Ok(());
                     }
@@ -1257,7 +1263,7 @@ async fn cmd_wait(
         if json_output {
             println!("{}", serde_json::to_string(&result).unwrap());
             if result.timeout {
-                process::exit(2);
+                process::exit(EXIT_TIMEOUT);
             }
         } else if result.closed {
             println!("[session closed]");
@@ -1266,7 +1272,7 @@ async fn cmd_wait(
                 "timeout after {}s, no new messages",
                 result.timeout_after.unwrap_or(0)
             );
-            process::exit(2);
+            process::exit(EXIT_TIMEOUT);
         } else {
             let _ = store::write_active_session(&sid).await;
             for msg in &result.messages {
@@ -2102,7 +2108,7 @@ async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::R
             "timeout after {}s, no new session",
             result["timeout_after"].as_u64().unwrap_or(timeout)
         );
-        process::exit(2);
+        process::exit(EXIT_TIMEOUT);
     } else if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
         fail(json_output, err, "WAIT_NEW_ERROR");
     }

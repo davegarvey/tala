@@ -3064,6 +3064,7 @@ fn test_reopen_does_not_change_active_session() {
 }
 
 #[test]
+
 fn test_daemon_restart_preserves_messages() {
     // B024: a daemon restart must not wipe the transcript. Session metadata
     // already survived; messages must now survive too (graceful stop path).
@@ -3591,3 +3592,89 @@ fn test_listen_replays_new_session_message_without_since() {
 
     tala_stop(home.path());
 }
+
+#[test]
+fn test_wait_timeout_exits_3() {
+    // B011/B018: a benign wait timeout must exit with the dedicated code 3,
+    // not clap's usage-error code 2.
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    let out = Command::new(tala_bin())
+        .env("HOME", home.path())
+        .args(["wait", &sess, "--timeout", "2"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "wait <sess> timeout should exit 3, got {:?}\nstdout: {}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // JSON variant too.
+    let out = Command::new(tala_bin())
+        .env("HOME", home.path())
+        .args(["wait", &sess, "--timeout", "2", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "wait <sess> --json timeout should exit 3, got {:?}",
+        out.status.code()
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("timeout"),
+        "json output should report the timeout"
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_wait_timeout_exits_3() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    let out = Command::new(tala_bin())
+        .env("HOME", home.path())
+        .args(["send", &sess, "ping", "--wait", "--timeout", "2"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "send --wait timeout should exit 3, got {:?}\nstdout: {}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_wait_new_session_timeout_exits_3() {
+    let home = tempfile::tempdir().unwrap();
+    let _sess = tala_start(home.path());
+
+    let out = Command::new(tala_bin())
+        .env("HOME", home.path())
+        .args(["wait", "--new-session", "--timeout", "2"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "wait --new-session timeout should exit 3, got {:?}\nstdout: {}\nstderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    tala_stop(home.path());
+}
+
