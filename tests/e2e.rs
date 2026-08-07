@@ -4424,3 +4424,44 @@ fn test_rename_duplicate_json_error() {
 
     tala_stop(home.path());
 }
+#[test]
+fn test_broken_pipe_no_panic() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    // Seed enough messages that history --json output is large (B038 repro
+    // needs the writer to still be writing when the reader closes).
+    for i in 0..400 {
+        tala_ok(
+            home.path(),
+            &["send", "--session", &sess, &format!("bulk-{}", i)],
+        );
+    }
+
+    use std::process::Stdio;
+    let mut child = Command::new(tala_bin())
+        .env("HOME", home.path())
+        .args(["history", &sess, "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tala history");
+
+    // Close the read end immediately: every subsequent write gets EPIPE.
+    drop(child.stdout.take());
+
+    let out = child.wait_with_output().expect("wait for tala history");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "broken pipe must not panic:\n{}",
+        stderr
+    );
+    assert_ne!(
+        out.status.code(),
+        Some(101),
+        "broken pipe must not exit with the panic code"
+    );
+
+    tala_stop(home.path());
+}
