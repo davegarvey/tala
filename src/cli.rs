@@ -59,17 +59,11 @@ pub enum Commands {
         after_help = "Use --wait / -w to block until a reply arrives.\nUse `tala session create --name` to create a named session.\nUse --stdin or pipe content for messages with special characters (backticks, quotes, leading dashes).\nUse `--` to separate options from message content, e.g. `tala send -- --my-flags`."
     )]
     Send {
-        #[arg(
-            allow_hyphen_values = true,
-            help = "Session ID (positional, or use --session/-s)"
-        )]
+        #[arg(help = "Session ID (positional, or use --session/-s)")]
         session: Option<String>,
         #[arg(long = "session", short, alias = "session-id", help = "Session ID")]
         session_arg: Option<String>,
-        #[arg(
-            allow_hyphen_values = true,
-            help = "Message content (omit to read from piped stdin)"
-        )]
+        #[arg(help = "Message content (omit to read from piped stdin)")]
         message: Option<String>,
         #[arg(
             long = "message-file",
@@ -337,6 +331,17 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             quiet,
             timeout,
         } => {
+            // A non-sess_ positional alongside a message means the user typo'd the
+            // target (or forgot -s/--session): error instead of silently sending
+            // to the active session (B026 family).
+            if let (Some(target), Some(_)) = (&session, &message) {
+                if !target.starts_with("sess_") {
+                    anyhow::bail!(
+                        "Unknown session '{}'. Session IDs look like 'sess_...' (use `tala list` to see them, or `-s/--session` for the flag form).",
+                        target
+                    );
+                }
+            }
             let session_flag = session_arg.is_some();
             let resolved_session = session_arg
                 .or_else(|| session.as_ref().filter(|s| s.starts_with("sess_")).cloned());
@@ -820,13 +825,10 @@ async fn cmd_send(
         );
     }
 
-    // Warn if positional message starts with -- (likely shell confusion)
-    if let Some(ref msg) = message {
-        if msg.starts_with("--") && !quiet && !json_output {
-            eprintln!("Warning: message starts with '--' which can be misinterpreted as a flag. Use '--' before the message, e.g. `tala send -- \"{}\"`, or use --stdin/--message-file.", msg);
-        }
-    }
-
+    // Note: unknown/typo'd flags are now rejected by clap (no allow_hyphen_values
+    // on send positionals), so a positional message starting with '--' can only
+    // arrive via the explicit `--` separator — which is the documented correct
+    // usage and needs no warning (B015).
     // Resolve content
     let content = if let Some(f) = message_file {
         if f == "-" {

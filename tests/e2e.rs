@@ -111,6 +111,117 @@ fn test_send_and_recap() {
 }
 
 #[test]
+fn test_send_rejects_unknown_flags() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let sess = tala_start(home.path());
+    // Make sess active from the project dir (isolated from parallel tests)
+    tala_in(home.path(), Some(project.path()), &["use", &sess]);
+
+    // Unknown flag must be a hard error, not silently sent to the active session
+    let (stdout, stderr, ok) = tala_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "--new", "does --new create a session?"],
+    );
+    assert!(!ok, "unknown flag --new must fail; got stdout: {}", stdout);
+    assert!(
+        stderr.contains("unexpected argument") || stdout.contains("unexpected argument"),
+        "error should mention unexpected argument: stderr={}",
+        stderr
+    );
+
+    // Nothing may have been sent to the active session
+    let recap = tala_ok(home.path(), &["history", &sess]);
+    assert!(
+        !recap.contains("does --new create a session?"),
+        "message must NOT be sent when an unknown flag is present: {}",
+        recap
+    );
+
+    // Typo'd flag with a value: neither the flag nor its value may be sent
+    let (stdout2, stderr2, ok2) = tala_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "--timeot", "1"],
+    );
+    assert!(
+        !ok2,
+        "typo flag --timeot must fail; got stdout: {}",
+        stdout2
+    );
+    let recap2 = tala_ok(home.path(), &["history", &sess]);
+    assert!(
+        !recap2.contains("\n    1\n") && !recap2.contains("\n    1"),
+        "typo flag value must NOT be sent as message content: {}",
+        recap2
+    );
+    assert!(
+        stderr2.contains("unexpected argument") || stdout2.contains("unexpected argument"),
+        "error should mention unexpected argument: stderr={}",
+        stderr2
+    );
+
+    // Non-sess_ positional alongside a message must error, not silently drop the target
+    let (stdout3, _stderr3, ok3) = tala_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "not-a-session", "msg"],
+    );
+    assert!(
+        !ok3,
+        "non-session target must fail; got stdout: {}",
+        stdout3
+    );
+    let recap3 = tala_ok(home.path(), &["history", &sess]);
+    assert!(
+        !recap3.contains("\n    msg"),
+        "message must NOT be sent when the target is not a session: {}",
+        recap3
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_dash_separator_and_explicit_session_still_work() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let sess = tala_start(home.path());
+    tala_in(home.path(), Some(project.path()), &["use", &sess]);
+
+    // Documented `--` separator still delivers dashed content
+    tala_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "--", "--dashed-content"],
+    );
+    let recap = tala_in(home.path(), Some(project.path()), &["history", &sess]).0;
+    assert!(
+        recap.contains("--dashed-content"),
+        "-- separator must still deliver dashed content: {}",
+        recap
+    );
+
+    // Explicit -s/--session flag still works
+    tala_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "-s", &sess, "explicit flag send"],
+    );
+    let recap2 = tala_in(home.path(), Some(project.path()), &["history", &sess]).0;
+    assert!(
+        recap2.contains("explicit flag send"),
+        "-s flag must still work: {}",
+        recap2
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
 fn test_auto_target_single_session() {
     let home = tempfile::tempdir().unwrap();
 
