@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "tala-cli"
-version = "0.26.0"
+version = "0.26.1"
 dependencies = [
  "anyhow",
  "axum",
