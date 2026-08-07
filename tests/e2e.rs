@@ -600,6 +600,48 @@ fn test_wait_limit_cap() {
 }
 
 #[test]
+fn test_wait_limit_tail_four_messages() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    tala_ok(home.path(), &["send", "--session", &sess, "m1"]);
+    tala_ok(home.path(), &["send", "--session", &sess, "m2"]);
+    tala_ok(home.path(), &["send", "--session", &sess, "m3"]);
+    tala_ok(home.path(), &["send", "--session", &sess, "m4"]);
+
+    let (stdout, _stderr, ok) = tala(
+        home.path(),
+        &[
+            "wait",
+            &sess,
+            "--since",
+            "0",
+            "--limit",
+            "2",
+            "--timeout",
+            "3",
+            "--json",
+        ],
+    );
+    assert!(ok, "wait --limit should succeed");
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let contents: Vec<&str> = val["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["content"].as_str())
+        .collect();
+    assert_eq!(
+        contents,
+        vec!["m3", "m4"],
+        "wait --limit 2 on 4 msgs should return NEWEST 2 (m3,m4): {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
 fn test_wait_new_returns_preexisting_incoming_session() {
     let home = tempfile::tempdir().unwrap();
     let alpha_proj = home.path().join("alpha-proj");
@@ -772,8 +814,58 @@ fn test_recap_limit_cap() {
 
     let (stdout, _stderr, ok) = tala(home.path(), &["history", &sess, "--json", "--limit", "2"]);
     assert!(ok, "recap --limit should succeed");
-    let count = stdout.matches("\"content\"").count();
-    assert_eq!(count, 2, "should cap at 2 messages");
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let contents: Vec<&str> = val["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["content"].as_str())
+        .collect();
+    assert_eq!(
+        contents,
+        vec!["m2", "m3"],
+        "limit 2 should return NEWEST 2 messages (m2,m3), not oldest: {}",
+        stdout
+    );
+    assert_eq!(
+        val["cursor"], 3,
+        "cursor should be the max id returned (3): {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_recap_limit_tail_four_messages() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    tala_ok(home.path(), &["send", "--session", &sess, "m1"]);
+    tala_ok(home.path(), &["send", "--session", &sess, "m2"]);
+    tala_ok(home.path(), &["send", "--session", &sess, "m3"]);
+    tala_ok(home.path(), &["send", "--session", &sess, "m4"]);
+
+    let (stdout, _stderr, ok) = tala(home.path(), &["history", &sess, "--json", "--limit", "2"]);
+    assert!(ok, "recap --limit should succeed");
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let contents: Vec<&str> = val["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["content"].as_str())
+        .collect();
+    assert_eq!(
+        contents,
+        vec!["m3", "m4"],
+        "limit 2 on 4 msgs should return NEWEST 2 (m3,m4) in ascending order: {}",
+        stdout
+    );
+    assert_eq!(
+        val["cursor"], 4,
+        "cursor should be max id returned (4): {}",
+        stdout
+    );
 
     tala_stop(home.path());
 }
