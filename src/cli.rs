@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Read;
 use std::process;
 use std::time::Duration;
@@ -975,7 +976,7 @@ async fn send_content(
     }
 
     let msg: SendMessageResponse = resp.json().await?;
-    let _ = store::write_cursor(msg.id).await;
+    let _ = store::write_cursor(&msg.session_id, msg.id).await;
 
     if !should_wait {
         if json_output {
@@ -1399,12 +1400,15 @@ async fn cmd_listen(
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
 
-    let since_id = if let Some(s) = since {
-        s
-    } else {
-        store::read_cursor().await
-    };
+    let since_id = since.unwrap_or_default();
     let mut path = format!("/api/observe?since={}", since_id);
+    if since.is_none() {
+        // No explicit --since: replay each session since ITS OWN read cursor.
+        // A single global since cannot represent per-session id spaces (B014).
+        let cursors = store::read_cursors().await;
+        let since_map = serde_json::to_string(&cursors).unwrap_or_else(|_| "{}".to_string());
+        path = format!("{}&since_map={}", path, percent_encode(&since_map));
+    }
     if let Some(ref m) = match_str {
         path = format!("{}&match={}", path, urlencoding(m));
     }
@@ -1446,8 +1450,8 @@ async fn cmd_listen(
 
     let mut buffer = String::new();
     let mut stream = resp.bytes_stream();
-    let mut max_msg_id = since_id;
     let mut message_count: u64 = 0;
+    let mut max_by_session: HashMap<String, u64> = HashMap::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -1478,8 +1482,10 @@ async fn cmd_listen(
                 match evt.r#type.as_str() {
                     "message" => {
                         if let Some(msg) = evt.message {
-                            if msg.id > max_msg_id {
-                                max_msg_id = msg.id;
+                            let sid = evt.session_id.clone();
+                            let entry = max_by_session.entry(sid).or_insert(0);
+                            if msg.id > *entry {
+                                *entry = msg.id;
                             }
                             let session_label = evt.session_name.unwrap_or(evt.session_id);
                             println!(
@@ -1509,11 +1515,27 @@ async fn cmd_listen(
         println!("[connection closed] ({} message(s))", message_count);
     }
 
-    if max_msg_id > since_id {
-        let _ = store::write_cursor(max_msg_id).await;
+    // Advance the per-session read cursor for each session we saw messages in.
+    for (sid, mid) in &max_by_session {
+        if *mid > store::read_cursor(sid).await {
+            let _ = store::write_cursor(sid, *mid).await;
+        }
     }
 
     Ok(())
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 fn urlencoding(s: &str) -> String {
@@ -1581,7 +1603,11 @@ async fn cmd_recap(
             }
         }
     }
-    store::write_cursor(recap.cursor.unwrap_or(0)).await?;
+    // Mark THIS session read only. Empty sessions have cursor: None — skip the
+    // write so an empty history can never reset read state (B025).
+    if let Some(c) = recap.cursor {
+        store::write_cursor(&session_id, c).await?;
+    }
     Ok(())
 }
 
@@ -1593,7 +1619,7 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
     let resp = client.get(&url).send().await?;
     let sessions: Vec<SessionSummary> = resp.json().await?;
 
-    let cursor = store::read_cursor().await;
+    let cursors = store::read_cursors().await;
     let active_session = store::read_active_session().await;
 
     if json_output {
@@ -1602,7 +1628,8 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
             let unread = if s.closed {
                 0
             } else {
-                compute_session_unread(&host, port, s, cursor).await
+                let since_id = cursors.get(&s.id).copied().unwrap_or(0);
+                compute_session_unread(&host, port, s, since_id).await
             };
             let mut entry = serde_json::to_value(s).unwrap_or_default();
             if let Some(obj) = entry.as_object_mut() {
@@ -1643,7 +1670,8 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
                     width = name_width
                 );
             } else {
-                let unread = compute_session_unread(&host, port, s, cursor).await;
+                let since_id = cursors.get(&s.id).copied().unwrap_or(0);
+                let unread = compute_session_unread(&host, port, s, since_id).await;
                 if unread > 0 {
                     println!(
                         "{}  {:width$}  {}  {} msgs ({} new){}",
@@ -2086,8 +2114,8 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
         .unwrap_or(false);
 
     if alive {
-        let cursor = store::read_cursor().await;
-        let total_unread = compute_total_unread(&info.host, info.port, cursor).await;
+        let cursors = store::read_cursors().await;
+        let total_unread = compute_total_unread(&info.host, info.port, &cursors).await;
 
         if json_output {
             let resp = serde_json::json!({
@@ -2129,7 +2157,7 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn compute_total_unread(host: &str, port: u16, cursor: u64) -> usize {
+async fn compute_total_unread(host: &str, port: u16, cursors: &HashMap<String, u64>) -> usize {
     let local_agent = store::read_project_config().await;
     let client = reqwest::Client::new();
     let url = daemon_url(host, port, "/api/sessions");
@@ -2138,10 +2166,11 @@ async fn compute_total_unread(host: &str, port: u16, cursor: u64) -> usize {
             let sessions: Vec<SessionSummary> = resp.json().await.unwrap_or_default();
             let mut total = 0;
             for s in &sessions {
+                let since_id = cursors.get(&s.id).copied().unwrap_or(0);
                 let msgs_url = daemon_url(
                     host,
                     port,
-                    &format!("/api/sessions/{}/messages?since={}", s.id, cursor),
+                    &format!("/api/sessions/{}/messages?since={}", s.id, since_id),
                 );
                 if let Ok(resp) = client.get(&msgs_url).send().await {
                     if let Ok(msgs) = resp.json::<Vec<Message>>().await {
@@ -2161,7 +2190,7 @@ async fn compute_total_unread(host: &str, port: u16, cursor: u64) -> usize {
 
 async fn cmd_whatsup(json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
-    let cursor = store::read_cursor().await;
+    let mut cursors = store::read_cursors().await;
     let client = reqwest::Client::new();
 
     let url = daemon_url(&host, port, "/api/sessions");
@@ -2170,14 +2199,19 @@ async fn cmd_whatsup(json_output: bool) -> anyhow::Result<()> {
 
     let mut all_messages: Vec<Message> = Vec::new();
 
+    // Fetch per session since THAT session's own read cursor (B014).
     for s in &sessions {
+        let since_id = cursors.get(&s.id).copied().unwrap_or(0);
         let msgs_url = daemon_url(
             &host,
             port,
-            &format!("/api/sessions/{}/messages?since={}", s.id, cursor),
+            &format!("/api/sessions/{}/messages?since={}", s.id, since_id),
         );
         if let Ok(resp) = client.get(&msgs_url).send().await {
             if let Ok(msgs) = resp.json::<Vec<Message>>().await {
+                if let Some(max_id) = msgs.iter().map(|m| m.id).max() {
+                    cursors.insert(s.id.clone(), max_id);
+                }
                 all_messages.extend(msgs);
             }
         }
@@ -2185,16 +2219,18 @@ async fn cmd_whatsup(json_output: bool) -> anyhow::Result<()> {
 
     all_messages.sort_by_key(|m| m.id);
 
-    let new_cursor = all_messages.iter().map(|m| m.id).max().unwrap_or(cursor);
+    // "cursor" is kept for backward compatibility: max of the per-session cursors.
+    let max_cursor = cursors.values().copied().max().unwrap_or(0);
 
     if json_output {
         let result = serde_json::json!({
-            "cursor": new_cursor,
+            "cursor": max_cursor,
+            "cursors": cursors,
             "messages": all_messages,
         });
         println!("{}", serde_json::to_string(&result).unwrap());
     } else if all_messages.is_empty() {
-        println!("No new messages since last check (cursor: {})", cursor);
+        println!("No new messages since last check");
     } else {
         // Group messages by session
         let mut by_session: std::collections::BTreeMap<String, Vec<&Message>> =
@@ -2226,10 +2262,13 @@ async fn cmd_whatsup(json_output: bool) -> anyhow::Result<()> {
         }
     }
 
-    store::write_cursor(new_cursor).await?;
+    // Persist the per-session read cursors.
+    for (sid, mid) in &cursors {
+        store::write_cursor(sid, *mid).await?;
+    }
 
     if !json_output && !all_messages.is_empty() {
-        println!("(cursor updated to {})", new_cursor);
+        println!("(read markers updated for {} session(s))", cursors.len());
     }
 
     Ok(())
