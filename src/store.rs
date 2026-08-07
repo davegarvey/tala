@@ -38,6 +38,7 @@ pub struct Store {
     messages: Arc<RwLock<HashMap<String, Vec<Message>>>>,
     broadcast: Arc<RwLock<HashMap<String, broadcast::Sender<DaemonEvent>>>>,
     next_msg_id: Arc<RwLock<HashMap<String, u64>>>,
+    read_state: Arc<RwLock<HashMap<(String, String), u64>>>,
     global_tx: broadcast::Sender<(String, DaemonEvent)>,
 }
 
@@ -49,6 +50,7 @@ impl Store {
             messages: Arc::new(RwLock::new(HashMap::new())),
             broadcast: Arc::new(RwLock::new(HashMap::new())),
             next_msg_id: Arc::new(RwLock::new(HashMap::new())),
+            read_state: Arc::new(RwLock::new(HashMap::new())),
             global_tx,
         }
     }
@@ -203,16 +205,38 @@ impl Store {
     pub async fn list_sessions(&self) -> Vec<SessionSummary> {
         let sessions = self.sessions.read().await;
         let msgs = self.messages.read().await;
+        let read_state = self.read_state.read().await;
         sessions
             .values()
-            .map(|s| SessionSummary {
-                id: s.id.clone(),
-                name: s.name.clone(),
-                created_at: s.created_at,
-                closed: s.closed,
-                message_count: msgs.get(&s.id).map(|v| v.len()).unwrap_or(0),
+            .map(|s| {
+                let read_by = read_state
+                    .iter()
+                    .filter(|((sid, _), _)| sid == &s.id)
+                    .map(|((_, sender), id)| (sender.clone(), *id))
+                    .collect();
+                SessionSummary {
+                    id: s.id.clone(),
+                    name: s.name.clone(),
+                    created_at: s.created_at,
+                    closed: s.closed,
+                    message_count: msgs.get(&s.id).map(|v| v.len()).unwrap_or(0),
+                    read_by,
+                }
             })
             .collect()
+    }
+
+    /// Record that `sender` has read messages up to (and including) `up_to`
+    /// in `session_id`. Monotonic: a lower value never overwrites a higher one
+    /// (B021 — sender read receipts).
+    pub async fn record_read(&self, session_id: &str, sender: &str, up_to: u64) {
+        let mut read_state = self.read_state.write().await;
+        let entry = read_state
+            .entry((session_id.to_string(), sender.to_string()))
+            .or_insert(0);
+        if up_to > *entry {
+            *entry = up_to;
+        }
     }
 
     pub async fn rename_session(

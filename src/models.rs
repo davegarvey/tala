@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonInfo {
@@ -95,6 +96,9 @@ pub struct SessionSummary {
     pub created_at: DateTime<Utc>,
     pub closed: bool,
     pub message_count: usize,
+    /// Highest message id read per sender in this session (B021 read receipts).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub read_by: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +154,8 @@ pub struct RecapQuery {
     pub limit: Option<usize>,
     pub from: Option<String>,
     pub cursor: Option<u64>,
+    /// Identity of the reader; used to record read receipts (B021).
+    pub sender: Option<String>,
 }
 
 #[cfg(test)]
