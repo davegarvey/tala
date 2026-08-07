@@ -4092,3 +4092,106 @@ fn test_lone_positional_is_message_not_session() {
 fn rename_session_by_id(home: &std::path::Path, sess: &str, name: &str) {
     tala_ok(home, &["session", "rename", sess, name, "--force"]);
 }
+#[test]
+fn test_status_shows_home_text() {
+    let home = tempfile::tempdir().unwrap();
+    tala_start(home.path());
+
+    let status = tala_ok(home.path(), &["status"]);
+    assert!(
+        status.contains("Home:"),
+        "status text should show Home line: {}",
+        status
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_status_json_has_home_and_flag() {
+    let home = tempfile::tempdir().unwrap();
+    tala_start(home.path());
+
+    // Without TALA_HOME: tala_home_set must be false, home must be present.
+    let (stdout, _stderr, ok) = tala(home.path(), &["status", "--json"]);
+    assert!(ok, "status --json should succeed");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid json");
+    assert_eq!(v["running"], true);
+    assert_eq!(
+        v["tala_home_set"], false,
+        "no TALA_HOME in env for this test"
+    );
+    let home_str = v["home"].as_str().expect("home field present");
+    assert!(
+        home_str.contains(".tala"),
+        "home should point into .tala: {}",
+        home_str
+    );
+
+    // With TALA_HOME set: flag must be true and home must match it.
+    let custom = home.path().join("custom-home");
+    std::fs::create_dir_all(&custom).unwrap();
+    let (stdout, _stderr, ok) = tala_in_env(home.path(), Some(&custom), &["status", "--json"]);
+    assert!(ok, "status --json (TALA_HOME set) should succeed");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid json");
+    assert_eq!(v["tala_home_set"], true, "TALA_HOME was set for this test");
+    assert_eq!(
+        v["home"].as_str().unwrap(),
+        custom.to_str().unwrap(),
+        "home should be the TALA_HOME path"
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_status_no_daemon_json_home() {
+    let home = tempfile::tempdir().unwrap();
+
+    let (stdout, _stderr, ok) = tala(home.path(), &["status", "--json"]);
+    assert!(ok, "status --json should succeed even with no daemon");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid json");
+    assert_eq!(v["running"], false);
+    assert!(
+        v["home"].as_str().is_some(),
+        "not-running status --json should include home: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_status_warns_on_default_home() {
+    let home = tempfile::tempdir().unwrap();
+    tala_start(home.path());
+
+    // TALA_HOME unset (default), daemon running -> stderr warning.
+    let (stdout, stderr, ok) = tala(home.path(), &["status"]);
+    assert!(ok, "status should succeed: {}", stdout);
+    assert!(
+        stderr.contains("TALA_HOME is not set") && stderr.contains("default daemon home"),
+        "stderr should warn about default home: {}",
+        stderr
+    );
+
+    tala_stop(home.path());
+}
+fn tala_in_env(
+    home: &std::path::Path,
+    tala_home: Option<&std::path::Path>,
+    args: &[&str],
+) -> (String, String, bool) {
+    let mut cmd = Command::new(tala_bin());
+    cmd.env("HOME", home);
+    if let Some(th) = tala_home {
+        cmd.env("TALA_HOME", th);
+    } else {
+        cmd.env_remove("TALA_HOME");
+    }
+    cmd.args(args);
+    let output = cmd
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run tala {}: {}", args.join(" "), e));
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    (stdout, stderr, output.status.success())
+}

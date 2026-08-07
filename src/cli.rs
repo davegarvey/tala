@@ -2258,12 +2258,21 @@ async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::R
 }
 
 async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
+    let tala_home_set = std::env::var("TALA_HOME").is_ok();
+    let home_path = store::tala_home();
     let info = match store::read_daemon_json().await {
         Ok(info) => info,
         Err(_) => {
             let home = daemon_home_display();
             if json_output {
-                println!("{}", serde_json::json!({"running": false, "home": home}));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "running": false,
+                        "home": home_path.display().to_string(),
+                        "tala_home_set": tala_home_set,
+                    })
+                );
             } else {
                 println!("no daemon running (checked {}/daemon.json)", home);
                 println!("Start the daemon by running any tala command, or set TALA_HOME if using a custom location");
@@ -2292,6 +2301,8 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
                 "host": info.host,
                 "started_at": info.started_at,
                 "total_unread": total_unread,
+                "home": home_path.display().to_string(),
+                "tala_home_set": tala_home_set,
             });
             println!("{}", serde_json::to_string(&resp).unwrap());
         } else {
@@ -2300,6 +2311,13 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
             println!("  Port: {}", info.port);
             println!("  Host: {}", info.host);
             println!("  Since: {}", info.started_at.format("%Y-%m-%d %H:%M:%S"));
+            println!("  Home: {}", daemon_home_display());
+            if !tala_home_set {
+                eprintln!(
+                    "warning: TALA_HOME is not set — using default daemon home {}",
+                    home_path.display()
+                );
+            }
             if total_unread > 0 {
                 println!(
                     "  Unread: {} new message(s) across all sessions",
@@ -2314,7 +2332,7 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
         if json_output {
             println!(
                 "{}",
-                serde_json::json!({"running": false, "stale_daemon_json": true, "home": home})
+                serde_json::json!({"running": false, "stale_daemon_json": true, "home": home_path.display().to_string(), "tala_home_set": tala_home_set})
             );
         } else {
             println!("daemon.json found at {}/daemon.json but daemon is not reachable (may have crashed)", home);
