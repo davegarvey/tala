@@ -88,7 +88,10 @@ pub enum Commands {
             help = "Wait for a reply after sending (default: return immediately)"
         )]
         wait: bool,
-        #[arg(long = "sender", help = "Override the sender name")]
+        #[arg(
+            long = "sender",
+            help = "Override the sender name (warns if it differs from the configured agent name)"
+        )]
         sender_name: Option<String>,
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
@@ -930,6 +933,24 @@ async fn cmd_send(
     // on send positionals), so a positional message starting with '--' can only
     // arrive via the explicit `--` separator — which is the documented correct
     // usage and needs no warning (B015).
+
+    // B004 interim mitigation: make sender impersonation visible. The final
+    // design (restrict vs authenticate --sender) is an open maintainer
+    // decision; until then, warn when the asserted identity differs from the
+    // project's configured agent name. Non-blocking: sending proceeds.
+    let configured_sender = sender_override.and_then(|s| {
+        let configured = store::get_sender_name(None);
+        if s != configured {
+            eprintln!(
+                "Warning: sending as '{}' which differs from this project's configured agent '{}'. Recipients will see a spoofed sender identity.",
+                s, configured
+            );
+            Some(configured)
+        } else {
+            None
+        }
+    });
+
     // Resolve content
     let content = if let Some(f) = message_file {
         if f == "-" {
@@ -1028,6 +1049,7 @@ async fn cmd_send(
         chat_timeout,
         json_output,
         quiet,
+        configured_sender.as_deref(),
         &host,
         port,
     )
@@ -1043,6 +1065,7 @@ async fn send_content(
     chat_timeout: Option<u64>,
     json_output: bool,
     quiet: bool,
+    configured_sender: Option<&str>,
     host: &str,
     port: u16,
 ) -> anyhow::Result<()> {
@@ -1081,7 +1104,12 @@ async fn send_content(
 
     if !should_wait {
         if json_output {
-            println!("{}", serde_json::to_string(&msg).unwrap());
+            let mut val = serde_json::to_value(&msg).unwrap();
+            if let Some(configured) = configured_sender {
+                val["sender_mismatch"] = serde_json::Value::Bool(true);
+                val["configured_sender"] = serde_json::Value::String(configured.to_string());
+            }
+            println!("{}", serde_json::to_string(&val).unwrap());
         } else if !quiet {
             println!("✓ Sent message {} to session {}", msg.id, msg.session_id);
         }

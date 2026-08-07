@@ -4195,3 +4195,140 @@ fn tala_in_env(
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     (stdout, stderr, output.status.success())
 }
+#[test]
+fn test_send_sender_mismatch_warns_on_stderr() {
+    let home = tempfile::tempdir().unwrap();
+    let project = init_project(home.path(), "agent-alpha");
+    let sess = create_session_in(home.path(), project.path());
+
+    // Mismatched --sender: send still succeeds (exit 0) but warns on stderr.
+    let (stdout, stderr, ok) = tala_in(
+        home.path(),
+        Some(project.path()),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--sender",
+            "spoofed-agent",
+            "impersonation probe",
+        ],
+    );
+    assert!(
+        ok,
+        "send with mismatched --sender must still succeed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("Warning: sending as 'spoofed-agent'"),
+        "mismatched --sender should warn on stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("agent-alpha"),
+        "warning should name the configured agent: {stderr}"
+    );
+
+    // Matching --sender: no warning.
+    let (stdout, stderr, ok) = tala_in(
+        home.path(),
+        Some(project.path()),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--sender",
+            "agent-alpha",
+            "legit message",
+        ],
+    );
+    assert!(ok, "send with matching --sender should succeed: {stdout}");
+    assert!(
+        !stderr.contains("Warning: sending as"),
+        "matching --sender must not warn: {stderr}"
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_sender_mismatch_json_signal() {
+    let home = tempfile::tempdir().unwrap();
+    let project = init_project(home.path(), "agent-alpha");
+    let sess = create_session_in(home.path(), project.path());
+
+    // Mismatched --sender with --json: structured signal in the response,
+    // warning still on stderr.
+    let (stdout, stderr, ok) = tala_in(
+        home.path(),
+        Some(project.path()),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--sender",
+            "spoofed-agent",
+            "json probe",
+            "--json",
+        ],
+    );
+    assert!(
+        ok,
+        "send --json with mismatched --sender should succeed: {stdout}"
+    );
+    let val: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("send --json emits JSON");
+    assert_eq!(
+        val["sender_mismatch"],
+        serde_json::Value::Bool(true),
+        "mismatch must be flagged: {stdout}"
+    );
+    assert_eq!(
+        val["configured_sender"],
+        serde_json::Value::String("agent-alpha".into()),
+        "configured sender must be named: {stdout}"
+    );
+    assert!(
+        stderr.contains("Warning: sending as"),
+        "warning should also appear on stderr in --json mode: {stderr}"
+    );
+
+    // Matching --sender with --json: no mismatch fields.
+    let (stdout, _stderr, _ok) = tala_in(
+        home.path(),
+        Some(project.path()),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--sender",
+            "agent-alpha",
+            "json legit",
+            "--json",
+        ],
+    );
+    let val: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("send --json emits JSON");
+    assert_ne!(
+        val.get("sender_mismatch"),
+        Some(&serde_json::Value::Bool(true)),
+        "matching sender must not flag a mismatch: {stdout}"
+    );
+
+    tala_stop(home.path());
+}
+fn init_project(home: &std::path::Path, name: &str) -> tempfile::TempDir {
+    let project = tempfile::tempdir().unwrap();
+    let (stdout, stderr, ok) = tala_in(home, Some(project.path()), &["init", name]);
+    assert!(
+        ok,
+        "tala init {name} failed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    project
+}
+fn create_session_in(home: &std::path::Path, project: &std::path::Path) -> String {
+    let (stdout, stderr, ok) = tala_in(home, Some(project), &["session", "create"]);
+    assert!(
+        ok,
+        "tala session create failed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    stdout.lines().next().unwrap_or("").trim().to_string()
+}
