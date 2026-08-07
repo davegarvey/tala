@@ -1397,6 +1397,137 @@ fn test_listen_timeout() {
 }
 
 #[test]
+fn test_listen_banner_text() {
+    let home = tempfile::tempdir().unwrap();
+
+    // No traffic: listen must still announce connection and close (B007).
+    let output = std::process::Command::new(tala_bin())
+        .env("HOME", home.path())
+        .args(["listen", "--since", "0", "--timeout", "3"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "listen should exit 0: stdout={} stderr={}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("Listening on tala daemon"),
+        "text listen should print a connection banner: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("connection closed"),
+        "text listen should note the stream closed: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("(0 message(s))"),
+        "closed note should carry the message count: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_listen_banner_json_pure_stdout() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    let child = std::process::Command::new(tala_bin())
+        .env("HOME", home.path())
+        .args(["listen", "--since", "0", "--json", "--timeout", "5"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to start listen");
+
+    std::thread::sleep(std::time::Duration::from_millis(700));
+
+    tala_ok(
+        home.path(),
+        &["send", "--session", &sess, "banner-json-msg"],
+    );
+
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // stdout must stay a pure JSON event stream (B007 channel discipline).
+    assert!(
+        !stdout.contains("Listening on"),
+        "json listen stdout must not carry the banner: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("banner-json-msg"),
+        "json listen should deliver the message: {}",
+        stdout
+    );
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        assert!(
+            serde_json::from_str::<serde_json::Value>(line).is_ok(),
+            "json listen stdout line must parse as JSON: {}",
+            line
+        );
+    }
+    assert!(
+        stderr.contains("[listen] connected to tala daemon"),
+        "json listen banner should go to stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("connection closed (1 message(s))"),
+        "json listen closed note should carry the count on stderr: {}",
+        stderr
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_stream_banner() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    let output = std::process::Command::new(tala_bin())
+        .env("HOME", home.path())
+        .args([
+            "stream",
+            "--session",
+            &sess,
+            "--since",
+            "0",
+            "--timeout",
+            "3",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "stream should exit 0: {}", stdout);
+    assert!(
+        stdout.contains("Streaming session") && stdout.contains(&sess),
+        "stream should print a connection banner with the session id: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
 fn test_listen_streams_all_sessions() {
     let home = tempfile::tempdir().unwrap();
     let sess1 = tala_start(home.path());

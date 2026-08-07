@@ -1286,6 +1286,19 @@ async fn cmd_watch(
         fail(json_output, &err.error, "SESSION_NOT_FOUND");
     }
 
+    // B007: visible connection status (text → stdout, --json → stderr).
+    if json_output {
+        eprintln!(
+            "[stream] connected to tala daemon at {}:{} (session {}, since id {})",
+            host, port, session_id, since_id
+        );
+    } else {
+        println!(
+            "Streaming session {} from tala daemon at {}:{} (since id {})...",
+            session_id, host, port, since_id
+        );
+    }
+
     let timeout_dur = timeout.filter(|&t| t > 0).map(Duration::from_secs);
 
     let mut buffer = String::new();
@@ -1410,9 +1423,25 @@ async fn cmd_listen(
         fail(json_output, &err.error, "OBSERVE_ERROR");
     }
 
+    // B007: visible connection status. Text banner goes to stdout (matches the
+    // "Waiting for a new session…" convention in wait); in --json mode it goes
+    // to stderr so stdout stays a pure JSON event stream.
+    if json_output {
+        eprintln!(
+            "[listen] connected to tala daemon at {}:{} (since id {})",
+            host, port, since_id
+        );
+    } else {
+        println!(
+            "Listening on tala daemon at {}:{} (all sessions, since id {})...",
+            host, port, since_id
+        );
+    }
+
     let mut buffer = String::new();
     let mut stream = resp.bytes_stream();
     let mut max_msg_id = since_id;
+    let mut message_count: u64 = 0;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -1430,9 +1459,16 @@ async fn cmd_listen(
                 }
             }
 
+            let evt = serde_json::from_str::<ObserveEvent>(&data);
+            if let Ok(ref evt) = evt {
+                if evt.r#type == "message" {
+                    message_count += 1;
+                }
+            }
+
             if json_output {
                 println!("{}", data);
-            } else if let Ok(evt) = serde_json::from_str::<ObserveEvent>(&data) {
+            } else if let Ok(evt) = evt {
                 match evt.r#type.as_str() {
                     "message" => {
                         if let Some(msg) = evt.message {
@@ -1457,6 +1493,14 @@ async fn cmd_listen(
                 }
             }
         }
+    }
+
+    // B007: end-of-stream note with a message tally so connected-but-quiet is
+    // distinguishable from a dead listener.
+    if json_output {
+        eprintln!("[listen] connection closed ({} message(s))", message_count);
+    } else {
+        println!("[connection closed] ({} message(s))", message_count);
     }
 
     if max_msg_id > since_id {
