@@ -860,6 +860,18 @@ async fn auto_create_session(
         })
         .send()
         .await?;
+    if !resp.status().is_success() {
+        if resp.status().as_u16() == 409 {
+            // B017: duplicate session name — surface the daemon's message.
+            let err: ErrorResponse = resp.json().await?;
+            fail(json_output, &err.error, "SESSION_NAME_TAKEN");
+        }
+        fail(
+            json_output,
+            format!("failed to create session (HTTP {})", resp.status().as_u16()),
+            "SESSION_CREATE_FAILED",
+        );
+    }
     let session: CreateSessionResponse = resp.json().await?;
     store::write_active_session(&session.id).await?;
     // B029: a session the waiter itself creates is "seen" from birth (cursor
@@ -2189,7 +2201,7 @@ async fn cmd_session_rename(
     if !status.is_success() {
         let err: ErrorResponse = resp.json().await?;
         match status.as_u16() {
-            409 => fail(json_output, &err.error, "SESSION_ALREADY_NAMED"),
+            409 => fail(json_output, &err.error, "SESSION_NAME_TAKEN"),
             _ => fail(json_output, &err.error, "SESSION_NOT_FOUND"),
         }
     }
