@@ -867,6 +867,284 @@ fn test_wait_new_ignores_own_session_create() {
 }
 
 #[test]
+fn test_wait_new_does_not_redeliver_consumed_message() {
+    let home = tempfile::tempdir().unwrap();
+    let alpha_proj = home.path().join("alpha-proj");
+    let beta_proj = home.path().join("beta-proj");
+    std::fs::create_dir_all(&alpha_proj).unwrap();
+    std::fs::create_dir_all(&beta_proj).unwrap();
+    run_init_in(&alpha_proj, home.path(), &["init", "alpha"]);
+    run_init_in(&beta_proj, home.path(), &["init", "beta"]);
+
+    // alpha creates a session and sends a message (B029: consumed traffic must
+    // never re-deliver on a later wait --new-session)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha session create failed: {}", sout);
+    let alpha_sess = sout.trim().to_string();
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &alpha_sess, "consumed-question"],
+    );
+    assert!(ok, "alpha send failed: {}", sout);
+
+    // beta reads the message (history advances beta's per-session cursor)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["history", &alpha_sess]);
+    assert!(ok, "beta history failed: {}", sout);
+    assert!(
+        sout.contains("consumed-question"),
+        "beta should see the message: {}",
+        sout
+    );
+
+    // beta waits --new-session: the consumed message must NOT be re-delivered
+    // (JSON mode reports the timeout in-band and exits 0)
+    let (stdout, _stderr, ok) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["wait", "--new-session", "--timeout", "4", "--json"],
+    );
+    assert!(ok, "wait --new-session should exit 0: {}", stdout);
+    assert!(
+        stdout.contains("\"timeout\":true"),
+        "should report a timeout instead of re-delivering consumed msg: {}",
+        stdout
+    );
+
+    // a genuinely NEW session from alpha must still be delivered
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha second create failed: {}", sout);
+    let alpha_sess2 = sout.trim().to_string();
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &alpha_sess2, "fresh-question"],
+    );
+    assert!(ok, "alpha second send failed: {}", sout);
+
+    let (stdout, _stderr, ok) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["wait", "--new-session", "--timeout", "10", "--json"],
+    );
+    assert!(ok, "wait --new-session should succeed: {}", stdout);
+    assert!(
+        stdout.contains(&alpha_sess2),
+        "should return the new session: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("fresh-question"),
+        "should include the new question: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_wait_new_prefers_freshest_never_seen_session() {
+    let home = tempfile::tempdir().unwrap();
+    let alpha_proj = home.path().join("alpha-proj");
+    let beta_proj = home.path().join("beta-proj");
+    std::fs::create_dir_all(&alpha_proj).unwrap();
+    std::fs::create_dir_all(&beta_proj).unwrap();
+    run_init_in(&alpha_proj, home.path(), &["init", "alpha"]);
+    run_init_in(&beta_proj, home.path(), &["init", "beta"]);
+
+    // OLDER session with an unread incoming message (stale backlog candidate)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha create failed: {}", sout);
+    let stale_sess = sout.trim().to_string();
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &stale_sess, "stale-question"],
+    );
+    assert!(ok, "alpha send failed: {}", sout);
+    std::thread::sleep(std::time::Duration::from_millis(600));
+
+    // NEWER session with a fresh question (also never-seen by beta)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha create failed: {}", sout);
+    let fresh_sess = sout.trim().to_string();
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &fresh_sess, "fresh-question"],
+    );
+    assert!(ok, "alpha send failed: {}", sout);
+
+    // beta waits --new-session: must get the FRESH session, not the stale one
+    let (stdout, _stderr, ok) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["wait", "--new-session", "--timeout", "10", "--json"],
+    );
+    assert!(ok, "wait --new-session should succeed: {}", stdout);
+    assert!(
+        stdout.contains(&fresh_sess),
+        "should return the freshest session: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains(&stale_sess),
+        "must not return the stale session: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("fresh-question"),
+        "should include the fresh question: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_wait_new_excludes_waiter_created_session() {
+    let home = tempfile::tempdir().unwrap();
+    let alpha_proj = home.path().join("alpha-proj");
+    let beta_proj = home.path().join("beta-proj");
+    std::fs::create_dir_all(&alpha_proj).unwrap();
+    std::fs::create_dir_all(&beta_proj).unwrap();
+    run_init_in(&alpha_proj, home.path(), &["init", "alpha"]);
+    run_init_in(&beta_proj, home.path(), &["init", "beta"]);
+
+    // beta creates a scratch session (cursor entry written on create); alpha
+    // replies into it. The scratch session is beta's own — never a handshake.
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["session", "create"]);
+    assert!(ok, "beta create failed: {}", sout);
+    let beta_sess = sout.trim().to_string();
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &beta_sess, "reply-in-beta-scratch"],
+    );
+    assert!(ok, "alpha send failed: {}", sout);
+
+    // beta waits --new-session: its own scratch session is excluded → timeout
+    // (JSON mode reports the timeout in-band and exits 0)
+    let (stdout, _stderr, ok) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["wait", "--new-session", "--timeout", "4", "--json"],
+    );
+    assert!(ok, "wait --new-session should exit 0: {}", stdout);
+    assert!(
+        stdout.contains("\"timeout\":true"),
+        "should report a timeout (own scratch session excluded): {}",
+        stdout
+    );
+
+    // alpha's genuinely new session is then delivered
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha create failed: {}", sout);
+    let fresh_sess = sout.trim().to_string();
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &fresh_sess, "fresh-question"],
+    );
+    assert!(ok, "alpha send failed: {}", sout);
+
+    let (stdout, _stderr, ok) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["wait", "--new-session", "--timeout", "10", "--json"],
+    );
+    assert!(ok, "wait --new-session should succeed: {}", stdout);
+    assert!(
+        stdout.contains(&fresh_sess),
+        "should return alpha's new session: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains(&beta_sess),
+        "must not return beta's own scratch session: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("fresh-question"),
+        "should include the question: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_wait_new_prefers_never_seen_over_seen_session() {
+    let home = tempfile::tempdir().unwrap();
+    let alpha_proj = home.path().join("alpha-proj");
+    let beta_proj = home.path().join("beta-proj");
+    std::fs::create_dir_all(&alpha_proj).unwrap();
+    std::fs::create_dir_all(&beta_proj).unwrap();
+    run_init_in(&alpha_proj, home.path(), &["init", "alpha"]);
+    run_init_in(&beta_proj, home.path(), &["init", "beta"]);
+
+    // beta participates in S1 (cursor entry via create + send)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["session", "create"]);
+    assert!(ok, "beta create failed: {}", sout);
+    let seen_sess = sout.trim().to_string();
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["send", "--session", &seen_sess, "beta-note"],
+    );
+    assert!(ok, "beta send failed: {}", sout);
+
+    // alpha creates a NEW session with a question (never-seen by beta)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha create failed: {}", sout);
+    let fresh_sess = sout.trim().to_string();
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &fresh_sess, "fresh-question"],
+    );
+    assert!(ok, "alpha send failed: {}", sout);
+
+    // alpha then sends a NEWER message into the SEEN session (S1): fresher
+    // timestamp, but S1 is known to beta — never-seen S2 must still win
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &[
+            "send",
+            "--session",
+            &seen_sess,
+            "newer-reply-in-seen-session",
+        ],
+    );
+    assert!(ok, "alpha send failed: {}", sout);
+
+    let (stdout, _stderr, ok) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["wait", "--new-session", "--timeout", "10", "--json"],
+    );
+    assert!(ok, "wait --new-session should succeed: {}", stdout);
+    assert!(
+        stdout.contains(&fresh_sess),
+        "should return the never-seen session: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains(&seen_sess),
+        "must not return the seen session even with a newer message: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("fresh-question"),
+        "should include the question: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
 fn test_recap_from_filter() {
     let home = tempfile::tempdir().unwrap();
     let sess = tala_start(home.path());

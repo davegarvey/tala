@@ -503,6 +503,20 @@ fn daemon_url(host: &str, port: u16, path: &str) -> String {
     format!("http://{}:{}{}", host, port, path)
 }
 
+/// Build the `&seen=` query suffix for wait-new requests: the waiter's
+/// per-session read cursors (URL-encoded JSON map) so the daemon can exclude
+/// sessions the waiter already knows (B029). Empty when no cursors exist.
+async fn wait_new_seen_param() -> String {
+    let cursors = store::read_cursors().await;
+    if cursors.is_empty() {
+        return String::new();
+    }
+    match serde_json::to_string(&cursors) {
+        Ok(json) => format!("&seen={}", percent_encode(&json)),
+        Err(_) => String::new(),
+    }
+}
+
 async fn resolve_session_id(
     host: &str,
     port: u16,
@@ -766,6 +780,9 @@ async fn auto_create_session(
         .await?;
     let session: CreateSessionResponse = resp.json().await?;
     store::write_active_session(&session.id).await?;
+    // B029: a session the waiter itself creates is "seen" from birth (cursor
+    // entry) — never a candidate for its own `wait --new-session` scan.
+    let _ = store::write_cursor(&session.id, 0).await;
     if !quiet && !json_output {
         println!("{}", session.id);
     }
@@ -1095,12 +1112,13 @@ async fn cmd_wait(
                         Some(s) => format!("&sender={}", s),
                         None => String::new(),
                     };
+                    let seen_param = wait_new_seen_param().await;
                     let new_url = daemon_url(
                         &host,
                         port,
                         &format!(
-                            "/api/sessions/wait-new?timeout_secs={}{}",
-                            wait_timeout, sender_param
+                            "/api/sessions/wait-new?timeout_secs={}{}{}",
+                            wait_timeout, sender_param, seen_param
                         ),
                     );
                     let resp = client.get(&new_url).send().await?;
@@ -2062,12 +2080,13 @@ async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::R
         Some(s) => format!("&sender={}", s),
         None => String::new(),
     };
+    let seen_param = wait_new_seen_param().await;
     let url = daemon_url(
         &host,
         port,
         &format!(
-            "/api/sessions/wait-new?timeout_secs={}{}",
-            timeout, sender_param
+            "/api/sessions/wait-new?timeout_secs={}{}{}",
+            timeout, sender_param, seen_param
         ),
     );
     let client = reqwest::Client::new();

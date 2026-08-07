@@ -350,6 +350,11 @@ struct WaitNewParams {
     /// sender). When present, the wait only returns sessions that carry a
     /// message from a DIFFERENT agent, and ignores the waiter's own creates.
     sender: Option<String>,
+    /// The waiter's per-session read cursors (URL-encoded JSON map of
+    /// session_id -> last-seen message id, from .tala/cursors.json). Sessions
+    /// the waiter has a cursor entry for (created/sent-in/read) are never
+    /// "new" to it (B029) and are excluded from the pre-existing scan.
+    seen: Option<String>,
 }
 
 async fn wait_new_session(
@@ -358,13 +363,23 @@ async fn wait_new_session(
 ) -> impl IntoResponse {
     let timeout_secs = params.timeout_secs.unwrap_or(60);
     let caller = params.sender;
+    // B029: the waiter's per-session read state. Sessions with a cursor entry
+    // are known to the waiter; only never-seen sessions can satisfy the
+    // pre-existing scan.
+    let seen: HashMap<String, u64> = params
+        .seen
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
 
     // B003: when the waiter identifies itself, first scan for sessions that
     // ALREADY exist with an incoming message from another agent. The event loop
     // below only reacts to future events, so a session created before the wait
-    // started would otherwise be missed forever.
+    // started would otherwise be missed forever. B029: the scan only returns
+    // NEVER-SEEN sessions (no cursor entry), freshest first — stale backlog in
+    // sessions the waiter already knows never satisfies `wait --new-session`.
     if let Some(ref me) = caller {
-        if let Some((sid, msg)) = find_incoming_session(&state.store, me).await {
+        if let Some((sid, msg)) = find_incoming_session(&state.store, me, &seen).await {
             let mut resp = serde_json::json!({"session_id": sid});
             resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
             return (StatusCode::OK, Json(resp)).into_response();
@@ -437,28 +452,38 @@ async fn wait_new_session(
     }
 }
 
-/// Find the session (if any) that already has a message from an agent other
-/// than `me`, preferring the most recently active one. Used by
-/// `wait_new_session` so a pre-existing session with an incoming question is
-/// returned immediately (B003).
-async fn find_incoming_session(store: &Arc<Store>, me: &str) -> Option<(String, Message)> {
+/// Find the session (if any) that the waiter has NEVER seen (no cursor entry)
+/// and that already has a message from an agent other than `me`, preferring the
+/// most recently active one. Used by `wait_new_session` so a pre-existing
+/// session with an incoming question is returned immediately (B003) while
+/// stale backlog in sessions the waiter already knows is ignored (B029).
+async fn find_incoming_session(
+    store: &Arc<Store>,
+    me: &str,
+    seen: &HashMap<String, u64>,
+) -> Option<(String, Message)> {
     let sessions = store.list_sessions().await;
     let mut best: Option<(String, Message)> = None;
     for s in sessions {
         if s.closed {
             continue;
         }
+        // B029: any cursor entry (created, sent in, or read) marks the session
+        // as known to the waiter — never a candidate for `--new-session`.
+        if seen.contains_key(&s.id) {
+            continue;
+        }
         let msgs = store.get_messages_since(&s.id, 0).await;
-        for m in msgs {
-            if m.sender == me {
-                continue;
-            }
+        // Freshest incoming message from another agent (the waiter cannot have
+        // sent here: sending records a cursor entry, excluding the session).
+        let freshest_incoming = msgs.iter().filter(|m| m.sender != me).next_back();
+        if let Some(m) = freshest_incoming {
             let is_better = match &best {
                 Some((_, bm)) => m.timestamp > bm.timestamp,
                 None => true,
             };
             if is_better {
-                best = Some((s.id.clone(), m));
+                best = Some((s.id.clone(), m.clone()));
             }
         }
     }
