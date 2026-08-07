@@ -873,6 +873,99 @@ fn test_send_to_closed_session_fails() {
 }
 
 #[test]
+fn test_send_json_nothing_to_send_is_json() {
+    let home = tempfile::tempdir().unwrap();
+    // One session exists (open) so the hint has something to point at.
+    let sess = tala_start(home.path());
+    // Fresh project dir with NO active session -> "Nothing to send" path.
+    let project = tempfile::tempdir().unwrap();
+    run_init_in(project.path(), home.path(), &["init"]);
+
+    let (_stdout, stderr, ok) = tala_in(home.path(), Some(project.path()), &["send", "--json"]);
+    assert!(!ok, "send --json with nothing to send should fail");
+    assert!(
+        !stderr.starts_with("Error:"),
+        "--json error should not be the human block: {}",
+        stderr
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be valid JSON");
+    assert_eq!(
+        v["code"], "NOTHING_TO_SEND",
+        "code should be NOTHING_TO_SEND"
+    );
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Nothing to send"),
+        "error should mention Nothing to send"
+    );
+    assert!(
+        v["error"].as_str().unwrap_or("").contains(&sess),
+        "hint should mention the open session id"
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_json_empty_message_is_json() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    let (_stdout, stderr, ok) = tala(home.path(), &["send", "--session", &sess, "--json", ""]);
+    assert!(!ok, "send --json empty message should fail");
+    let v: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be valid JSON");
+    assert_eq!(v["code"], "EMPTY_MESSAGE", "code should be EMPTY_MESSAGE");
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_hint_says_open_session_not_active() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+    let project = tempfile::tempdir().unwrap();
+    run_init_in(project.path(), home.path(), &["init"]);
+
+    let (_stdout, stderr, ok) = tala_in(home.path(), Some(project.path()), &["send"]);
+    assert!(!ok, "bare send with nothing to send should fail");
+    assert!(
+        stderr.contains("Nothing to send"),
+        "human error should mention Nothing to send"
+    );
+    assert!(
+        stderr.contains(&format!("Open session: {}", sess)),
+        "hint should say 'Open session:' with the open session id: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("Active session:"),
+        "hint must not mislabel an open session as active: {}",
+        stderr
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_json_closed_session_still_json() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+    tala_ok(home.path(), &["close", &sess]);
+
+    let (_stdout, stderr, ok) = tala(home.path(), &["send", "--session", &sess, "--json", "hi"]);
+    assert!(!ok, "send to closed session should fail");
+    let v: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr should be valid JSON");
+    assert_eq!(v["code"], "SESSION_CLOSED", "code should be SESSION_CLOSED");
+
+    tala_stop(home.path());
+}
+
+#[test]
 fn test_close_already_closed_fails() {
     let home = tempfile::tempdir().unwrap();
     let sess = tala_start(home.path());

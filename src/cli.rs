@@ -805,18 +805,22 @@ async fn cmd_send(
         let mut hint = String::new();
         if let Ok(req) = reqwest::get(&daemon_url(&host, port, "/api/sessions")).await {
             if let Ok(sessions) = req.json::<Vec<SessionSummary>>().await {
-                let active: Vec<_> = sessions.iter().filter(|s| !s.closed).collect();
-                if !active.is_empty() {
-                    hint = format!("\nActive session: {} {}. Set it with `tala use` or target it with `tala send --session <id>`.",
-                        active[0].id,
-                        active[0].name.as_deref().unwrap_or(""),
+                let open: Vec<_> = sessions.iter().filter(|s| !s.closed).collect();
+                if !open.is_empty() {
+                    hint = format!("\nOpen session: {} {}. Set it with `tala use` or target it with `tala send --session <id>`.",
+                        open[0].id,
+                        open[0].name.as_deref().unwrap_or(""),
                     );
                 }
             }
         }
-        anyhow::bail!(
-            "Nothing to send. Use `tala session create` to create a session without a message.{}",
-            hint
+        fail(
+            json_output,
+            format!(
+                "Nothing to send. Use `tala session create` to create a session without a message.{}",
+                hint
+            ),
+            "NOTHING_TO_SEND",
         );
     }
 
@@ -845,7 +849,7 @@ async fn cmd_send(
         })?
     } else if let Some(msg) = &message {
         if msg.is_empty() {
-            anyhow::bail!("Message cannot be empty.");
+            fail(json_output, "Message cannot be empty.", "EMPTY_MESSAGE");
         }
         msg.clone()
     } else {
