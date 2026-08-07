@@ -3861,3 +3861,234 @@ fn test_read_receipts_self_read_json_but_not_text() {
 
     tala_stop(home.path());
 }
+#[test]
+fn test_send_by_name_routes_to_named_session() {
+    let home = tempfile::tempdir().unwrap();
+    let project_b = tempfile::tempdir().unwrap();
+
+    // Session A (via tala_start's own project dir), renamed to "target-name"
+    let sess_a = tala_start(home.path());
+    rename_session_by_id(home.path(), &sess_a, "target-name");
+
+    // Session B in project_b, active there
+    let sess_b = tala_start(home.path());
+    rename_session_by_id(home.path(), &sess_b, "other-name");
+
+    // From project_b (active=sess_b), send to the NAME target-name
+    let out = tala_in(
+        home.path(),
+        Some(project_b.path()),
+        &["send", "target-name", "hello-by-name"],
+    );
+    assert!(out.2, "send by name should succeed: {}", out.0);
+
+    // Message must land in sess_a (named), NOT in active sess_b
+    let recap_a = tala_ok(home.path(), &["history", &sess_a]);
+    assert!(
+        recap_a.contains("hello-by-name"),
+        "named session should receive the message: {}",
+        recap_a
+    );
+    let recap_b = tala_ok(home.path(), &["history", &sess_b]);
+    assert!(
+        !recap_b.contains("hello-by-name"),
+        "active session must NOT receive a message addressed by name: {}",
+        recap_b
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_session_flag_accepts_name() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let sess = tala_start(home.path());
+    rename_session_by_id(home.path(), &sess, "flag-name");
+
+    let out = tala_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "--session", "flag-name", "hello-via-flag"],
+    );
+    assert!(out.2, "send --session <name> should succeed: {}", out.0);
+
+    let recap = tala_ok(home.path(), &["history", &sess]);
+    assert!(
+        recap.contains("hello-via-flag"),
+        "message should land in the named session: {}",
+        recap
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_by_name_unknown_errors_without_sending() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let sess = tala_start(home.path());
+    let (stdout, stderr, ok) = tala_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "no-such-session-name", "should-not-send"],
+    );
+    assert!(!ok, "send to unknown name should fail");
+    assert!(
+        stderr.contains("no-such-session-name") || stdout.contains("no-such-session-name"),
+        "error should mention the unknown name: stderr={} stdout={}",
+        stderr,
+        stdout
+    );
+
+    // Nothing may be sent to the active session
+    let recap = tala_ok(home.path(), &["history", &sess]);
+    assert!(
+        !recap.contains("should-not-send"),
+        "message must not be silently sent to another session: {}",
+        recap
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_history_by_name() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+    rename_session_by_id(home.path(), &sess, "hist-name");
+
+    tala_ok(home.path(), &["send", &sess, "message for history-by-name"]);
+
+    let out = tala_ok(home.path(), &["history", "hist-name"]);
+    assert!(
+        out.contains("message for history-by-name"),
+        "history by name should show the message: {}",
+        out
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_close_by_name() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+    rename_session_by_id(home.path(), &sess, "close-name");
+
+    let out = tala_in(home.path(), None, &["close", "close-name"]);
+    assert!(out.2, "close by name should succeed: {}", out.0);
+
+    let list = tala_ok(home.path(), &["list"]);
+    assert!(
+        list.contains("close-name") && list.contains("closed"),
+        "list should show the session closed: {}",
+        list
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_rename_by_name() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+    rename_session_by_id(home.path(), &sess, "old-name");
+
+    let out = tala_in(
+        home.path(),
+        None,
+        &["session", "rename", "old-name", "new-name"],
+    );
+    assert!(out.2, "rename by name should succeed: {}", out.0);
+
+    let list = tala_ok(home.path(), &["list"]);
+    assert!(
+        list.contains("new-name") && !list.contains("old-name"),
+        "list should show the new name: {}",
+        list
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_wait_by_name() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+    rename_session_by_id(home.path(), &sess, "wait-name");
+
+    // Wait with no traffic should time out cleanly (and resolve the name first)
+    let (stdout, stderr, ok) = tala(home.path(), &["wait", "wait-name", "--timeout", "2"]);
+    assert!(
+        !stderr.contains("not found"),
+        "wait by name must resolve the name, not fail: stderr={}",
+        stderr
+    );
+    assert!(
+        ok || stderr.contains("timeout"),
+        "wait by name on empty session should time out: ok={} stdout={} stderr={}",
+        ok,
+        stdout,
+        stderr
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_ambiguous_name_errors() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let sess1 = tala_start(home.path());
+    rename_session_by_id(home.path(), &sess1, "dup-name");
+    let sess2 = tala_start(home.path());
+    rename_session_by_id(home.path(), &sess2, "dup-name");
+
+    let (_stdout, stderr, ok) = tala_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "dup-name", "ambiguous message"],
+    );
+    assert!(!ok, "send to ambiguous name should fail");
+    assert!(
+        stderr.contains("dup-name")
+            && (stderr.contains("Multiple") || stderr.contains("ambiguous")),
+        "error should mention ambiguity: {}",
+        stderr
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_lone_positional_is_message_not_session() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+
+    let sess = tala_start(home.path());
+    rename_session_by_id(home.path(), &sess, "lone-name");
+
+    // A lone positional that is NOT a session name must remain a message to active
+    let out = tala_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "just a plain message"],
+    );
+    assert!(out.2, "lone positional should send as message: {}", out.0);
+
+    let recap = tala_ok(home.path(), &["history", &sess]);
+    assert!(
+        recap.contains("just a plain message"),
+        "lone positional should go to active session: {}",
+        recap
+    );
+
+    tala_stop(home.path());
+}
+fn rename_session_by_id(home: &std::path::Path, sess: &str, name: &str) {
+    tala_ok(home, &["session", "rename", sess, name, "--force"]);
+}
