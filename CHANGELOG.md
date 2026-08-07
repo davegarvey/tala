@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.2] - 2026-08-07
+
+### Fixed
+
+- show connection status and message tally in listen/stream (B007) (#59)
+- history/wait --limit returns newest N messages, not oldest (B016) (#53)
+- --json error paths emit JSON; honest 'Open session' hint in send (B031, B030) (#52)
+- close of active session clears active marker from all paths (B028) (#50)
+- reject unknown send flags instead of silently misrouting (B026, B015) (#49)
+- persist message history across daemon restarts (B024, B027) (#47)
+- disambiguate list status column, empty-history note, reopen no longer steals active session (#45)
+
 ## [0.25.1] - 2026-08-06
 
 ### Changed
