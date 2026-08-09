@@ -1803,3 +1803,379 @@ fn test_stream_alias_works() {
 
     tala_stop(home.path());
 }
+
+// Creates a session in a named project dir and returns (session_id, project_dir)
+fn tala_start_in(home: &std::path::Path, name: &str) -> (String, std::path::PathBuf) {
+    let project = home.join(name);
+    std::fs::create_dir_all(&project).unwrap();
+    let (stdout, stderr, ok) = tala_in(home, Some(&project), &["session", "create"]);
+    assert!(ok, "session create failed: {} {}", stdout, stderr);
+    let sess = stdout.lines().next().unwrap_or("").trim().to_string();
+    (sess, project)
+}
+
+// --- Intent protocol tests ---
+
+#[test]
+fn test_send_intent_badges() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    tala_ok(
+        home.path(),
+        &["send", "--session", &sess, "--intent", "req", "question"],
+    );
+    tala_ok(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--intent",
+            "reply",
+            "--reply-to",
+            "1",
+            "answer",
+        ],
+    );
+    tala_ok(home.path(), &["send", "--session", &sess, "plain-status"]);
+
+    let (stdout, _stderr, ok) = tala(home.path(), &["history", "--session", &sess]);
+    assert!(ok, "history should succeed");
+    assert!(
+        stdout.contains("[REQ]"),
+        "history shows req badge: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("[REPLY→1]"),
+        "history shows correlated reply badge: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("[FYI]"),
+        "history shows default fyi: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_invalid_intent_rejected() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    let (_stdout, stderr, ok) = tala(
+        home.path(),
+        &["send", "--session", &sess, "--intent", "maybe", "hi"],
+    );
+    assert!(!ok, "invalid intent should fail");
+    assert!(
+        stderr.contains("invalid --intent"),
+        "error should name the flag: {}",
+        stderr
+    );
+
+    let (_stdout, stderr, ok) = tala(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--intent",
+            "out",
+            "--expect-reply",
+            "bye",
+        ],
+    );
+    assert!(!ok, "expect-reply with out should fail");
+    assert!(
+        stderr.contains("--expect-reply is only valid"),
+        "error should explain modifier rule: {}",
+        stderr
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_reply_to_invalid_id_rejected() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    let (_stdout, stderr, ok) = tala(
+        home.path(),
+        &["send", "--session", &sess, "--reply-to", "999", "hi"],
+    );
+    assert!(!ok, "reply to nonexistent id should fail");
+    assert!(stderr.contains("999"), "error names the bad id: {}", stderr);
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_pending_lists_and_clears() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    tala_ok(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--sender",
+            "alpha",
+            "--intent",
+            "req",
+            "help me",
+        ],
+    );
+    let (stdout, _stderr, ok) = tala(home.path(), &["pending"]);
+    assert!(ok, "pending should succeed");
+    assert!(
+        stdout.contains("help me"),
+        "pending lists the request: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("--reply-to 1"),
+        "pending suggests the answer command: {}",
+        stdout
+    );
+
+    tala_ok(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--sender",
+            "beta",
+            "--intent",
+            "reply",
+            "--reply-to",
+            "1",
+            "fixed",
+        ],
+    );
+    let (stdout, _stderr, _) = tala(home.path(), &["pending"]);
+    assert!(
+        !stdout.contains("help me"),
+        "answered request leaves pending: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_pending_excludes_closed_sessions() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    tala_ok(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--intent",
+            "req",
+            "orphan-request",
+        ],
+    );
+    tala_ok(home.path(), &["close", &sess]);
+
+    let (stdout, _stderr, _) = tala(home.path(), &["pending"]);
+    assert!(
+        !stdout.contains("orphan-request"),
+        "closed sessions excluded from pending: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_wait_strict_reply_matching() {
+    let home = tempfile::tempdir().unwrap();
+    let (sess, project) = tala_start_in(home.path(), "proj-a");
+
+    tala_ok(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--sender",
+            "alpha",
+            "--intent",
+            "req",
+            "question?",
+        ],
+    );
+
+    let mut child = std::process::Command::new(tala_bin())
+        .env("HOME", home.path())
+        .current_dir(&project)
+        .args([
+            "send",
+            "--session",
+            &sess,
+            "--wait",
+            "--timeout",
+            "15",
+            "--sender",
+            "alpha",
+            "question2?",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    // Unrelated FYI must NOT satisfy the strict wait
+    tala_ok(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--sender",
+            "beta",
+            "--intent",
+            "fyi",
+            "unrelated-chatter",
+        ],
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "unrelated fyi should not end the strict wait"
+    );
+
+    // The correlated reply ends the wait
+    tala_ok(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--sender",
+            "beta",
+            "--intent",
+            "reply",
+            "--reply-to",
+            "2",
+            "the-real-answer",
+        ],
+    );
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "wait should succeed: {}", stdout);
+    assert!(
+        stdout.contains("the-real-answer"),
+        "wait returns the correlated reply: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("unrelated-chatter"),
+        "wait must not return the unrelated fyi: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_wait_overlap_warning() {
+    let home = tempfile::tempdir().unwrap();
+    let (sess, project) = tala_start_in(home.path(), "proj-a");
+
+    let mut first = std::process::Command::new(tala_bin())
+        .env("HOME", home.path())
+        .current_dir(&project)
+        .args(["wait", "--session", &sess, "--timeout", "20"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    let (_stdout, stderr, ok) = tala(home.path(), &["wait", "--session", &sess, "--timeout", "2"]);
+    assert!(!ok, "second wait times out with exit 2");
+    assert!(
+        stderr.contains("is waiting on"),
+        "overlap note expected: {}",
+        stderr
+    );
+
+    let _ = first.kill();
+    let _ = first.wait();
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_wait_new_session_timeout_hint() {
+    let home = tempfile::tempdir().unwrap();
+    let (sess, project) = tala_start_in(home.path(), "proj-a");
+    let (_other_sess, other_project) = tala_start_in(home.path(), "proj-b");
+
+    tala_in(
+        home.path(),
+        Some(&other_project),
+        &["send", "--session", &sess, "msg-for-you"],
+    );
+
+    let (_stdout, stderr, ok) = tala_in(
+        home.path(),
+        Some(&project),
+        &["wait", "--new-session", "--timeout", "2"],
+    );
+    assert!(!ok, "wait --new-session timeout exits 2");
+    assert!(
+        stderr.contains("unread message"),
+        "timeout hint expected: {}",
+        stderr
+    );
+    assert!(stderr.contains(&sess), "hint names the session: {}", stderr);
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_wait_stamps_deadline_and_expires() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    let (_stdout, _stderr, ok) = tala(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--intent",
+            "req",
+            "--wait",
+            "--timeout",
+            "1",
+            "urgent-question",
+        ],
+    );
+    assert!(!ok, "wait with no reply should time out (exit 2)");
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let (stdout, _stderr, _) = tala(home.path(), &["history", "--session", &sess]);
+    assert!(
+        stdout.contains("wait expired"),
+        "history renders the expired deadline: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}

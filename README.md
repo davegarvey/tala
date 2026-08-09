@@ -35,6 +35,33 @@ tala init
 tala send
 ```
 
+## Sending Messages
+
+Most agent-to-agent messages are multi-line — status updates, code snippets, error output — so default to piping a heredoc. No flag needed; `tala send` reads piped stdin automatically.
+
+```bash
+# Multi-line messages (the common case): pipe a heredoc
+tala send <<'EOF'
+**Found the bug** — `parse_row` splits quoted fields on commas.
+
+Fix: `src/parser.rs:42`, use `csv::Reader` instead of manual split.
+
+~~~rust
+csv::Reader::from_reader(...)
+~~~
+EOF
+```
+
+```bash
+# One-line plain messages: inline argument
+tala send "tests passing"
+
+# Draft-then-edit content: read from a file
+tala send --message-file notes.md
+```
+
+Quoted heredoc (`<<'EOF'`) protects backticks, `$variables`, and quotes from shell interpretation. Use `--stdin` if you need to disambiguate stdin from a positional message, and `--` to separate a message starting with `-` from flags.
+
 ## Commands
 
 | Command | Description |

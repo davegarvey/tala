@@ -27,6 +27,37 @@ pub struct RenameSessionRequest {
     pub force: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Intent {
+    #[default]
+    Fyi,
+    Req,
+    Reply,
+    Out,
+}
+
+impl Intent {
+    pub fn badge(self) -> &'static str {
+        match self {
+            Intent::Req => "REQ",
+            Intent::Fyi => "FYI",
+            Intent::Reply => "REPLY",
+            Intent::Out => "OUT",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "req" => Some(Intent::Req),
+            "fyi" => Some(Intent::Fyi),
+            "reply" => Some(Intent::Reply),
+            "out" => Some(Intent::Out),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: u64,
@@ -34,6 +65,14 @@ pub struct Message {
     pub sender: String,
     pub content: String,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub intent: Intent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<u64>,
+    #[serde(default)]
+    pub expect_reply: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +94,14 @@ pub struct CreateSessionResponse {
 pub struct SendMessageRequest {
     pub sender: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<Intent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<u64>,
+    #[serde(default)]
+    pub expect_reply: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_timeout: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +113,14 @@ pub struct SendMessageResponse {
     pub timestamp: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<u64>,
+    #[serde(default)]
+    pub intent: Intent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<u64>,
+    #[serde(default)]
+    pub expect_reply: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +131,8 @@ pub struct WaitResponse {
     pub closed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overlaps: Vec<WaitOverlap>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +160,8 @@ pub struct StatusResponse {
     pub port: u16,
     pub uptime_seconds: i64,
     pub session_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_waits: Vec<ActiveWaitInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +185,10 @@ pub enum DaemonEvent {
         old_name: String,
         new_name: String,
     },
+    WaitUpdate {
+        identity: String,
+        scope: WaitScope,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +204,45 @@ pub struct AgentSummary {
     pub sender: String,
     pub last_seen: DateTime<Utc>,
     pub message_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "session_id", rename_all = "snake_case")]
+pub enum WaitScope {
+    Session(String),
+    AnyNewSession,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitOverlap {
+    pub identity: String,
+    pub scope: WaitScope,
+    pub remaining_secs: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveWaitInfo {
+    pub identity: String,
+    pub scope: WaitScope,
+    pub since: DateTime<Utc>,
+    pub deadline: DateTime<Utc>,
+    pub remaining_secs: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingObligation {
+    #[serde(rename = "session_id")]
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
+    pub message_id: u64,
+    pub sender: String,
+    pub content: String,
+    pub elapsed_seconds: i64,
+    #[serde(default)]
+    pub intent: Intent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_until: Option<DateTime<Utc>>,
 }
 
 /// Query parameters for the recap endpoint
@@ -181,12 +283,28 @@ mod tests {
             sender: "test-agent".into(),
             content: "hello **world**".into(),
             timestamp: now,
+            intent: Intent::Req,
+            reply_to: Some(2),
+            expect_reply: true,
+            waiting_until: Some(now),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deserialized: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.id, 1);
         assert_eq!(deserialized.sender, "test-agent");
-        assert_eq!(deserialized.content, "hello **world**");
+        assert_eq!(deserialized.intent, Intent::Req);
+        assert_eq!(deserialized.reply_to, Some(2));
+        assert!(deserialized.expect_reply);
+    }
+
+    #[test]
+    fn test_message_default_intent_is_fyi() {
+        let json = r#"{"id":1,"session_id":"s","sender":"a","content":"c","timestamp":"2024-01-01T00:00:00Z"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.intent, Intent::Fyi);
+        assert_eq!(msg.reply_to, None);
+        assert!(!msg.expect_reply);
+        assert_eq!(msg.waiting_until, None);
     }
 
     #[test]
@@ -221,10 +339,18 @@ mod tests {
         let msg_req = SendMessageRequest {
             sender: "agent".into(),
             content: "test".into(),
+            intent: Some(Intent::Req),
+            reply_to: Some(1),
+            expect_reply: true,
+            wait_timeout: Some(30),
         };
         let json = serde_json::to_string(&msg_req).unwrap();
         let deserialized: SendMessageRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.content, "test");
+        assert_eq!(deserialized.intent, Some(Intent::Req));
+        assert_eq!(deserialized.reply_to, Some(1));
+        assert!(deserialized.expect_reply);
+        assert_eq!(deserialized.wait_timeout, Some(30));
     }
 
     #[test]
@@ -235,6 +361,7 @@ mod tests {
             timeout_after: Some(30),
             closed: false,
             cursor: None,
+            overlaps: vec![],
         };
         let json = serde_json::to_string(&resp).unwrap();
         let deserialized: WaitResponse = serde_json::from_str(&json).unwrap();
@@ -242,5 +369,6 @@ mod tests {
         assert_eq!(deserialized.timeout_after, Some(30));
         assert!(!deserialized.closed);
         assert_eq!(deserialized.cursor, None);
+        assert!(deserialized.overlaps.is_empty());
     }
 }

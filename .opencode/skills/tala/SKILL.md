@@ -30,17 +30,21 @@ tala recap
 ## Command Reference
 
 | Command | What it does |
-||---|---|---|
+|---|---|---|
 | `tala start <msg>` | Create a session and set it active. |
 | `tala start --name "label"` | Create a named session (name appears in list/observe). |
 | `tala send <msg>` | Send a message to the active session. Specify `-s <id>` for a different session. |
 | `tala send -w <msg>` | Send and block for a reply (shows `⏎ Waiting for reply...`). |
+| `tala send --intent <req|fyi|reply|out> <msg>` | Declare message intent (default: `fyi`; `--wait` implies `req`; `--reply-to` implies `reply`). |
+| `tala send --reply-to <id> <msg>` | Correlate this message as a reply to message `<id>` (same session). |
+| `tala send --expect-reply <msg>` | This message also expects a reply (modifier for reply/fyi). |
 | `tala wait` | Block until a new message arrives in the active session. |
 | `tala wait --new` | Block until *another agent* creates a new session (for receiving side). |
+| `tala pending` | List requests awaiting a reply (unanswered `req` + `--expect-reply` messages). |
 | `tala recap` | View the full conversation transcript for the active session. |
 | `tala listen` | Stream all messages from all sessions in real time. |
 | `tala listen --timeout <secs>` | Stream for N seconds then exit. |
-| `tala list` | List all sessions with name, status, and message count. |
+| `tala list` | List all sessions with name, status, message count, pending and waiting state. |
 | `tala close` | Close the active session. |
 | `tala use <id>` | Set active session for this project directory. |
 | `tala use <name>` | Set active session by session name. |
@@ -77,6 +81,30 @@ tala recap
 - **`tala start --name "proj"`** creates a named session for easier identification.
 
 ## Best Practices (from eval validation)
+
+### Intent protocol (message metadata)
+Every message can carry an intent, rendered as a badge in all output:
+- `[REQ]` — reply expected (use `--wait`, or `--intent req`)
+- `[FYI]` — informational, no reply needed (default)
+- `[REPLY→N]` — answers message N (use `--reply-to <id>`)
+- `[OUT]` — exchange over, no reply expected
+
+When you use `send --wait --timeout N`, the message carries a live countdown
+("waiting, 23s left") computed at read time — recipients see the *remaining*
+time, never a stale duration. An expired deadline does NOT cancel the
+obligation: the `req` stays pending until answered or closed with `[OUT]`.
+
+Track who owes whom: `tala pending` lists unanswered requests. Answer one
+with `tala send --reply-to <id>`. Sending `--intent out` closes your own
+open requests.
+
+### Waiting visibility (deadlock prevention)
+The daemon tracks active waits. If your wait overlaps another agent's wait
+you'll see a note (`⟳ note: alpha is waiting on sess_ab12 (13s left)`), and
+a wait timeout hints when sessions hold unread messages. `tala status` lists
+everyone waiting right now; `tala list` shows pending/waiting counts per
+session. Before waiting blind, check these — the tool does the checking for
+you on every `wait`.
 
 ### FYI messages (broadcast)
 ```bash

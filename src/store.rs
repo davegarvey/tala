@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -39,6 +39,92 @@ pub struct Store {
     broadcast: Arc<RwLock<HashMap<String, broadcast::Sender<DaemonEvent>>>>,
     next_msg_id: Arc<RwLock<HashMap<String, u64>>>,
     global_tx: broadcast::Sender<(String, DaemonEvent)>,
+    pub wait_registry: Arc<Mutex<WaitRegistry>>,
+}
+
+/// Parameters for a new message, mirroring the intent metadata fields.
+#[derive(Debug, Clone, Default)]
+pub struct AddMessageParams {
+    pub sender: String,
+    pub content: String,
+    pub intent: Intent,
+    pub reply_to: Option<u64>,
+    pub expect_reply: bool,
+    pub waiting_until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Tracks active waits so overlapping waits can be surfaced (deadlock visibility).
+#[derive(Debug, Default)]
+pub struct WaitRegistry {
+    waits: Vec<ActiveWait>,
+    next_id: u64,
+}
+
+/// An active wait entry in the registry.
+#[derive(Debug, Clone)]
+pub struct ActiveWait {
+    pub id: u64,
+    pub scope: WaitScope,
+    pub identity: String,
+    pub since: chrono::DateTime<chrono::Utc>,
+    pub deadline: chrono::DateTime<chrono::Utc>,
+}
+
+impl WaitRegistry {
+    fn prune(&mut self) {
+        let now = Utc::now();
+        self.waits.retain(|w| w.deadline > now);
+    }
+
+    pub fn list(&mut self) -> Vec<ActiveWaitInfo> {
+        self.prune();
+        let now = Utc::now();
+        self.waits
+            .iter()
+            .map(|w| ActiveWaitInfo {
+                identity: w.identity.clone(),
+                scope: w.scope.clone(),
+                since: w.since,
+                deadline: w.deadline,
+                remaining_secs: (w.deadline - now).num_seconds().max(0),
+            })
+            .collect()
+    }
+
+    fn unregister(&mut self, id: u64) {
+        self.waits.retain(|w| w.id != id);
+    }
+}
+
+/// Drop guard that removes a wait from the registry, including on disconnect/error.
+pub struct WaitGuard {
+    pub registry: Arc<Mutex<WaitRegistry>>,
+    pub id: u64,
+}
+
+impl WaitGuard {
+    pub fn new(registry: Arc<Mutex<WaitRegistry>>, id: u64) -> Self {
+        Self { registry, id }
+    }
+}
+
+impl Drop for WaitGuard {
+    fn drop(&mut self) {
+        if let Ok(mut reg) = self.registry.lock() {
+            reg.unregister(self.id);
+        }
+    }
+}
+
+/// Returns true when two wait scopes overlap: same session, or either is "any new session".
+/// New-session↔new-session pairs are excluded (normal multi-agent startup pattern).
+pub fn scopes_overlap(a: &WaitScope, b: &WaitScope) -> bool {
+    match (a, b) {
+        (WaitScope::AnyNewSession, WaitScope::AnyNewSession) => false,
+        (WaitScope::Session(x), WaitScope::Session(y)) => x == y,
+        (WaitScope::AnyNewSession, WaitScope::Session(_))
+        | (WaitScope::Session(_), WaitScope::AnyNewSession) => true,
+    }
 }
 
 impl Store {
@@ -50,6 +136,7 @@ impl Store {
             broadcast: Arc::new(RwLock::new(HashMap::new())),
             next_msg_id: Arc::new(RwLock::new(HashMap::new())),
             global_tx,
+            wait_registry: Arc::new(Mutex::new(WaitRegistry::default())),
         }
     }
 
@@ -102,6 +189,22 @@ impl Store {
         sender: &str,
         content: &str,
     ) -> Option<Message> {
+        self.add_message_with(
+            session_id,
+            AddMessageParams {
+                sender: sender.to_string(),
+                content: content.to_string(),
+                ..AddMessageParams::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn add_message_with(
+        &self,
+        session_id: &str,
+        params: AddMessageParams,
+    ) -> Option<Message> {
         let mut sessions = self.sessions.write().await;
         let session = sessions.get_mut(session_id)?;
         if session.closed {
@@ -120,9 +223,13 @@ impl Store {
         let msg = Message {
             id: msg_id,
             session_id: session_id.to_string(),
-            sender: sender.to_string(),
-            content: content.to_string(),
+            sender: params.sender,
+            content: params.content,
             timestamp: now,
+            intent: params.intent,
+            reply_to: params.reply_to,
+            expect_reply: params.expect_reply,
+            waiting_until: params.waiting_until,
         };
 
         let mut msgs = self.messages.write().await;
@@ -307,6 +414,158 @@ impl Store {
 
     pub fn subscribe_global(&self) -> broadcast::Receiver<(String, DaemonEvent)> {
         self.global_tx.subscribe()
+    }
+
+    /// Registers an active wait and returns its id, overlaps found at registration,
+    /// and a guard that deregisters on drop. Prunes expired entries first.
+    pub fn register_wait(
+        &self,
+        scope: WaitScope,
+        identity: String,
+        timeout_secs: u64,
+    ) -> (u64, Vec<WaitOverlap>) {
+        let mut reg = match self.wait_registry.lock() {
+            Ok(r) => r,
+            Err(_) => return (0, vec![]),
+        };
+        reg.prune();
+        let now = Utc::now();
+        let id = reg.next_id;
+        reg.next_id += 1;
+        let overlaps: Vec<WaitOverlap> = reg
+            .waits
+            .iter()
+            .filter(|w| scopes_overlap(&w.scope, &scope))
+            .map(|w| WaitOverlap {
+                identity: w.identity.clone(),
+                scope: w.scope.clone(),
+                remaining_secs: (w.deadline - now).num_seconds().max(0),
+            })
+            .collect();
+        reg.waits.push(ActiveWait {
+            id,
+            scope,
+            identity,
+            since: now,
+            deadline: now + chrono::Duration::seconds(timeout_secs as i64),
+        });
+        (id, overlaps)
+    }
+
+    /// Lists active waits (pruned), for status surfacing.
+    pub fn list_active_waits(&self) -> Vec<ActiveWaitInfo> {
+        match self.wait_registry.lock() {
+            Ok(mut reg) => reg.list(),
+            Err(_) => vec![],
+        }
+    }
+
+    /// Derives which message ids in a session are answered: by explicit `reply_to`,
+    /// by an uncorrelated `reply` answering the oldest open `req`, or closed by the
+    /// sender's `out`. Returns (answered, closed) id sets; `closed` ids are reqs
+    /// that were explicitly abandoned via `out` and must not surface as pending.
+    pub fn derive_answered(messages: &[Message]) -> (HashSet<u64>, HashSet<u64>) {
+        let mut answered = HashSet::new();
+        let mut closed = HashSet::new();
+        let mut open: Vec<(u64, String)> = Vec::new();
+        for m in messages {
+            if m.intent == Intent::Req {
+                open.push((m.id, m.sender.clone()));
+            }
+            if let Some(t) = m.reply_to {
+                answered.insert(t);
+                open.retain(|(id, _)| *id != t);
+            }
+            if m.intent == Intent::Reply && m.reply_to.is_none() {
+                if let Some((rid, _)) = open.first().cloned() {
+                    open.remove(0);
+                    answered.insert(rid);
+                }
+            }
+            if m.intent == Intent::Out {
+                let sender = m.sender.clone();
+                open.retain(|(id, s)| {
+                    if *s == sender {
+                        closed.insert(*id);
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+        }
+        (answered, closed)
+    }
+
+    /// Returns all open obligations across open sessions: unanswered `req` messages
+    /// and messages sent with `expect_reply`, excluding closed sessions.
+    pub async fn pending_obligations(&self) -> Vec<PendingObligation> {
+        let sessions = self.sessions.read().await;
+        let msgs = self.messages.read().await;
+        let now = Utc::now();
+        let mut out = Vec::new();
+        for (sid, session) in sessions.iter() {
+            if session.closed {
+                continue;
+            }
+            let Some(smsgs) = msgs.get(sid) else {
+                continue;
+            };
+            let (answered, closed) = Self::derive_answered(smsgs);
+            for m in smsgs {
+                let is_obligation = match m.intent {
+                    Intent::Req => !answered.contains(&m.id) && !closed.contains(&m.id),
+                    Intent::Reply | Intent::Fyi => m.expect_reply && !answered.contains(&m.id),
+                    Intent::Out => false,
+                };
+                if is_obligation {
+                    out.push(PendingObligation {
+                        session_id: sid.clone(),
+                        session_name: session.name.clone(),
+                        message_id: m.id,
+                        sender: m.sender.clone(),
+                        content: m.content.chars().take(120).collect(),
+                        elapsed_seconds: (now - m.timestamp).num_seconds(),
+                        intent: m.intent,
+                        waiting_until: m.waiting_until,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Broadcasts a WaitUpdate event (new overlapping waiter registered) to the
+    /// global channel and every session channel; wait handlers filter by relevance.
+    pub async fn broadcast_wait_update(&self, identity: String, scope: WaitScope) {
+        let event = DaemonEvent::WaitUpdate { identity, scope };
+        let sessions = self.broadcast.read().await;
+        for tx in sessions.values() {
+            let _ = tx.send(event.clone());
+        }
+        let _ = self.global_tx.send((String::new(), event));
+    }
+
+    /// Whether `candidate` answers `target` in `session_id`: the target becomes
+    /// answered only after processing the candidate (per derive_answered).
+    pub async fn message_answers(
+        &self,
+        session_id: &str,
+        candidate: &Message,
+        target: u64,
+    ) -> bool {
+        let msgs = self.get_messages_since(session_id, 0).await;
+        let without: Vec<Message> = msgs
+            .iter()
+            .filter(|m| m.id != candidate.id)
+            .cloned()
+            .collect();
+        let (before, _) = Self::derive_answered(&without);
+        if before.contains(&target) {
+            return false;
+        }
+        let (after, _) = Self::derive_answered(&msgs);
+        after.contains(&target)
     }
 
     pub async fn persist(&self) -> anyhow::Result<()> {
@@ -609,6 +868,166 @@ mod tests {
     fn test_get_default_sender() {
         let sender = get_default_sender();
         assert!(!sender.is_empty(), "default sender should not be empty");
+    }
+
+    fn msg(id: u64, sender: &str, intent: Intent, reply_to: Option<u64>) -> Message {
+        Message {
+            id,
+            session_id: "s".into(),
+            sender: sender.into(),
+            content: format!("m{}", id),
+            timestamp: Utc::now(),
+            intent,
+            reply_to,
+            expect_reply: false,
+            waiting_until: None,
+        }
+    }
+
+    #[test]
+    fn test_derive_answered_correlated() {
+        let msgs = vec![
+            msg(1, "alpha", Intent::Req, None),
+            msg(2, "beta", Intent::Reply, Some(1)),
+        ];
+        let (answered, closed) = Store::derive_answered(&msgs);
+        assert!(answered.contains(&1));
+        assert!(closed.is_empty());
+    }
+
+    #[test]
+    fn test_derive_answered_uncorrelated_reply_takes_oldest() {
+        let msgs = vec![
+            msg(1, "alpha", Intent::Req, None),
+            msg(2, "alpha", Intent::Req, None),
+            msg(3, "beta", Intent::Reply, None),
+        ];
+        let (answered, _) = Store::derive_answered(&msgs);
+        assert!(answered.contains(&1));
+        assert!(
+            !answered.contains(&2),
+            "oldest req answered, not the newest"
+        );
+    }
+
+    #[test]
+    fn test_derive_answered_out_closes_senders_requests() {
+        let msgs = vec![
+            msg(1, "alpha", Intent::Req, None),
+            msg(2, "beta", Intent::Req, None),
+            msg(3, "alpha", Intent::Out, None),
+        ];
+        let (_answered, closed) = Store::derive_answered(&msgs);
+        assert!(closed.contains(&1), "alpha's out closes alpha's req");
+        assert!(!closed.contains(&2), "beta's req untouched by alpha's out");
+    }
+
+    #[test]
+    fn test_scopes_overlap_rules() {
+        let a = WaitScope::Session("x".into());
+        let b = WaitScope::Session("x".into());
+        let c = WaitScope::Session("y".into());
+        let any = WaitScope::AnyNewSession;
+        assert!(scopes_overlap(&a, &b));
+        assert!(!scopes_overlap(&a, &c));
+        assert!(scopes_overlap(&any, &a));
+        assert!(scopes_overlap(&a, &any));
+        assert!(!scopes_overlap(&any, &any), "new-session pairs suppressed");
+    }
+
+    #[tokio::test]
+    async fn test_wait_registry_registers_prunes_and_guards() {
+        let store = Store::new();
+        let (id, overlaps) =
+            store.register_wait(WaitScope::Session("sess_a".into()), "alpha".into(), 60);
+        assert!(overlaps.is_empty());
+        assert_eq!(store.list_active_waits().len(), 1);
+
+        let (_, overlaps2) =
+            store.register_wait(WaitScope::Session("sess_a".into()), "beta".into(), 60);
+        assert_eq!(overlaps2.len(), 1);
+        assert_eq!(overlaps2[0].identity, "alpha");
+
+        let (_, overlaps3) =
+            store.register_wait(WaitScope::Session("sess_b".into()), "gamma".into(), 60);
+        assert!(overlaps3.is_empty(), "different session: no overlap");
+
+        let _guard = WaitGuard::new(Arc::clone(&store.wait_registry), id);
+        drop(_guard);
+        assert_eq!(store.list_active_waits().len(), 2);
+
+        // Expired entries are pruned on the next registration
+        {
+            let mut reg = store.wait_registry.lock().unwrap();
+            for w in reg.waits.iter_mut() {
+                w.deadline = Utc::now() - chrono::Duration::seconds(1);
+            }
+        }
+        let _ = store.register_wait(WaitScope::AnyNewSession, "delta".into(), 60);
+        assert_eq!(store.list_active_waits().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_pending_obligations() {
+        let store = Store::new();
+        let (sid, _) = store.create_session(None, None).await;
+
+        store
+            .add_message_with(
+                &sid,
+                AddMessageParams {
+                    sender: "alpha".into(),
+                    content: "help".into(),
+                    intent: Intent::Req,
+                    ..AddMessageParams::default()
+                },
+            )
+            .await;
+        store
+            .add_message_with(
+                &sid,
+                AddMessageParams {
+                    sender: "alpha".into(),
+                    content: "answered req".into(),
+                    intent: Intent::Req,
+                    ..AddMessageParams::default()
+                },
+            )
+            .await;
+        store
+            .add_message_with(
+                &sid,
+                AddMessageParams {
+                    sender: "beta".into(),
+                    content: "fixed".into(),
+                    intent: Intent::Reply,
+                    reply_to: Some(2),
+                    ..AddMessageParams::default()
+                },
+            )
+            .await;
+        store
+            .add_message_with(
+                &sid,
+                AddMessageParams {
+                    sender: "beta".into(),
+                    content: "expecting more".into(),
+                    intent: Intent::Fyi,
+                    expect_reply: true,
+                    ..AddMessageParams::default()
+                },
+            )
+            .await;
+
+        let pending = store.pending_obligations().await;
+        assert_eq!(pending.len(), 2, "req 1 + expect_reply msg 4");
+        let ids: Vec<u64> = pending.iter().map(|p| p.message_id).collect();
+        assert!(ids.contains(&1));
+        assert!(ids.contains(&4));
+
+        store.close_session(&sid).await;
+        let pending = store.pending_obligations().await;
+        assert!(pending.is_empty(), "closed sessions excluded");
     }
 
     #[test]
