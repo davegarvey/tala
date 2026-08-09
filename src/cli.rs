@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Read;
 use std::process;
 use std::time::Duration;
@@ -22,11 +23,17 @@ fn fail(json: bool, msg: impl std::fmt::Display, code: &str) -> ! {
     process::exit(1);
 }
 
+/// Exit code for benign blocking timeouts (wait/send --wait running out of
+/// time with no new messages). Deliberately distinct from clap's usage-error
+/// code 2: a timeout is not a usage error, and scripts must be able to tell
+/// "nothing happened yet" apart from "you called me wrong".
+const EXIT_TIMEOUT: i32 = 3;
+
 #[derive(Parser)]
 #[command(
     name = "tala",
     about = "Agent-to-agent messaging for AI coding tools",
-    long_about = "tala is a lightweight messaging tool for AI agents working across projects.\n\nSend messages with `tala send`, wait for replies with `tala wait`, stream a session with `tala stream`,\nor listen to all sessions with `tala listen`.\n\nUse `tala wait --new-session` to wait for another agent to create a session.\n\nEvery command supports --json for structured output.",
+    long_about = "tala is a lightweight messaging tool for AI agents working across projects.\n\nSend messages with `tala send`, wait for replies with `tala wait`, stream a session with `tala stream`,\nor listen to all sessions with `tala listen`.\n\nUse `tala wait --new-session` to wait for a session with an incoming message from another agent.\n\nEvery command supports --json for structured output.",
     version
 )]
 pub struct Cli {
@@ -56,20 +63,14 @@ pub enum Commands {
     },
     /// Send a message to a session. Use `tala session create` to create a session without a message.
     #[command(
-        after_help = "Multi-line messages (the common case): pipe a heredoc, no flag needed, e.g. `tala send <<'EOF'`.\nOne-line messages: inline argument, e.g. `tala send \"tests passing\"`.\nDraft-then-edit content: `--message-file <path>`.\nQuoted heredocs protect backticks, $variables and quotes; use `--stdin` to disambiguate stdin from a positional message.\nUse `--` to separate options from message content, e.g. `tala send -- --my-flags`.\nUse --wait / -w to block until a reply arrives.\n\nINTENT:\n  --intent <req|fyi|reply|out>  Declare what you expect (default: fyi; --wait implies req; --reply-to implies reply)\n  --reply-to <id>               Correlate this message as a reply to message <id> (same session)\n  --expect-reply                This message also expects a reply (modifier for reply/fyi)\n  With --wait --timeout N, recipients see the live countdown via the stamped waiting_until.\nUse `tala session create --name` to create a named session."
+        after_help = "Use --wait / -w to block until a reply arrives.\nUse `tala session create --name` to create a named session.\nUse --stdin or pipe content for messages with special characters (backticks, quotes, leading dashes).\nUse `--` to separate options from message content, e.g. `tala send -- --my-flags`.\n\nINTENT:\n  --intent <req|fyi|reply|out>  Declare what you expect (default: fyi; --wait implies req; --reply-to implies reply)\n  --reply-to <id>               Correlate this message as a reply to message <id> (same session)\n  --expect-reply                This message also expects a reply (modifier for reply/fyi)\n  With --wait --timeout N, recipients see the live countdown via the stamped waiting_until.\n\nEXIT CODES: 0 = sent (or reply received with --wait); 3 = --wait timed out; 1 = error"
     )]
     Send {
-        #[arg(
-            allow_hyphen_values = true,
-            help = "Session ID (positional, or use --session/-s)"
-        )]
+        #[arg(help = "Session ID (positional, or use --session/-s)")]
         session: Option<String>,
         #[arg(long = "session", short, alias = "session-id", help = "Session ID")]
         session_arg: Option<String>,
-        #[arg(
-            allow_hyphen_values = true,
-            help = "Message content (omit to read from piped stdin)"
-        )]
+        #[arg(help = "Message content (omit to read from piped stdin)")]
         message: Option<String>,
         #[arg(
             long = "message-file",
@@ -87,7 +88,10 @@ pub enum Commands {
             help = "Wait for a reply after sending (default: return immediately)"
         )]
         wait: bool,
-        #[arg(long = "sender", help = "Override the sender name")]
+        #[arg(
+            long = "sender",
+            help = "Override the sender name (warns if it differs from the configured agent name)"
+        )]
         sender_name: Option<String>,
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
@@ -104,9 +108,9 @@ pub enum Commands {
     },
     /// Wait for new messages in a session (blocking poll — sends an HTTP request every few seconds).
     /// Use `tala stream` for real-time SSE on a single session, or `tala listen` to observe all sessions.
-    /// Use `tala wait --new-session` to wait for another agent to create a session.
+    /// Use `tala wait --new-session` to wait for a session with an incoming message from another agent.
     #[command(
-        after_help = "USAGE:\n  tala wait <session>          Blocking poll — sends periodic HTTP requests\n  tala wait --new-session     Wait for another agent to create a session\n\nCOMPARISON:\n  tala stream   Real-time SSE — stays connected, pushes messages immediately (single session)\n  tala listen   Real-time SSE — observe all sessions at once\n  tala check    Non-blocking — show new messages and return immediately\n\nSee also: tala history (transcript), tala session (manage sessions)"
+        after_help = "USAGE:\n  tala wait <session>          Blocking poll — sends periodic HTTP requests\n  tala wait --new-session     Wait for a session with an incoming message from another agent\n\nCOMPARISON:\n  tala stream   Real-time SSE — stays connected, pushes messages immediately (single session)\n  tala listen   Real-time SSE — observe all sessions at once\n  tala check    Non-blocking — show new messages and return immediately\n\nEXIT CODES: 0 = messages received (or new session found); 3 = benign timeout; 2 = usage error; 1 = error\n\nSee also: tala history (transcript), tala session (manage sessions)"
     )]
     Wait {
         #[arg(help = "Session ID (uses active session if set)")]
@@ -355,11 +359,20 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             expect_reply,
         } => {
             let session_flag = session_arg.is_some();
-            let resolved_session = session_arg
-                .or_else(|| session.as_ref().filter(|s| s.starts_with("sess_")).cloned());
+            // A positional session ref may be an id OR a name (B035). A lone
+            // positional is a message unless it starts with sess_; when a
+            // message positional is also present, the first positional is a
+            // session ref (id or name).
+            let resolved_session = session_arg.or_else(|| {
+                session
+                    .clone()
+                    .filter(|s| s.starts_with("sess_") || message.is_some())
+            });
             let resolved_message = message.or_else(|| {
                 if session_flag {
                     session
+                } else if resolved_session.is_some() {
+                    None
                 } else {
                     session.filter(|s| !s.starts_with("sess_"))
                 }
@@ -518,6 +531,36 @@ fn daemon_url(host: &str, port: u16, path: &str) -> String {
     format!("http://{}:{}{}", host, port, path)
 }
 
+/// Build the `&seen=` query suffix for wait-new requests: the waiter's
+/// per-session read cursors (URL-encoded JSON map) so the daemon can exclude
+/// sessions the waiter already knows (B029). Empty when no cursors exist.
+async fn wait_new_seen_param() -> String {
+    let cursors = store::read_cursors().await;
+    if cursors.is_empty() {
+        return String::new();
+    }
+    match serde_json::to_string(&cursors) {
+        Ok(json) => format!("&seen={}", percent_encode(&json)),
+        Err(_) => String::new(),
+    }
+}
+
+/// Resolve a session ref for a command, emitting a proper (possibly JSON)
+/// error instead of a plain anyhow error (B031-adjacent: --json paths must
+/// not leak human text).
+async fn resolve_session_id_or_fail(
+    host: &str,
+    port: u16,
+    session_arg: Option<&str>,
+    cmd_name: &str,
+    json_output: bool,
+) -> String {
+    match resolve_session_id(host, port, session_arg, cmd_name).await {
+        Ok(id) => id,
+        Err(e) => fail(json_output, e.to_string(), "SESSION_NOT_FOUND"),
+    }
+}
+
 async fn resolve_session_id(
     host: &str,
     port: u16,
@@ -525,7 +568,7 @@ async fn resolve_session_id(
     cmd_name: &str,
 ) -> anyhow::Result<String> {
     if let Some(id) = session_arg {
-        return Ok(id.to_string());
+        return resolve_session_ref(host, port, id, cmd_name).await;
     }
 
     if let Some(id) = store::read_active_session().await {
@@ -543,12 +586,71 @@ async fn resolve_session_id(
         _ => {
             let ids: Vec<&str> = active.iter().map(|s| s.id.as_str()).collect();
             bail!(
-                "Multiple active sessions: {}. Specify one with `tala {} <session>` or set one with `tala use <session>`",
+                "Multiple open sessions: {}. Specify one with `tala {} <session>` or set one with `tala use <session>`",
                 ids.join(", "),
                 cmd_name
             );
         }
     }
+}
+
+/// Resolve a user-supplied session reference (name, full id, or unique id
+/// prefix) to a session id. Errors loudly on no-match or ambiguity — never
+/// silently falls back to another session (B035).
+async fn resolve_session_ref(
+    host: &str,
+    port: u16,
+    input: &str,
+    cmd_name: &str,
+) -> anyhow::Result<String> {
+    let url = daemon_url(host, port, "/api/sessions");
+    let resp = reqwest::get(&url).await?;
+    let sessions: Vec<SessionSummary> = resp.json().await?;
+
+    // 1. Exact name match
+    let name_matches: Vec<&SessionSummary> = sessions
+        .iter()
+        .filter(|s| s.name.as_deref() == Some(input))
+        .collect();
+    if name_matches.len() == 1 {
+        return Ok(name_matches[0].id.clone());
+    }
+    if name_matches.len() > 1 {
+        let ids: Vec<&str> = name_matches.iter().map(|s| s.id.as_str()).collect();
+        bail!(
+            "Multiple sessions named '{}': {}. Use session ID instead.",
+            input,
+            ids.join(", ")
+        );
+    }
+
+    // 2. Exact id match
+    if let Some(s) = sessions.iter().find(|s| s.id == input) {
+        return Ok(s.id.clone());
+    }
+
+    // 3. Unique id-prefix match
+    let prefix_matches: Vec<&SessionSummary> = sessions
+        .iter()
+        .filter(|s| s.id.starts_with(input))
+        .collect();
+    if prefix_matches.len() == 1 {
+        return Ok(prefix_matches[0].id.clone());
+    }
+    if prefix_matches.len() > 1 {
+        let ids: Vec<&str> = prefix_matches.iter().map(|s| s.id.as_str()).collect();
+        bail!(
+            "Multiple sessions match '{}': {}. Use the full session ID.",
+            input,
+            ids.join(", ")
+        );
+    }
+
+    bail!(
+        "session '{}' not found. Use `tala {} <session-id>` or `tala use <session-id>` to target an existing session.",
+        input,
+        cmd_name
+    )
 }
 
 async fn cmd_init(name: Option<String>) -> anyhow::Result<()> {
@@ -584,92 +686,16 @@ async fn install_opencode_skills() -> anyhow::Result<()> {
     tokio::fs::create_dir_all(&skill_dir).await?;
 
     let skill_path = skill_dir.join("SKILL.md");
-    let skill = r#"---
-name: tala
-description: Agent-to-agent messaging for AI coding tools. Use to communicate with agents across projects, terminals, or sessions.
-license: MIT
-compatibility: Requires tala CLI v0.23+
-metadata:
-  author: tala
-  version: "2.1"
----
-# tala — Agent-to-Agent Messaging
-
-Send messages with `tala send "msg"`. Request replies with `tala send --wait "question"`.
-Wait for incoming sessions with `tala wait --new-session`. View history with `tala history`.
-Pipe messages: `echo "msg" | tala send`. All commands support `--json`.
-
-## Common Patterns
-
-| Task | Command |
-|---|---|
-| Broadcast FYI | `tala send "status: done"` |
-| Request + wait | `tala send --wait "need help" --timeout 60` |
-| Correlated reply | `tala send --intent reply --reply-to 5 "fix is in parse_row"` |
-| Wait for incoming | `sess=$(tala wait --new-session --timeout 600)` |
-| What's unanswered | `tala pending` |
-| Read transcript | `tala history` |
-| Named session | `tala session create --name "my-project"` |
-| Watch all | `tala listen` |
-| Filtered watch | `tala listen --from "alpha" --match "urgent"` |
-| Override sender | `tala send --sender "bot" "hello"` |
-| Check messages | `tala check` |
-| Discover agents | `tala agents` |
-| Cross-project discovery | `tala discover` |
-
-## Intent Protocol
-
-Every message can declare its intent with `--intent <req|fyi|reply|out>`:
-- `req` — a reply is expected from you (implied by `--wait`; `--reply-to` implies `reply`)
-- `fyi` — informational, no reply needed (default)
-- `reply` — answers a prior request; correlate with `--reply-to <id>`
-- `out` — exchange over, no reply expected
-
-Intents render as badges (`[REQ]`, `[REPLY→5]`) in history/check/wait/stream/listen,
-and a `waiting_until` countdown ("waiting, 23s left") is stamped when you use
-`send --wait --timeout N`. The countdown is computed at read time — never stale.
-
-`tala pending` lists open obligations: unanswered `req` messages and anything
-sent with `--expect-reply`. Answer one with `tala send --reply-to <id>`.
-
-**Waiting visibility:** the daemon tracks active waits. When your wait overlaps
-another agent's wait, you get a note (`⟳ note: alpha is waiting on sess_ab12
-(13s left)`), and a timeout prints a hint when sessions hold unread messages.
-`tala status` shows everyone waiting right now.
-
-## Key Behaviors (v0.25+)
-- Send returns immediately by default (fire-and-forget). Use `-w`/`--wait` to block.
-- If no session exists and you provide a message, auto-creates a session.
-- Use `tala session create` to create a session without a message.
-- Active session is auto-set per project directory (`.tala/active-session`).
-- `tala wait` without `--since` only waits for new messages (no history replay).
-- `tala wait --new-session` blocks until another agent creates a session.
-- `tala listen` watches all sessions.
-- `tala check` shows new messages since last check (non-blocking).
-- `tala agents` lists active participants.
-- `tala discover` finds agents in other projects.
-- `TALA_HOME` env var overrides `~/.tala` for isolated daemon instances.
-
-## Guidelines
-- Use **markdown** in messages — code blocks, file refs `path/file:line`.
-- Include relevant context: errors, stack traces, snippets.
-- Sessions are ephemeral (in-memory daemon).
-- **Shell safety:** Multi-line messages (the common case) — pipe a quoted heredoc: `tala send <<'EOF' ... EOF` (no flag needed).
-  For one-line messages with backticks or special chars, use single quotes: `tala send 'msg with \`code\`'`.
-  Draft-then-edit content: `--message-file <path>`.
-  If your message starts with `--`, add a `--` separator: `tala send -- --my-flag-value`.
-"#;
+    // Canonical docs live in the repo (.opencode/...) and are embedded at build time
+    // so the binary always ships exactly the docs that are committed.
+    let skill = include_str!("../.opencode/skills/tala/SKILL.md");
     tokio::fs::write(&skill_path, skill).await?;
     println!("Created .opencode/skills/tala/SKILL.md");
 
     let commands_dir = opencode_dir.join("commands");
     tokio::fs::create_dir_all(&commands_dir).await?;
     let command_path = commands_dir.join("tala.md");
-    let command = r#"---
-description: Use tala for agent-to-agent messaging — cross-project, cross-terminal, cross-agent communication.
----
-Run tala for agent-to-agent messaging. Send messages with `tala send "msg"`. Request replies with `tala send --wait "question"`. Receive sessions with `tala wait --new-session`. Watch all activity with `tala listen`. Read transcripts with `tala history`. Check for new messages with `tala check`. Discover cross-project agents with `tala discover`. Pipe messages via stdin. All commands support `--json`. By default, `tala send` returns immediately (use `-w`/`--wait` to block).
-"#;
+    let command = include_str!("../.opencode/commands/tala.md");
     tokio::fs::write(&command_path, command).await?;
     println!("Created .opencode/commands/tala.md");
     Ok(())
@@ -763,7 +789,9 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
             .collect();
         if !closed_match.is_empty() {
             bail!(
-                "Session '{}' is closed. Use `tala session reopen` to continue",
+                "Session '{}' is closed. Use `tala session reopen {}` to open it, then `tala use {}` to make it active",
+                closed_match[0].id,
+                closed_match[0].id,
                 closed_match[0].id
             );
         }
@@ -813,7 +841,7 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
                     if let Ok(sessions) = resp.json::<Vec<SessionSummary>>().await {
                         let active: Vec<_> = sessions.iter().filter(|s| !s.closed).collect();
                         if active.is_empty() {
-                            println!("No active sessions. Start one with `tala send`.");
+                            println!("No open sessions. Start one with `tala send`.");
                         } else {
                             println!("Available sessions:\n");
                             for s in &active {
@@ -853,8 +881,23 @@ async fn auto_create_session(
         })
         .send()
         .await?;
+    if !resp.status().is_success() {
+        if resp.status().as_u16() == 409 {
+            // B017: duplicate session name — surface the daemon's message.
+            let err: ErrorResponse = resp.json().await?;
+            fail(json_output, &err.error, "SESSION_NAME_TAKEN");
+        }
+        fail(
+            json_output,
+            format!("failed to create session (HTTP {})", resp.status().as_u16()),
+            "SESSION_CREATE_FAILED",
+        );
+    }
     let session: CreateSessionResponse = resp.json().await?;
     store::write_active_session(&session.id).await?;
+    // B029: a session the waiter itself creates is "seen" from birth (cursor
+    // entry) — never a candidate for its own `wait --new-session` scan.
+    let _ = store::write_cursor(&session.id, 0).await;
     if !quiet && !json_output {
         println!("{}", session.id);
     }
@@ -903,25 +946,42 @@ async fn cmd_send(
         let mut hint = String::new();
         if let Ok(req) = reqwest::get(&daemon_url(&host, port, "/api/sessions")).await {
             if let Ok(sessions) = req.json::<Vec<SessionSummary>>().await {
-                let active: Vec<_> = sessions.iter().filter(|s| !s.closed).collect();
-                if !active.is_empty() {
-                    hint = format!("\nActive session: {} {}. Set it with `tala use` or target it with `tala send --session <id>`.",
-                        active[0].id,
-                        active[0].name.as_deref().unwrap_or(""),
+                let open: Vec<_> = sessions.iter().filter(|s| !s.closed).collect();
+                if !open.is_empty() {
+                    hint = format!("\nOpen session: {} {}. Set it with `tala use` or target it with `tala send --session <id>`.",
+                        open[0].id,
+                        open[0].name.as_deref().unwrap_or(""),
                     );
                 }
             }
         }
-        anyhow::bail!(
-            "Nothing to send. Use `tala session create` to create a session without a message.{}",
-            hint
+        fail(
+            json_output,
+            format!(
+                "Nothing to send. Use `tala session create` to create a session without a message.{}",
+                hint
+            ),
+            "NOTHING_TO_SEND",
         );
     }
 
-    // Warn if positional message starts with -- (likely shell confusion)
-    if let Some(ref msg) = message {
-        if msg.starts_with("--") && !quiet && !json_output {
-            eprintln!("Warning: message starts with '--' which can be misinterpreted as a flag. Use '--' before the message, e.g. `tala send -- \"{}\"`, or use --stdin/--message-file.", msg);
+    // Note: unknown/typo'd flags are now rejected by clap (no allow_hyphen_values
+    // on send positionals), so a positional message starting with '--' can only
+    // arrive via the explicit `--` separator — which is the documented correct
+    // usage and needs no warning (B015).
+
+    // B004 (PO decision 2026-08-07): --sender is RESTRICTED to the project's
+    // configured agent name (`.tala/config.json`). A mismatched identity is a
+    // hard error — nothing is sent. The honest way to speak as another agent
+    // is to operate from that agent's project dir.
+    if let Some(s) = sender_override {
+        let configured = store::get_sender_name(None);
+        if s != configured {
+            let msg = format!(
+                "Cannot send as '{}': this project is configured as agent '{}'. Use the configured identity or run from the other agent's project directory.",
+                s, configured
+            );
+            fail(json_output, &msg, "SENDER_MISMATCH");
         }
     }
 
@@ -943,7 +1003,7 @@ async fn cmd_send(
         })?
     } else if let Some(msg) = &message {
         if msg.is_empty() {
-            anyhow::bail!("Message cannot be empty.");
+            fail(json_output, "Message cannot be empty.", "EMPTY_MESSAGE");
         }
         msg.clone()
     } else {
@@ -951,9 +1011,14 @@ async fn cmd_send(
             .ok_or_else(|| anyhow::anyhow!("No message provided. Use a positional argument, --message-file <path>, --stdin, or pipe to stdin"))?
     };
 
-    // Resolve session: explicit, active, stale-replace, or auto-create
+    // Resolve session: explicit (id or name, B035), active, stale-replace, or auto-create
     let session_id = if let Some(id) = session_arg.clone() {
-        id
+        // Explicit ref: resolve name/prefix to an id; error loudly if it does
+        // not match anything (never silently fall back to the active session).
+        match resolve_session_ref(&host, port, &id, "send").await {
+            Ok(sid) => sid,
+            Err(e) => fail(json_output, e.to_string(), "SESSION_NOT_FOUND"),
+        }
     } else if let Some(id) = store::read_active_session().await {
         // Validate active session still exists and is open
         let check_url = daemon_url(&host, port, &format!("/api/sessions/{}", id));
@@ -1111,11 +1176,12 @@ async fn send_content(
     }
 
     let msg: SendMessageResponse = resp.json().await?;
-    let _ = store::write_cursor(msg.id).await;
+    let _ = store::write_cursor(&msg.session_id, msg.id).await;
 
     if !should_wait {
         if json_output {
-            println!("{}", serde_json::to_string(&msg).unwrap());
+            let val = serde_json::to_value(&msg).unwrap();
+            println!("{}", serde_json::to_string(&val).unwrap());
         } else if !quiet {
             println!("✓ Sent message {} to session {}", msg.id, msg.session_id);
         }
@@ -1183,7 +1249,7 @@ async fn send_content(
     if json_output {
         println!("{}", serde_json::to_string(&result).unwrap());
         if result.timeout {
-            process::exit(2);
+            process::exit(EXIT_TIMEOUT);
         }
     } else if result.closed {
         println!("[session closed]");
@@ -1192,7 +1258,7 @@ async fn send_content(
             "[timeout after {}s, no reply]",
             result.timeout_after.unwrap_or(0)
         );
-        process::exit(2);
+        process::exit(EXIT_TIMEOUT);
     } else {
         for m in &result.messages {
             println!("{}: {}", m.sender, m.content);
@@ -1313,6 +1379,25 @@ async fn cmd_wait(
     let default_timeout = config["default_timeout"].as_u64().unwrap_or(60);
     let wait_timeout = timeout_secs.unwrap_or(default_timeout);
 
+    // B021: identify the reader so the daemon records read receipts.
+    let sender_param = format!(
+        "&sender={}",
+        store::read_project_config()
+            .await
+            .or_else(|| Some(store::get_default_sender()))
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+
+    // Resolve an explicit session ref (id or name, B035) once up front.
+    let session_arg = match session_arg {
+        Some(id) => Some(
+            resolve_session_ref(&host, port, &id, "wait")
+                .await
+                .unwrap_or_else(|e| fail(json_output, e.to_string(), "SESSION_NOT_FOUND")),
+        ),
+        None => None,
+    };
+
     loop {
         let sid = if let Some(id) = session_arg.clone() {
             if !json_output {
@@ -1344,17 +1429,28 @@ async fn cmd_wait(
                             wait_timeout
                         );
                     }
+                    let sender = store::read_project_config()
+                        .await
+                        .or_else(|| Some(store::get_default_sender()));
+                    let sender_param = match sender {
+                        Some(s) => format!("&sender={}", s),
+                        None => String::new(),
+                    };
+                    let seen_param = wait_new_seen_param().await;
                     let new_url = daemon_url(
                         &host,
                         port,
-                        &format!("/api/sessions/wait-new?timeout_secs={}", wait_timeout),
+                        &format!(
+                            "/api/sessions/wait-new?timeout_secs={}{}{}",
+                            wait_timeout, sender_param, seen_param
+                        ),
                     );
                     let resp = client.get(&new_url).send().await?;
                     let result: serde_json::Value = resp.json().await?;
                     if json_output {
                         println!("{}", serde_json::to_string(&result).unwrap());
                         if result.get("timeout") == Some(&serde_json::json!(true)) {
-                            process::exit(2);
+                            process::exit(EXIT_TIMEOUT);
                         }
                         return Ok(());
                     }
@@ -1435,11 +1531,12 @@ async fn cmd_wait(
         };
 
         let mut path = format!(
-            "/api/sessions/{}/wait-stream?since={}&timeout_secs={}&identity={}",
+            "/api/sessions/{}/wait-stream?since={}&timeout_secs={}&identity={}{}",
             sid,
             since_id,
             wait_timeout,
-            store::get_sender_name(None)
+            store::get_sender_name(None),
+            sender_param
         );
         if let Some(l) = limit.filter(|&l| l > 0) {
             path = format!("{}&limit={}", path, l);
@@ -1488,7 +1585,7 @@ async fn cmd_wait(
         if json_output {
             println!("{}", serde_json::to_string(&result).unwrap());
             if result.timeout {
-                process::exit(2);
+                process::exit(EXIT_TIMEOUT);
             }
         } else if result.closed {
             println!("[session closed]");
@@ -1498,7 +1595,7 @@ async fn cmd_wait(
                 result.timeout_after.unwrap_or(0)
             );
             let _ = print_unread_hint(&host, port).await;
-            process::exit(2);
+            process::exit(EXIT_TIMEOUT);
         } else {
             let _ = store::write_active_session(&sid).await;
             for msg in &result.messages {
@@ -1527,7 +1624,9 @@ async fn cmd_watch(
     timeout: Option<u64>,
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
-    let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "stream").await?;
+    let session_id =
+        resolve_session_id_or_fail(&host, port, session_arg.as_deref(), "stream", json_output)
+            .await;
 
     let since_id = since.unwrap_or(0);
     let mut path = format!("/api/sessions/{}/events?since={}", session_id, since_id);
@@ -1542,6 +1641,19 @@ async fn cmd_watch(
     if !resp.status().is_success() {
         let err: ErrorResponse = resp.json().await?;
         fail(json_output, &err.error, "SESSION_NOT_FOUND");
+    }
+
+    // B007: visible connection status (text → stdout, --json → stderr).
+    if json_output {
+        eprintln!(
+            "[stream] connected to tala daemon at {}:{} (session {}, since id {})",
+            host, port, session_id, since_id
+        );
+    } else {
+        println!(
+            "Streaming session {} from tala daemon at {}:{} (since id {})...",
+            session_id, host, port, since_id
+        );
     }
 
     let timeout_dur = timeout.filter(|&t| t > 0).map(Duration::from_secs);
@@ -1640,12 +1752,15 @@ async fn cmd_listen(
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
 
-    let since_id = if let Some(s) = since {
-        s
-    } else {
-        store::read_cursor().await
-    };
+    let since_id = since.unwrap_or_default();
     let mut path = format!("/api/observe?since={}", since_id);
+    if since.is_none() {
+        // No explicit --since: replay each session since ITS OWN read cursor.
+        // A single global since cannot represent per-session id spaces (B014).
+        let cursors = store::read_cursors().await;
+        let since_map = serde_json::to_string(&cursors).unwrap_or_else(|_| "{}".to_string());
+        path = format!("{}&since_map={}", path, percent_encode(&since_map));
+    }
     if let Some(ref m) = match_str {
         path = format!("{}&match={}", path, urlencoding(m));
     }
@@ -1670,9 +1785,25 @@ async fn cmd_listen(
         fail(json_output, &err.error, "OBSERVE_ERROR");
     }
 
+    // B007: visible connection status. Text banner goes to stdout (matches the
+    // "Waiting for a new session…" convention in wait); in --json mode it goes
+    // to stderr so stdout stays a pure JSON event stream.
+    if json_output {
+        eprintln!(
+            "[listen] connected to tala daemon at {}:{} (since id {})",
+            host, port, since_id
+        );
+    } else {
+        println!(
+            "Listening on tala daemon at {}:{} (all sessions, since id {})...",
+            host, port, since_id
+        );
+    }
+
     let mut buffer = String::new();
     let mut stream = resp.bytes_stream();
-    let mut max_msg_id = since_id;
+    let mut message_count: u64 = 0;
+    let mut max_by_session: HashMap<String, u64> = HashMap::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -1690,14 +1821,23 @@ async fn cmd_listen(
                 }
             }
 
+            let evt = serde_json::from_str::<ObserveEvent>(&data);
+            if let Ok(ref evt) = evt {
+                if evt.r#type == "message" {
+                    message_count += 1;
+                }
+            }
+
             if json_output {
                 println!("{}", data);
-            } else if let Ok(evt) = serde_json::from_str::<ObserveEvent>(&data) {
+            } else if let Ok(evt) = evt {
                 match evt.r#type.as_str() {
                     "message" => {
                         if let Some(msg) = evt.message {
-                            if msg.id > max_msg_id {
-                                max_msg_id = msg.id;
+                            let sid = evt.session_id.clone();
+                            let entry = max_by_session.entry(sid).or_insert(0);
+                            if msg.id > *entry {
+                                *entry = msg.id;
                             }
                             let session_label = evt.session_name.unwrap_or(evt.session_id);
                             println!(
@@ -1721,11 +1861,35 @@ async fn cmd_listen(
         }
     }
 
-    if max_msg_id > since_id {
-        let _ = store::write_cursor(max_msg_id).await;
+    // B007: end-of-stream note with a message tally so connected-but-quiet is
+    // distinguishable from a dead listener.
+    if json_output {
+        eprintln!("[listen] connection closed ({} message(s))", message_count);
+    } else {
+        println!("[connection closed] ({} message(s))", message_count);
+    }
+
+    // Advance the per-session read cursor for each session we saw messages in.
+    for (sid, mid) in &max_by_session {
+        if *mid > store::read_cursor(sid).await {
+            let _ = store::write_cursor(sid, *mid).await;
+        }
     }
 
     Ok(())
+}
+
+fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
 }
 
 fn urlencoding(s: &str) -> String {
@@ -1744,10 +1908,23 @@ async fn cmd_recap(
     json_output: bool,
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
-    let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "recap").await?;
+    let session_id =
+        resolve_session_id_or_fail(&host, port, session_arg.as_deref(), "recap", json_output).await;
+
+    // B021: identify the reader so the daemon records read receipts.
+    let sender_param = format!(
+        "&sender={}",
+        store::read_project_config()
+            .await
+            .or_else(|| Some(store::get_default_sender()))
+            .unwrap_or_else(|| "unknown".to_string())
+    );
 
     let since_id = since.unwrap_or(0);
-    let mut path = format!("/api/sessions/{}/recap?since={}", session_id, since_id);
+    let mut path = format!(
+        "/api/sessions/{}/recap?since={}{}",
+        session_id, since_id, sender_param
+    );
     if let Some(ref f) = from {
         path = format!("{}&from={}", path, f);
     }
@@ -1779,19 +1956,27 @@ async fn cmd_recap(
             println!("cursor: {}", c);
         }
         println!();
-        for msg in &recap.messages {
-            println!(
-                "[{}] {} {} ({}):{}",
-                msg.id,
-                intent_badge(msg),
-                msg.sender,
-                msg.timestamp.format("%H:%M:%S"),
-                render_deadline(msg)
-            );
-            println!("    {}\n", msg.content);
+        if recap.messages.is_empty() {
+            println!("(no messages yet)");
+        } else {
+            for msg in &recap.messages {
+                println!(
+                    "[{}] {} {} ({}):{}",
+                    msg.id,
+                    intent_badge(msg),
+                    msg.sender,
+                    msg.timestamp.format("%H:%M:%S"),
+                    render_deadline(msg)
+                );
+                println!("    {}\n", msg.content);
+            }
         }
     }
-    store::write_cursor(recap.cursor.unwrap_or(0)).await?;
+    // Mark THIS session read only. Empty sessions have cursor: None — skip the
+    // write so an empty history can never reset read state (B025).
+    if let Some(c) = recap.cursor {
+        store::write_cursor(&session_id, c).await?;
+    }
     Ok(())
 }
 
@@ -1855,7 +2040,7 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
     let resp = client.get(&url).send().await?;
     let sessions: Vec<SessionSummary> = resp.json().await?;
 
-    let cursor = store::read_cursor().await;
+    let cursors = store::read_cursors().await;
     let active_session = store::read_active_session().await;
     let pending: Vec<PendingObligation> = {
         let client = reqwest::Client::new();
@@ -1880,7 +2065,8 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
             let unread = if s.closed {
                 0
             } else {
-                compute_session_unread(&host, port, s, cursor).await
+                let since_id = cursors.get(&s.id).copied().unwrap_or(0);
+                compute_session_unread(&host, port, s, since_id).await
             };
             let mut entry = serde_json::to_value(s).unwrap_or_default();
             if let Some(obj) = entry.as_object_mut() {
@@ -1913,7 +2099,7 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
             .unwrap_or(1)
             .max(4);
         for s in &sessions {
-            let status = if s.closed { "closed" } else { "active" };
+            let status = if s.closed { "closed" } else { "open" };
             let name = s.name.as_deref().unwrap_or("-");
             let marker = if active_session.as_deref() == Some(&s.id) {
                 " *"
@@ -1925,18 +2111,37 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
                 .iter()
                 .filter(|w| matches!(&w.scope, WaitScope::Session(sid) if sid == &s.id))
                 .count();
+            // B021: show readers OTHER than the local identity (self-reads are
+            // noise in text; --json exposes the full read_by map).
+            let local_identity = store::read_project_config()
+                .await
+                .or_else(|| Some(store::get_default_sender()));
+            let mut readers: Vec<String> = s
+                .read_by
+                .iter()
+                .filter(|(sender, _)| local_identity.as_deref() != Some(sender.as_str()))
+                .map(|(sender, id)| format!("{}@{}", sender, id))
+                .collect();
+            readers.sort();
+            let read_suffix = if readers.is_empty() {
+                String::new()
+            } else {
+                format!("  read: {}", readers.join(", "))
+            };
             if s.closed {
                 println!(
-                    "{}  {:width$}  {}  {} msgs{}",
+                    "{}  {:width$}  {}  {} msgs{}{}",
                     s.id,
                     name,
                     status,
                     s.message_count,
                     marker,
+                    read_suffix,
                     width = name_width
                 );
             } else {
-                let unread = compute_session_unread(&host, port, s, cursor).await;
+                let since_id = cursors.get(&s.id).copied().unwrap_or(0);
+                let unread = compute_session_unread(&host, port, s, since_id).await;
                 let mut extra = Vec::new();
                 if unread > 0 {
                     extra.push(format!("{} new", unread));
@@ -1953,13 +2158,14 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
                     format!(" ({})", extra.join(", "))
                 };
                 println!(
-                    "{}  {:width$}  {}  {} msgs{}{}",
+                    "{}  {:width$}  {}  {} msgs{}{}{}",
                     s.id,
                     name,
                     status,
                     s.message_count,
                     extra_str,
                     marker,
+                    read_suffix,
                     width = name_width
                 );
             }
@@ -2168,7 +2374,8 @@ async fn cmd_close(
     quiet: bool,
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
-    let session_id = resolve_session_id(&host, port, session_arg.as_deref(), "close").await?;
+    let session_id =
+        resolve_session_id_or_fail(&host, port, session_arg.as_deref(), "close", json_output).await;
 
     let client = reqwest::Client::new();
     let url = daemon_url(&host, port, &format!("/api/sessions/{}", session_id));
@@ -2176,8 +2383,12 @@ async fn cmd_close(
 
     if resp.status().is_success() {
         let result: CloseSessionResponse = resp.json().await?;
-        let was_active = session_arg.is_none()
-            && store::read_active_session().await.as_deref() == Some(&session_id);
+        // Clear the active marker whenever the CLOSED session is the active one,
+        // regardless of how it was addressed (positional, -s, or `session close`
+        // alias which always passes Some(id)). Previously the alias path computed
+        // was_active=false and left a dangling * marker + stale active-session
+        // file, breaking bare `send` (B028).
+        let was_active = store::read_active_session().await.as_deref() == Some(&session_id);
         if was_active {
             store::clear_active_session().await?;
         }
@@ -2207,6 +2418,9 @@ async fn cmd_close(
 
 async fn cmd_session_show(session_id: String, json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
+    let session_id = resolve_session_ref(&host, port, &session_id, "show")
+        .await
+        .unwrap_or_else(|e| fail(json_output, e.to_string(), "SESSION_NOT_FOUND"));
 
     let client = reqwest::Client::new();
     let url = daemon_url(&host, port, &format!("/api/sessions/{}", session_id));
@@ -2236,7 +2450,7 @@ async fn cmd_session_show(session_id: String, json_output: bool) -> anyhow::Resu
         );
         println!(
             "  Status: {}",
-            if session.closed { "closed" } else { "active" }
+            if session.closed { "closed" } else { "open" }
         );
     }
     Ok(())
@@ -2249,6 +2463,9 @@ async fn cmd_session_rename(
     force: bool,
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
+    let session_id = resolve_session_ref(&host, port, &session_id, "rename")
+        .await
+        .unwrap_or_else(|e| fail(json_output, e.to_string(), "SESSION_NOT_FOUND"));
 
     let client = reqwest::Client::new();
     let url = daemon_url(&host, port, &format!("/api/sessions/{}/rename", session_id));
@@ -2262,7 +2479,7 @@ async fn cmd_session_rename(
     if !status.is_success() {
         let err: ErrorResponse = resp.json().await?;
         match status.as_u16() {
-            409 => fail(json_output, &err.error, "SESSION_ALREADY_NAMED"),
+            409 => fail(json_output, &err.error, "SESSION_NAME_TAKEN"),
             _ => fail(json_output, &err.error, "SESSION_NOT_FOUND"),
         }
     }
@@ -2282,6 +2499,9 @@ async fn cmd_session_rename(
 
 async fn cmd_session_reopen(session_id: String, json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
+    let session_id = resolve_session_ref(&host, port, &session_id, "reopen")
+        .await
+        .unwrap_or_else(|e| fail(json_output, e.to_string(), "SESSION_NOT_FOUND"));
 
     let client = reqwest::Client::new();
     let url = daemon_url(&host, port, &format!("/api/sessions/{}/reopen", session_id));
@@ -2294,13 +2514,13 @@ async fn cmd_session_reopen(session_id: String, json_output: bool) -> anyhow::Re
     }
 
     let result: serde_json::Value = resp.json().await?;
-    store::write_active_session(&session_id).await?;
     if json_output {
-        let mut out = result;
-        out["active"] = serde_json::json!(true);
-        println!("{}", serde_json::to_string(&out).unwrap());
+        println!("{}", serde_json::to_string(&result).unwrap());
     } else {
-        println!("Session {} reopened (now active)", session_id);
+        println!(
+            "Session {} reopened (use `tala use {}` to make it active)",
+            session_id, session_id
+        );
     }
     Ok(())
 }
@@ -2318,13 +2538,25 @@ async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::R
         eprintln!("Waiting for a new session (timeout: {}s)...", timeout);
     }
     let _ = print_unread_hint(&host, port).await;
+    // B003: identify ourselves so the daemon only delivers sessions with an
+    // incoming message from ANOTHER agent (not our own creates).
+    let sender = store::read_project_config()
+        .await
+        .or_else(|| Some(store::get_default_sender()));
+    let sender_param = match sender {
+        Some(s) => format!("&sender={}", s),
+        None => String::new(),
+    };
+    let seen_param = wait_new_seen_param().await;
     let url = daemon_url(
         &host,
         port,
         &format!(
-            "/api/sessions/wait-new-stream?timeout_secs={}&identity={}",
+            "/api/sessions/wait-new-stream?timeout_secs={}&identity={}{}{}",
             timeout,
-            store::get_sender_name(None)
+            store::get_sender_name(None),
+            sender_param,
+            seen_param
         ),
     );
     let client = reqwest::Client::new();
@@ -2341,7 +2573,7 @@ async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::R
             result["timeout_after"].as_u64().unwrap_or(timeout)
         );
         let _ = print_unread_hint(&host, port).await;
-        process::exit(2);
+        process::exit(EXIT_TIMEOUT);
     } else if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
         fail(json_output, err, "WAIT_NEW_ERROR");
     }
@@ -2441,7 +2673,7 @@ fn render_deadline(msg: &Message) -> String {
 
 /// Prints a hint when sessions exist with unread messages from other senders.
 async fn print_unread_hint(host: &str, port: u16) -> anyhow::Result<()> {
-    let cursor = store::read_cursor().await;
+    let cursors = store::read_cursors().await;
     let local_agent = store::read_project_config()
         .await
         .or_else(|| Some(store::get_default_sender()));
@@ -2454,6 +2686,7 @@ async fn print_unread_hint(host: &str, port: u16) -> anyhow::Result<()> {
         if s.closed {
             continue;
         }
+        let cursor = cursors.get(&s.id).copied().unwrap_or(0);
         let msgs_url = daemon_url(
             host,
             port,
@@ -2483,12 +2716,21 @@ async fn print_unread_hint(host: &str, port: u16) -> anyhow::Result<()> {
 }
 
 async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
+    let tala_home_set = std::env::var("TALA_HOME").is_ok();
+    let home_path = store::tala_home();
     let info = match store::read_daemon_json().await {
         Ok(info) => info,
         Err(_) => {
             let home = daemon_home_display();
             if json_output {
-                println!("{}", serde_json::json!({"running": false, "home": home}));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "running": false,
+                        "home": home_path.display().to_string(),
+                        "tala_home_set": tala_home_set,
+                    })
+                );
             } else {
                 println!("no daemon running (checked {}/daemon.json)", home);
                 println!("Start the daemon by running any tala command, or set TALA_HOME if using a custom location");
@@ -2506,8 +2748,8 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
         .unwrap_or(false);
 
     if alive {
-        let cursor = store::read_cursor().await;
-        let total_unread = compute_total_unread(&info.host, info.port, cursor).await;
+        let cursors = store::read_cursors().await;
+        let total_unread = compute_total_unread(&info.host, info.port, &cursors).await;
         let waits: Vec<ActiveWaitInfo> = {
             let client = reqwest::Client::new();
             let url = daemon_url(&info.host, info.port, "/api/waits");
@@ -2526,6 +2768,8 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
                 "started_at": info.started_at,
                 "total_unread": total_unread,
                 "active_waits": waits,
+                "home": home_path.display().to_string(),
+                "tala_home_set": tala_home_set,
             });
             println!("{}", serde_json::to_string(&resp).unwrap());
         } else {
@@ -2534,6 +2778,13 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
             println!("  Port: {}", info.port);
             println!("  Host: {}", info.host);
             println!("  Since: {}", info.started_at.format("%Y-%m-%d %H:%M:%S"));
+            println!("  Home: {}", daemon_home_display());
+            if !tala_home_set {
+                eprintln!(
+                    "warning: TALA_HOME is not set — using default daemon home {}",
+                    home_path.display()
+                );
+            }
             if total_unread > 0 {
                 println!(
                     "  Unread: {} new message(s) across all sessions",
@@ -2561,7 +2812,7 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
         if json_output {
             println!(
                 "{}",
-                serde_json::json!({"running": false, "stale_daemon_json": true, "home": home})
+                serde_json::json!({"running": false, "stale_daemon_json": true, "home": home_path.display().to_string(), "tala_home_set": tala_home_set})
             );
         } else {
             println!("daemon.json found at {}/daemon.json but daemon is not reachable (may have crashed)", home);
@@ -2571,7 +2822,7 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn compute_total_unread(host: &str, port: u16, cursor: u64) -> usize {
+async fn compute_total_unread(host: &str, port: u16, cursors: &HashMap<String, u64>) -> usize {
     let local_agent = store::read_project_config().await;
     let client = reqwest::Client::new();
     let url = daemon_url(host, port, "/api/sessions");
@@ -2580,10 +2831,11 @@ async fn compute_total_unread(host: &str, port: u16, cursor: u64) -> usize {
             let sessions: Vec<SessionSummary> = resp.json().await.unwrap_or_default();
             let mut total = 0;
             for s in &sessions {
+                let since_id = cursors.get(&s.id).copied().unwrap_or(0);
                 let msgs_url = daemon_url(
                     host,
                     port,
-                    &format!("/api/sessions/{}/messages?since={}", s.id, cursor),
+                    &format!("/api/sessions/{}/messages?since={}", s.id, since_id),
                 );
                 if let Ok(resp) = client.get(&msgs_url).send().await {
                     if let Ok(msgs) = resp.json::<Vec<Message>>().await {
@@ -2603,7 +2855,7 @@ async fn compute_total_unread(host: &str, port: u16, cursor: u64) -> usize {
 
 async fn cmd_whatsup(json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
-    let cursor = store::read_cursor().await;
+    let mut cursors = store::read_cursors().await;
     let client = reqwest::Client::new();
 
     let url = daemon_url(&host, port, "/api/sessions");
@@ -2612,14 +2864,31 @@ async fn cmd_whatsup(json_output: bool) -> anyhow::Result<()> {
 
     let mut all_messages: Vec<Message> = Vec::new();
 
+    // B021: identify the reader so the daemon records read receipts.
+    let sender_param = format!(
+        "&sender={}",
+        store::read_project_config()
+            .await
+            .or_else(|| Some(store::get_default_sender()))
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+
+    // Fetch per session since THAT session's own read cursor (B014).
     for s in &sessions {
+        let since_id = cursors.get(&s.id).copied().unwrap_or(0);
         let msgs_url = daemon_url(
             &host,
             port,
-            &format!("/api/sessions/{}/messages?since={}", s.id, cursor),
+            &format!(
+                "/api/sessions/{}/messages?since={}{}",
+                s.id, since_id, sender_param
+            ),
         );
         if let Ok(resp) = client.get(&msgs_url).send().await {
             if let Ok(msgs) = resp.json::<Vec<Message>>().await {
+                if let Some(max_id) = msgs.iter().map(|m| m.id).max() {
+                    cursors.insert(s.id.clone(), max_id);
+                }
                 all_messages.extend(msgs);
             }
         }
@@ -2627,16 +2896,18 @@ async fn cmd_whatsup(json_output: bool) -> anyhow::Result<()> {
 
     all_messages.sort_by_key(|m| m.id);
 
-    let new_cursor = all_messages.iter().map(|m| m.id).max().unwrap_or(cursor);
+    // "cursor" is kept for backward compatibility: max of the per-session cursors.
+    let max_cursor = cursors.values().copied().max().unwrap_or(0);
 
     if json_output {
         let result = serde_json::json!({
-            "cursor": new_cursor,
+            "cursor": max_cursor,
+            "cursors": cursors,
             "messages": all_messages,
         });
         println!("{}", serde_json::to_string(&result).unwrap());
     } else if all_messages.is_empty() {
-        println!("No new messages since last check (cursor: {})", cursor);
+        println!("No new messages since last check");
     } else {
         // Group messages by session
         let mut by_session: std::collections::BTreeMap<String, Vec<&Message>> =
@@ -2670,10 +2941,13 @@ async fn cmd_whatsup(json_output: bool) -> anyhow::Result<()> {
         }
     }
 
-    store::write_cursor(new_cursor).await?;
+    // Persist the per-session read cursors.
+    for (sid, mid) in &cursors {
+        store::write_cursor(sid, *mid).await?;
+    }
 
     if !json_output && !all_messages.is_empty() {
-        println!("(cursor updated to {})", new_cursor);
+        println!("(read markers updated for {} session(s))", cursors.len());
     }
 
     Ok(())
@@ -2695,17 +2969,24 @@ async fn cmd_stop() -> anyhow::Result<()> {
                 return Ok(());
             }
         };
-        use std::process::Command;
-        let kill_status = Command::new("kill")
-            .arg(info.pid.to_string())
-            .status()
-            .context("failed to run kill")?;
-
-        if !kill_status.success() {
-            // Process already gone — clean up stale daemon.json
-            store::remove_daemon_json().await;
-            println!("daemon stopped");
-            return Ok(());
+        use libc::kill;
+        let pid = info.pid as libc::pid_t;
+        // Send SIGTERM directly via the syscall — no external `kill` binary needed.
+        // (Containers/slim systems may not ship /bin/kill.)
+        let ret = unsafe { kill(pid, libc::SIGTERM) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                // Process already gone — clean up stale daemon.json
+                store::remove_daemon_json().await;
+                println!("daemon stopped");
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!(
+                "failed to kill daemon (pid {}): {}",
+                pid,
+                err
+            ));
         }
 
         for _ in 0..20 {

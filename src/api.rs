@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,6 +60,18 @@ async fn create_session(
     State(state): State<AppState>,
     Json(req): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
+    // B017: names are an addressing key — reject duplicates before creating.
+    if let Some(ref name) = req.name {
+        if state.store.session_name_exists(name).await {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: format!("A session named '{}' already exists", name),
+                }),
+            )
+                .into_response();
+        }
+    }
     let sender = req.sender.unwrap_or_else(|| "unknown".to_string());
     let initial = req.message.map(|msg| (sender, msg));
     let (id, first_message_id) = state.store.create_session(initial, req.name).await;
@@ -69,6 +82,7 @@ async fn create_session(
             first_message_id,
         }),
     )
+        .into_response()
 }
 
 async fn list_sessions(State(state): State<AppState>) -> impl IntoResponse {
@@ -209,6 +223,8 @@ async fn send_message(
 #[derive(Deserialize)]
 struct GetMessagesParams {
     since: Option<u64>,
+    /// Identity of the reader; used to record read receipts (B021).
+    sender: Option<String>,
 }
 
 async fn get_messages(
@@ -218,6 +234,9 @@ async fn get_messages(
 ) -> impl IntoResponse {
     let since = params.since.unwrap_or(0);
     let messages = state.store.get_messages_since(&id, since).await;
+    if let (Some(sender), Some(max)) = (&params.sender, messages.iter().map(|m| m.id).max()) {
+        state.store.record_read(&id, sender, max).await;
+    }
     (StatusCode::OK, Json(messages))
 }
 
@@ -229,6 +248,8 @@ struct WaitParams {
     from: Option<String>,
     identity: Option<String>,
     reply_to: Option<u64>,
+    /// Identity of the reader; used to record read receipts (B021).
+    sender: Option<String>,
 }
 
 fn compute_cursor(messages: &[Message]) -> Option<u64> {
@@ -291,6 +312,9 @@ async fn wait_for_message(
         .get_messages_filtered(&id, since, limit, from)
         .await;
     if !existing.is_empty() {
+        if let (Some(sender), Some(max)) = (&params.sender, existing.iter().map(|m| m.id).max()) {
+            state.store.record_read(&id, sender, max).await;
+        }
         return (
             StatusCode::OK,
             Json(wrap_wait(existing, false, None, is_closed, overlaps)),
@@ -349,6 +373,9 @@ async fn wait_for_message(
         .get_messages_filtered(&id, since, limit, from)
         .await;
     if !existing.is_empty() {
+        if let (Some(sender), Some(max)) = (&params.sender, existing.iter().map(|m| m.id).max()) {
+            state.store.record_read(&id, sender, max).await;
+        }
         return (
             StatusCode::OK,
             Json(wrap_wait(existing, false, None, is_closed, overlaps)),
@@ -386,6 +413,11 @@ async fn wait_for_message(
                         };
                         let session = state.store.get_session(&id).await;
                         let closed = session.map(|s| s.closed).unwrap_or(false);
+                        if let (Some(sender), Some(max)) =
+                            (&params.sender, msgs.iter().map(|m| m.id).max())
+                        {
+                            state.store.record_read(&id, sender, max).await;
+                        }
                         return wrap_wait(msgs, false, None, closed, vec![]);
                     }
                 }
@@ -425,6 +457,8 @@ struct WaitStreamParams {
     from: Option<String>,
     identity: Option<String>,
     reply_to: Option<u64>,
+    /// Reader identity; records read receipts (B021).
+    sender: Option<String>,
 }
 
 /// SSE wait for a session: delivers `overlap` events (pre-flight + in-wait),
@@ -512,6 +546,11 @@ async fn wait_stream(
         existing_msgs = existing;
     }
     if !existing_msgs.is_empty() {
+        if let (Some(reader), Some(max)) =
+            (&params.sender, existing_msgs.iter().map(|m| m.id).max())
+        {
+            state.store.record_read(&id, reader, max).await;
+        }
         let mut events: Vec<Result<Event, Infallible>> = Vec::new();
         for m in &existing_msgs {
             let data = serde_json::to_string(m).unwrap();
@@ -582,6 +621,9 @@ async fn wait_stream(
                         if !store_for_check.message_answers(&sid, &msg, target).await {
                             continue;
                         }
+                    }
+                    if let Some(reader) = &params.sender {
+                        store_for_check.record_read(&sid, reader, msg.id).await;
                     }
                     let data = serde_json::to_string(&msg).unwrap();
                     let evt = Event::default().event("message").data(data);
@@ -678,6 +720,12 @@ async fn wait_stream(
 struct WaitNewStreamParams {
     timeout_secs: Option<u64>,
     identity: Option<String>,
+    /// The waiting agent's own identity (B003): only sessions with an incoming
+    /// message from a DIFFERENT agent satisfy the wait; own creates are ignored.
+    sender: Option<String>,
+    /// The waiter's per-session read cursors (URL-encoded JSON map). Sessions
+    /// with a cursor entry are never "new" to the waiter (B029).
+    seen: Option<String>,
 }
 
 /// SSE wait for a new session: delivers `overlap` events and a terminal
@@ -688,6 +736,25 @@ async fn wait_new_stream(
 ) -> impl IntoResponse {
     let timeout_secs = params.timeout_secs.unwrap_or(60);
     let identity = params.identity.unwrap_or_else(|| "unknown".to_string());
+    let caller = params.sender.clone();
+    let seen: HashMap<String, u64> = params
+        .seen
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+
+    // B003/B029: scan for an already-existing incoming session from another
+    // agent that the waiter has never seen; freshest first.
+    if let Some(ref me) = caller {
+        if let Some((sid, msg)) = find_incoming_session(&state.store, me, &seen).await {
+            let mut events: Vec<Result<Event, Infallible>> = Vec::new();
+            let mut resp = serde_json::json!({"session_id": sid});
+            resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
+            let data = serde_json::to_string(&resp).unwrap();
+            events.push(Ok(Event::default().event("result").data(data)));
+            return (StatusCode::OK, Sse::new(stream::iter(events))).into_response();
+        }
+    }
 
     let (wait_id, overlaps) =
         state
@@ -740,6 +807,11 @@ async fn wait_new_stream(
             };
             match result {
                 Ok((_sid, DaemonEvent::SessionCreated(id))) => {
+                    // With identity, a session create alone must NOT satisfy the
+                    // wait (B003: it fires on the waiter's OWN create).
+                    if caller.is_some() {
+                        continue;
+                    }
                     let msgs = store_for_task.get_messages_since(&id, 0).await;
                     let first = msgs.first().cloned();
                     let mut resp = serde_json::json!({"session_id": id});
@@ -752,6 +824,22 @@ async fn wait_new_stream(
                     break;
                 }
                 Ok((_sid, DaemonEvent::NewMessage(msg))) => {
+                    if let Some(ref me) = caller {
+                        // Only incoming messages from OTHER agents satisfy the
+                        // wait; our own sends are ignored (B003).
+                        if msg.sender == *me {
+                            continue;
+                        }
+                        store_for_task
+                            .record_read(&msg.session_id, me, msg.id)
+                            .await;
+                        let mut resp = serde_json::json!({"session_id": msg.session_id});
+                        resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
+                        let data = serde_json::to_string(&resp).unwrap();
+                        let evt = Event::default().event("result").data(data);
+                        let _ = tx.send(Ok(evt)).await;
+                        break;
+                    }
                     let sessions = store_for_task.list_sessions().await;
                     if sessions.len() > existing_count {
                         let mut resp = serde_json::json!({"session_id": msg.session_id});
@@ -802,6 +890,15 @@ async fn wait_new_stream(
 #[derive(Deserialize)]
 struct WaitNewParams {
     timeout_secs: Option<u64>,
+    /// The waiting agent's own identity (from .tala/config.json or the default
+    /// sender). When present, the wait only returns sessions that carry a
+    /// message from a DIFFERENT agent, and ignores the waiter's own creates.
+    sender: Option<String>,
+    /// The waiter's per-session read cursors (URL-encoded JSON map of
+    /// session_id -> last-seen message id, from .tala/cursors.json). Sessions
+    /// the waiter has a cursor entry for (created/sent-in/read) are never
+    /// "new" to it (B029) and are excluded from the pre-existing scan.
+    seen: Option<String>,
 }
 
 async fn wait_new_session(
@@ -809,6 +906,31 @@ async fn wait_new_session(
     Query(params): Query<WaitNewParams>,
 ) -> impl IntoResponse {
     let timeout_secs = params.timeout_secs.unwrap_or(60);
+    let caller = params.sender;
+    // B029: the waiter's per-session read state. Sessions with a cursor entry
+    // are known to the waiter; only never-seen sessions can satisfy the
+    // pre-existing scan.
+    let seen: HashMap<String, u64> = params
+        .seen
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+
+    // B003: when the waiter identifies itself, first scan for sessions that
+    // ALREADY exist with an incoming message from another agent. The event loop
+    // below only reacts to future events, so a session created before the wait
+    // started would otherwise be missed forever. B029: the scan only returns
+    // NEVER-SEEN sessions (no cursor entry), freshest first — stale backlog in
+    // sessions the waiter already knows never satisfies `wait --new-session`.
+    if let Some(ref me) = caller {
+        if let Some((sid, msg)) = find_incoming_session(&state.store, me, &seen).await {
+            state.store.record_read(&sid, me, msg.id).await;
+            let mut resp = serde_json::json!({"session_id": sid});
+            resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
+            return (StatusCode::OK, Json(resp)).into_response();
+        }
+    }
+
     let mut rx = state.store.subscribe_global();
 
     let existing_count = state.store.list_sessions().await.len();
@@ -818,6 +940,14 @@ async fn wait_new_session(
         loop {
             match rx.recv().await {
                 Ok((_sid, DaemonEvent::SessionCreated(id))) => {
+                    // When the waiter identifies itself, a session create alone
+                    // must NOT satisfy the wait (B003: it fires on your OWN
+                    // `session create`). Wait for an incoming NewMessage from
+                    // another agent instead. Without identity, keep legacy
+                    // behavior (any new session counts).
+                    if caller.is_some() {
+                        continue;
+                    }
                     let msgs = state.store.get_messages_since(&id, 0).await;
                     let first = msgs.first().cloned();
                     let mut resp = serde_json::json!({"session_id": id});
@@ -827,6 +957,18 @@ async fn wait_new_session(
                     return resp;
                 }
                 Ok((_sid, DaemonEvent::NewMessage(msg))) => {
+                    if let Some(ref me) = caller {
+                        // Only incoming messages from OTHER agents satisfy the
+                        // wait; our own sends (including the initial message of
+                        // a session we create) are ignored.
+                        if msg.sender == *me {
+                            continue;
+                        }
+                        state.store.record_read(&msg.session_id, me, msg.id).await;
+                        let mut resp = serde_json::json!({"session_id": msg.session_id});
+                        resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
+                        return resp;
+                    }
                     let sessions = state.store.list_sessions().await;
                     if sessions.len() > existing_count {
                         let mut resp = serde_json::json!({"session_id": msg.session_id});
@@ -857,6 +999,44 @@ async fn wait_new_session(
     }
 }
 
+/// Find the session (if any) that the waiter has NEVER seen (no cursor entry)
+/// and that already has a message from an agent other than `me`, preferring the
+/// most recently active one. Used by `wait_new_session` so a pre-existing
+/// session with an incoming question is returned immediately (B003) while
+/// stale backlog in sessions the waiter already knows is ignored (B029).
+async fn find_incoming_session(
+    store: &Arc<Store>,
+    me: &str,
+    seen: &HashMap<String, u64>,
+) -> Option<(String, Message)> {
+    let sessions = store.list_sessions().await;
+    let mut best: Option<(String, Message)> = None;
+    for s in sessions {
+        if s.closed {
+            continue;
+        }
+        // B029: any cursor entry (created, sent in, or read) marks the session
+        // as known to the waiter — never a candidate for `--new-session`.
+        if seen.contains_key(&s.id) {
+            continue;
+        }
+        let msgs = store.get_messages_since(&s.id, 0).await;
+        // Freshest incoming message from another agent (the waiter cannot have
+        // sent here: sending records a cursor entry, excluding the session).
+        let freshest_incoming = msgs.iter().rfind(|m| m.sender != me);
+        if let Some(m) = freshest_incoming {
+            let is_better = match &best {
+                Some((_, bm)) => m.timestamp > bm.timestamp,
+                None => true,
+            };
+            if is_better {
+                best = Some((s.id.clone(), m.clone()));
+            }
+        }
+    }
+    best
+}
+
 async fn wait_all(
     State(state): State<AppState>,
     Query(params): Query<WaitNewParams>,
@@ -869,6 +1049,9 @@ async fn wait_all(
         loop {
             match rx.recv().await {
                 Ok((_sid, DaemonEvent::NewMessage(msg))) => {
+                    if let Some(ref me) = params.sender {
+                        state.store.record_read(&msg.session_id, me, msg.id).await;
+                    }
                     return wrap_wait(vec![msg], false, None, false, vec![]);
                 }
                 Ok((
@@ -923,6 +1106,11 @@ async fn recap_session(
         .get_messages_filtered(&id, since, params.limit, from)
         .await;
     let cursor = compute_cursor(&messages);
+
+    // B021: a recap is a read — record the reader's receipt.
+    if let (Some(sender), Some(max)) = (&params.sender, messages.iter().map(|m| m.id).max()) {
+        state.store.record_read(&id, sender, max).await;
+    }
 
     (
         StatusCode::OK,
@@ -1070,6 +1258,7 @@ async fn stream_events(
 #[derive(Deserialize)]
 struct ObserveParams {
     since: Option<u64>,
+    since_map: Option<String>,
     r#match: Option<String>,
     from: Option<String>,
     channel: Option<String>,
@@ -1081,6 +1270,14 @@ async fn observe_events(
     Query(params): Query<ObserveParams>,
 ) -> impl IntoResponse {
     let since = params.since.unwrap_or(0);
+    // Optional per-session since map (URL-encoded JSON) for read-cursor-aware
+    // replay: each session is replayed from ITS OWN last-seen id (B014).
+    let since_map: HashMap<String, u64> = params
+        .since_map
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let since_for = |sid: &str| since_map.get(sid).copied().unwrap_or(since);
     let match_str = params.r#match;
     let from = params.from;
     let channel = params.channel;
@@ -1097,7 +1294,10 @@ async fn observe_events(
                 _ => {}
             }
         }
-        let msgs = state.store.get_messages_since(&session.id, since).await;
+        let msgs = state
+            .store
+            .get_messages_since(&session.id, since_for(&session.id))
+            .await;
         for msg in &msgs {
             if let Some(ref f) = from {
                 if msg.sender != *f {
@@ -1169,7 +1369,9 @@ async fn observe_events(
 
                     let opt = match event {
                         DaemonEvent::NewMessage(msg) => {
-                            if msg.id <= since {
+                            let msg_since =
+                                since_map.get(&msg.session_id).copied().unwrap_or(since);
+                            if msg.id <= msg_since {
                                 continue;
                             }
                             if let Some(ref f) = from {

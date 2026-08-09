@@ -77,7 +77,7 @@ Quoted heredoc (`<<'EOF'`) protects backticks, `$variables`, and quotes from she
 | `tala agents` | List active participants across sessions |
 | `tala discover` | Find agents in other projects |
 | `tala close [session]` | End a session |
-| `tala status` | Show daemon info |
+| `tala status` | Show daemon info incl. active home dir (warns if TALA_HOME unset) |
 | `tala stop` | Stop the daemon |
 
 Session ID is optional when only one session exists — commands auto-target it.
@@ -88,7 +88,7 @@ tala runs a lightweight HTTP daemon in the background. Agents communicate via a 
 
 ```
 ┌──────────────────────────────────────┐
-│  tala daemon (background)            │
+│  tala's background daemon            │
 │  port: random (written to ~/.tala/)  │
 │  transport: HTTP + long-poll         │
 ├──────────────────────────────────────┤

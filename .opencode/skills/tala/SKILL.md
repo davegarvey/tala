@@ -2,88 +2,82 @@
 name: tala
 description: Agent-to-agent messaging for AI coding tools. Use when you need to communicate with agents in other sessions, send messages between agents, or coordinate multi-agent workflows.
 license: MIT
-compatibility: Requires tala CLI (agent-to-agent messaging tool) v0.23+
+compatibility: Requires tala CLI (agent-to-agent messaging tool) v0.25+
 metadata:
   author: tala
-  version: "2.0"
+  version: "3.1"
 ---
 # tala — Agent-to-Agent Messaging
 
-You have access to `tala`, a CLI tool for communicating with agents in other sessions (projects, terminals, or even machines running the same daemon).
+You have access to `tala`, a CLI tool for communicating with agents in other sessions (projects, terminals, or machines running the same daemon). Run `tala --help` for the full surface; every command supports `-j/--json`.
 
 ## Quick Start
 
 ```bash
-# Start a session (sets active session for subsequent commands)
-tala start "starting work on the API endpoint"
+# Initialize this project (agent name defaults to directory name)
+tala init
 
-# Send more messages (uses active session)
-tala send "tests passing"
+# Create a session and send the first message (session create sets it active)
+tala session create --name "collab"
+tala send "starting work on the API endpoint"
 
-# Wait for a reply from another agent
+# Or send + block for a reply
 tala send --wait "need help with the CSV parser" --timeout 300
 
 # Read the conversation so far
-tala recap
+tala history
+
+# Receive side: wait for another agent to create a new session
+sess=$(tala wait --new-session --timeout 600)
 ```
 
 ## Command Reference
 
 | Command | What it does |
-|---|---|---|
-| `tala start <msg>` | Create a session and set it active. |
-| `tala start --name "label"` | Create a named session (name appears in list/observe). |
-| `tala send <msg>` | Send a message to the active session. Specify `-s <id>` for a different session. |
-| `tala send -w <msg>` | Send and block for a reply (shows `⏎ Waiting for reply...`). |
-| `tala send --intent <req|fyi|reply|out> <msg>` | Declare message intent (default: `fyi`; `--wait` implies `req`; `--reply-to` implies `reply`). |
-| `tala send --reply-to <id> <msg>` | Correlate this message as a reply to message `<id>` (same session). |
-| `tala send --expect-reply <msg>` | This message also expects a reply (modifier for reply/fyi). |
-| `tala wait` | Block until a new message arrives in the active session. |
-| `tala wait --new` | Block until *another agent* creates a new session (for receiving side). |
-| `tala pending` | List requests awaiting a reply (unanswered `req` + `--expect-reply` messages). |
-| `tala recap` | View the full conversation transcript for the active session. |
-| `tala listen` | Stream all messages from all sessions in real time. |
-| `tala listen --timeout <secs>` | Stream for N seconds then exit. |
-| `tala list` | List all sessions with name, status, message count, pending and waiting state. |
-| `tala close` | Close the active session. |
-| `tala use <id>` | Set active session for this project directory. |
-| `tala use <name>` | Set active session by session name. |
-| `tala session rename <id> <name>` | Name an existing session. |
-| `tala init <name>` | Initialize tala config for this project. |
-
-## Common Flags
-
-| Flag | Works on |
 |---|---|
-| `-s, --session <id>` | send, wait, recap, close, follow |
-| `-w, --wait` | send (block for reply) |
-| `--new` | wait (block for new session) |
-| `--sender <name>` | send (override sender name) |
-| `--timeout <secs>` | send, wait (default 300) |
-| `--since <id>` | wait, recap, follow, listen (delta reads) |
-| `-j, --json` | all commands |
-| `-q, --quiet` | send (suppress confirmation) |
-| `--file <path>` | send (read message from file) |
-| `-n, --name <label>` | start (session name) |
+| `tala init [name]` | Initialize tala config for this project (writes `.tala/config.json`). |
+| `tala session create [--name <label>]` | Create a new session; prints its ID and sets it active. |
+| `tala session rename <id> <name>` / `show <id>` / `reopen <id>` / `close <id>` / `list` | Manage sessions. |
+| `tala send [<session>] "<msg>"` | Send a message (active session if omitted). |
+| `tala send --wait "<msg>"` | Send and block for a reply (spinner; `--timeout` secs, default 60). |
+| `tala send --intent <req|fyi|reply|out> "<msg>"` | Declare message intent (default: `fyi`; `--wait` implies `req`; `--reply-to` implies `reply`). |
+| `tala send --reply-to <id> "<msg>"` | Correlate this message as a reply to message `<id>` (same session). |
+| `tala send --expect-reply "<msg>"` | This message also expects a reply (modifier for reply/fyi). |
+| `tala wait [<session>]` | Block until a new message arrives (poll). |
+| `tala wait --new-session` | Block until a session with an incoming message from another agent is ready (includes sessions that already existed; ignores your own creates). |
+| `tala pending` | List requests awaiting a reply (unanswered `req` + `--expect-reply` messages). |
+| `tala history [<session>]` | Full transcript. `--since <id>`, `--from <sender>`, `--limit <n>`. |
+| `tala stream [<session>]` | Real-time SSE for one session (push). |
+| `tala listen` | Real-time SSE across all sessions. Filters: `--from`, `--match`, `--name`, `--since`. |
+| `tala check` | Non-blocking: new messages since last check. |
+| `tala list` / `tala status` / `tala agents` / `tala discover` | Sessions / daemon / active agents / cross-project agents. |
+| `tala use [<id-or-name>]` | Set/show the active session. `--clear` to unset. |
+| `tala close [<session>]` | Close a session. |
+| `tala stop` | Stop the background daemon. |
 
 ## Key Behaviors
 
-- **Send returns immediately** by default. Messages are fire-and-forget.
-- **`tala start` is required first** — `tala send` needs an active session. Use `tala start` to create one.
-- **`tala start` sets active session** automatically. Subsequent `tala send` calls route to it.
-- **`tala start` auto-names sessions** from your project name (set via `tala init`).
-- **`tala send` reads piped stdin** automatically: `echo "msg" | tala send`.
-- **`wait` without `--since`** only waits for new messages (no history replay).
-- **Active session** is saved per project directory (`.tala/active-session`).
-- **`tala use <name>`** accepts session names in addition to IDs.
-- **`tala listen --timeout <secs>`** terminates the stream after N seconds.
-- **`TALA_HOME` env var** overrides `~/.tala` for isolated daemon instances.
-- **`tala start --name "proj"`** creates a named session for easier identification.
+- **No auto-create on send**: `tala send "msg"` with no active session errors and lists
+  candidate sessions with `tala use <id>` — it does NOT create a session. Use
+  `tala session create` (optionally `--name`) first.
+- **`tala use` matches by name, then ID prefix, then full ID.** Ambiguous input prints
+  `Multiple sessions match '...'` and lists candidates. Session names need not be unique.
+- **`session create` and `session reopen` set the active session** for this project
+  (`.tala/active-session`). Use `tala use <id>` to switch explicitly.
+- **`history --limit <n>` returns the first n messages of the filtered set (oldest first)**;
+  to tail the transcript, pass `--since <last-seen-id>`.
+- **`wait --new-session` returns a session that already has an incoming message from
+  another agent**, whether it existed before the wait started or is created during it.
+  Sessions the waiter itself creates never satisfy the wait.
+- **`stream`/`listen` stay connected** (SSE). `--timeout` (listen default 60, 0 = forever).
+- The daemon auto-starts on any command and writes its PID/port to
+  `$TALA_HOME/daemon.json` (`~/.tala/daemon.json` by default). `TALA_HOME` overrides the
+  location for isolated daemon instances. `tala stop` stops it.
+- Sessions are ephemeral (in-memory daemon). Message IDs are per-session.
 
-## Best Practices (from eval validation)
+## Intent Protocol
 
-### Intent protocol (message metadata)
-Every message can carry an intent, rendered as a badge in all output:
+Every message can declare its intent, rendered as a badge in all output:
 - `[REQ]` — reply expected (use `--wait`, or `--intent req`)
 - `[FYI]` — informational, no reply needed (default)
 - `[REPLY→N]` — answers message N (use `--reply-to <id>`)
@@ -98,7 +92,8 @@ Track who owes whom: `tala pending` lists unanswered requests. Answer one
 with `tala send --reply-to <id>`. Sending `--intent out` closes your own
 open requests.
 
-### Waiting visibility (deadlock prevention)
+## Waiting Visibility
+
 The daemon tracks active waits. If your wait overlaps another agent's wait
 you'll see a note (`⟳ note: alpha is waiting on sess_ab12 (13s left)`), and
 a wait timeout hints when sessions hold unread messages. `tala status` lists
@@ -106,86 +101,29 @@ everyone waiting right now; `tala list` shows pending/waiting counts per
 session. Before waiting blind, check these — the tool does the checking for
 you on every `wait`.
 
-### FYI messages (broadcast)
-```bash
-tala send "status: API endpoint done"
-tala send "found the bug in parse_row"
-```
-No reply needed. Other agents check when ready.
+## Common Patterns
 
-### Request-reply (wait for answer)
-```bash
-tala send --wait "Help: CSV parser bug with quoted fields" --timeout 300
-```
-Blocks until the other agent replies. Shows `⏎ Waiting for reply...`.
-
-### Receiving side (wait for incoming work)
-```bash
-while true; do
-  sess=$(tala wait --new --timeout 600)
-  tala recap "$sess"
-  tala send "$sess" "here's the fix"
-done
-```
-No polling needed. Blocks until another agent creates a session.
-
-### Cross-project (multi-directory)
-```bash
-# In project-alpha:
-tala start "bug in your code"                    # creates and sets active session
-# In project-beta (different CWD):
-tala list --json                                 # find the session
-tala use sess_abc12                              # set active by ID
-tala use "alpha-task"                            # or set active by name
-tala send "fix is in parse_row"                  # reply
-```
-
-### Monitoring (listen to all sessions)
-```bash
-tala listen                                     # watch everything
-tala listen --channel sess_abc12                # watch one session
-tala listen --from "alpha"                      # watch one sender
-tala listen --match "urgent"                    # watch for keywords
-```
-
-### Scripting (JSON output)
-```bash
-sess=$(tala start --json "start task" | jq -r '.session_id')
-tala wait --session "$sess" --since 0 --json | jq '.messages[]'
-```
-
-## Standard Workflows
-
-### Single-agent, single session (most common)
-```bash
-tala start "starting"         # creates and sets active session
-tala send "progress update"   # uses active session
-tala send "done"              # uses active session
-```
-
-### Two-agent collaboration (eval-validated)
-```bash
-# Agent A (sending request):
-tala send --wait "need help with X" --timeout 300
-
-# Agent B (receiving, could be in another terminal/project):
-sess=$(tala wait --new --timeout 600)
-tala recap "$sess"
-tala send "$sess" "here's the fix"
-```
-
-### Named sessions for multi-project awareness
-```bash
-tala start --name "alpha-api" "building endpoint"
-tala start --name "beta-schema" "reviewing data format"
-tala listen    # shows [alpha-api] and [beta-schema] instead of opaque IDs
-```
+| Task | Command |
+|---|---|
+| Start a named session | `tala session create --name "my-project"` |
+| Broadcast FYI | `tala send "status: done"` |
+| Request + wait | `tala send --wait "need help" --timeout 60` |
+| Correlated reply | `tala send --reply-to 5 "fix is in parse_row"` |
+| What's unanswered | `tala pending` |
+| Wait for incoming session | `sess=$(tala wait --new-session --timeout 600)` |
+| Read transcript (tail) | `tala history --since <id>` |
+| Watch all sessions | `tala listen` |
+| Filtered watch | `tala listen --from "alpha" --match "urgent"` |
+| Non-blocking check | `tala check` |
+| Cross-project discovery | `tala discover` / `tala agents` |
 
 ## Guidelines
 
-- Use **markdown** in messages — code blocks with language tags, file refs as `path/file:line`.
-- Include relevant context: errors, file paths, stack traces, snippets.
-- For long messages, pipe from file: `cat report.md | tala send`.
-- Use `--sender <name>` when you want a different sender identity.
-- Sessions are **ephemeral** (in-memory daemon). Restarting the daemon loses state.
-- `tala recap` shows history, `tala wait` shows only new messages.
+- Use **markdown** in messages — code blocks, file refs `path/file:line`.
+- Include relevant context: errors, stack traces, snippets.
+- **Shell safety:** use single quotes for messages with backticks or special chars, e.g.
+  `tala send 'msg with `code`'`. For long or multi-line content use `--stdin` (or pipe:
+  `echo "msg" | tala send`) or `--message-file`. If a message starts with `--`, add a `--`
+  separator: `tala send -- --my-flag-value`.
+- `--sender <name>` overrides the sender label (useful for tests; note any local user can
+  spoof a sender name — the daemon is unauthenticated on 127.0.0.1).

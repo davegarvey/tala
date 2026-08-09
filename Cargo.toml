@@ -1,6 +1,6 @@
 [package]
 name = "tala-cli"
-version = "0.25.0"
+version = "0.27.2"
 edition = "2021"
 description = "Agent-to-agent messaging for AI coding tools"
 license = "MIT"
@@ -34,6 +34,7 @@ tower-http = { version = "0.5", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+libc = "0.2"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

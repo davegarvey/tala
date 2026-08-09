@@ -38,6 +38,7 @@ pub struct Store {
     messages: Arc<RwLock<HashMap<String, Vec<Message>>>>,
     broadcast: Arc<RwLock<HashMap<String, broadcast::Sender<DaemonEvent>>>>,
     next_msg_id: Arc<RwLock<HashMap<String, u64>>>,
+    read_state: Arc<RwLock<HashMap<(String, String), u64>>>,
     global_tx: broadcast::Sender<(String, DaemonEvent)>,
     pub wait_registry: Arc<Mutex<WaitRegistry>>,
 }
@@ -135,6 +136,7 @@ impl Store {
             messages: Arc::new(RwLock::new(HashMap::new())),
             broadcast: Arc::new(RwLock::new(HashMap::new())),
             next_msg_id: Arc::new(RwLock::new(HashMap::new())),
+            read_state: Arc::new(RwLock::new(HashMap::new())),
             global_tx,
             wait_registry: Arc::new(Mutex::new(WaitRegistry::default())),
         }
@@ -177,8 +179,13 @@ impl Store {
             drop(sessions);
             self.add_message(&id, &sender, &content).await.map(|m| m.id)
         } else {
+            drop(sessions);
             None
         };
+
+        // Persist the new session immediately so a crash cannot orphan any
+        // messages that follow (messages are persisted on send).
+        self.persist_state().await;
 
         (id, first_msg_id)
     }
@@ -244,6 +251,12 @@ impl Store {
             .global_tx
             .send((session_id.to_string(), DaemonEvent::NewMessage(msg.clone())));
 
+        drop(msgs);
+
+        // Best-effort durability: persist the transcript so a daemon restart
+        // or crash does not lose it (B024).
+        self.persist_state().await;
+
         Some(msg)
     }
 
@@ -282,7 +295,10 @@ impl Store {
             })
             .unwrap_or_default();
         if let Some(limit) = limit {
-            result.into_iter().take(limit).collect()
+            // Return the NEWEST N matching messages (tail semantics): keep the
+            // last `limit` items in ascending-id order (B016).
+            let len = result.len();
+            result.into_iter().skip(len.saturating_sub(limit)).collect()
         } else {
             result
         }
@@ -293,19 +309,48 @@ impl Store {
         sessions.get(session_id).cloned()
     }
 
+    /// True when any session already carries `name` (B017: names are an
+    /// addressing key and must be unique).
+    pub async fn session_name_exists(&self, name: &str) -> bool {
+        let sessions = self.sessions.read().await;
+        sessions.values().any(|s| s.name.as_deref() == Some(name))
+    }
+
     pub async fn list_sessions(&self) -> Vec<SessionSummary> {
         let sessions = self.sessions.read().await;
         let msgs = self.messages.read().await;
+        let read_state = self.read_state.read().await;
         sessions
             .values()
-            .map(|s| SessionSummary {
-                id: s.id.clone(),
-                name: s.name.clone(),
-                created_at: s.created_at,
-                closed: s.closed,
-                message_count: msgs.get(&s.id).map(|v| v.len()).unwrap_or(0),
+            .map(|s| {
+                let read_by = read_state
+                    .iter()
+                    .filter(|((sid, _), _)| sid == &s.id)
+                    .map(|((_, sender), id)| (sender.clone(), *id))
+                    .collect();
+                SessionSummary {
+                    id: s.id.clone(),
+                    name: s.name.clone(),
+                    created_at: s.created_at,
+                    closed: s.closed,
+                    message_count: msgs.get(&s.id).map(|v| v.len()).unwrap_or(0),
+                    read_by,
+                }
             })
             .collect()
+    }
+
+    /// Record that `sender` has read messages up to (and including) `up_to`
+    /// in `session_id`. Monotonic: a lower value never overwrites a higher one
+    /// (B021 — sender read receipts).
+    pub async fn record_read(&self, session_id: &str, sender: &str, up_to: u64) {
+        let mut read_state = self.read_state.write().await;
+        let entry = read_state
+            .entry((session_id.to_string(), sender.to_string()))
+            .or_insert(0);
+        if up_to > *entry {
+            *entry = up_to;
+        }
     }
 
     pub async fn rename_session(
@@ -315,18 +360,21 @@ impl Store {
         _force: bool,
     ) -> Result<bool, String> {
         let mut sessions = self.sessions.write().await;
+        // B017: reject collisions — another session already owns this name.
+        // Renaming a session to its OWN current name stays a no-op success.
+        let collision = sessions
+            .iter()
+            .any(|(sid, s)| *sid != session_id && s.name.as_deref() == Some(name));
+        if collision {
+            return Err(format!("A session named '{}' already exists", name));
+        }
         if let Some(session) = sessions.get_mut(session_id) {
             let old_name = session.name.clone().unwrap_or_default();
             session.name = Some(name.to_string());
-            // Persist session name to disk
-            let mut names: HashMap<String, String> = HashMap::new();
-            for (sid, s) in sessions.iter() {
-                if let Some(ref n) = s.name {
-                    names.insert(sid.clone(), n.clone());
-                }
-            }
+            // Persist session name to disk (full sessions map — the legacy
+            // name-only format could not be parsed back by load_sessions).
             drop(sessions);
-            let _ = write_sessions_json(&names).await;
+            self.persist_state().await;
 
             let sid = session_id.to_string();
             let event = DaemonEvent::SessionRenamed {
@@ -569,25 +617,61 @@ impl Store {
     }
 
     pub async fn persist(&self) -> anyhow::Result<()> {
-        let sessions = self.sessions.read().await;
-        persist_sessions(&sessions).await
+        let sessions = self.sessions.read().await.clone();
+        let messages = self.messages.read().await.clone();
+        let next_msg_id = self.next_msg_id.read().await.clone();
+        persist_sessions(&sessions).await?;
+        persist_messages(&messages, &next_msg_id).await
+    }
+
+    /// Best-effort persistence of the full daemon state. Locks are taken one
+    /// at a time (and released before the next) to avoid lock-ordering
+    /// deadlocks with writers that hold multiple locks (e.g. create_session).
+    async fn persist_state(&self) {
+        let sessions = { self.sessions.read().await.clone() };
+        let messages = { self.messages.read().await.clone() };
+        let next_msg_id = { self.next_msg_id.read().await.clone() };
+        let _ = persist_sessions(&sessions).await;
+        let _ = persist_messages(&messages, &next_msg_id).await;
     }
 
     pub async fn load_persisted(&self) {
         let loaded = load_sessions().await;
-        if loaded.is_empty() {
-            return;
-        }
+        let (messages, next_ids) = load_messages().await;
+
         let mut sessions = self.sessions.write().await;
         let mut broadcast = self.broadcast.write().await;
         let mut msg_ids = self.next_msg_id.write().await;
+        let mut msgs = self.messages.write().await;
         for (id, session) in loaded {
             if !sessions.contains_key(&id) {
                 sessions.insert(id.clone(), session);
                 let (tx, _) = broadcast::channel(32);
                 broadcast.insert(id.clone(), tx);
-                msg_ids.insert(id.clone(), 1);
             }
+        }
+
+        // Restore per-session next ids first (stored values are authoritative).
+        for (sid, next) in next_ids {
+            if sessions.contains_key(&sid) {
+                msg_ids.insert(sid, next);
+            }
+        }
+        // Then restore transcripts; derive next ids for sessions that lacked one.
+        for (sid, list) in messages {
+            if sessions.contains_key(&sid) {
+                msgs.entry(sid.clone()).or_insert_with(|| list.clone());
+                msg_ids
+                    .entry(sid)
+                    .or_insert_with(|| list.iter().map(|m| m.id).max().unwrap_or(0) + 1);
+            }
+        }
+        // Sessions with no messages and no stored next id start at 1 (a missing
+        // entry makes add_message return None and the API misreports it as
+        // "session is closed").
+        let session_ids: Vec<String> = sessions.keys().cloned().collect();
+        for sid in session_ids {
+            msg_ids.entry(sid).or_insert(1);
         }
     }
 }
@@ -628,16 +712,6 @@ fn sessions_path() -> PathBuf {
     tala_home().join("sessions.json")
 }
 
-pub async fn write_sessions_json(names: &HashMap<String, String>) -> anyhow::Result<()> {
-    let path = sessions_path();
-    let tmp = tala_home().join("sessions.json.tmp");
-    let content = serde_json::to_string_pretty(names)?;
-    tokio::fs::create_dir_all(path.parent().unwrap()).await?;
-    tokio::fs::write(&tmp, &content).await?;
-    tokio::fs::rename(&tmp, &path).await?;
-    Ok(())
-}
-
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SessionsFile {
     sessions: HashMap<String, Session>,
@@ -664,6 +738,44 @@ pub async fn load_sessions() -> HashMap<String, Session> {
             Err(_) => HashMap::new(),
         },
         Err(_) => HashMap::new(),
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct MessagesFile {
+    messages: HashMap<String, Vec<Message>>,
+    next_msg_id: HashMap<String, u64>,
+}
+
+fn messages_path() -> PathBuf {
+    tala_home().join("messages.json")
+}
+
+pub async fn persist_messages(
+    messages: &HashMap<String, Vec<Message>>,
+    next_msg_id: &HashMap<String, u64>,
+) -> anyhow::Result<()> {
+    let path = messages_path();
+    let tmp = tala_home().join("messages.json.tmp");
+    let data = MessagesFile {
+        messages: messages.clone(),
+        next_msg_id: next_msg_id.clone(),
+    };
+    let content = serde_json::to_string_pretty(&data)?;
+    tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+    tokio::fs::write(&tmp, &content).await?;
+    tokio::fs::rename(&tmp, &path).await?;
+    Ok(())
+}
+
+pub async fn load_messages() -> (HashMap<String, Vec<Message>>, HashMap<String, u64>) {
+    let path = messages_path();
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => match serde_json::from_str::<MessagesFile>(&content) {
+            Ok(data) => (data.messages, data.next_msg_id),
+            Err(_) => (HashMap::new(), HashMap::new()),
+        },
+        Err(_) => (HashMap::new(), HashMap::new()),
     }
 }
 
@@ -701,22 +813,35 @@ pub async fn clear_active_session() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn local_cursor_path() -> PathBuf {
-    PathBuf::from(".tala").join("cursor")
+/// Per-session read cursors: map of session_id -> last-seen message id.
+///
+/// Message ids are PER-SESSION (every session's ids start at 1), so a single
+/// global cursor compared against per-session ids is unsound (backlog B014,
+/// B023, B025). The legacy `.tala/cursor` single-value file is ignored;
+/// `.tala/cursors.json` holds the per-session map.
+pub fn cursors_path() -> PathBuf {
+    PathBuf::from(".tala").join("cursors.json")
 }
 
-pub async fn read_cursor() -> u64 {
-    let path = local_cursor_path();
+pub async fn read_cursors() -> HashMap<String, u64> {
+    let path = cursors_path();
     match tokio::fs::read_to_string(&path).await {
-        Ok(content) => content.trim().parse().unwrap_or(0),
-        Err(_) => 0,
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => HashMap::new(),
     }
 }
 
-pub async fn write_cursor(cursor: u64) -> anyhow::Result<()> {
-    let path = local_cursor_path();
+pub async fn read_cursor(session_id: &str) -> u64 {
+    read_cursors().await.get(session_id).copied().unwrap_or(0)
+}
+
+pub async fn write_cursor(session_id: &str, cursor: u64) -> anyhow::Result<()> {
+    let mut cursors = read_cursors().await;
+    cursors.insert(session_id.to_string(), cursor);
+    let path = cursors_path();
     tokio::fs::create_dir_all(path.parent().unwrap()).await?;
-    tokio::fs::write(&path, cursor.to_string()).await?;
+    let content = serde_json::to_string(&cursors)?;
+    tokio::fs::write(&path, content).await?;
     Ok(())
 }
 
