@@ -39,13 +39,17 @@ pub fn create_router(store: Arc<Store>) -> Router {
             post(send_message).get(get_messages),
         )
         .route("/api/sessions/:id/wait", get(wait_for_message))
+        .route("/api/sessions/:id/wait-stream", get(wait_stream))
         .route("/api/sessions/:id/recap", get(recap_session))
         .route("/api/sessions/:id/rename", post(rename_session))
         .route("/api/sessions/:id/reopen", post(reopen_session))
         .route("/api/sessions/:id/events", get(stream_events))
         .route("/api/sessions/wait-new", get(wait_new_session))
+        .route("/api/sessions/wait-new-stream", get(wait_new_stream))
         .route("/api/sessions/wait-all", get(wait_all))
         .route("/api/observe", get(observe_events))
+        .route("/api/pending", get(pending))
+        .route("/api/waits", get(active_waits))
         .route("/api/agents", get(agents))
         .route("/api/status", get(status))
         .layer(tower_http::cors::CorsLayer::permissive())
@@ -144,9 +148,38 @@ async fn send_message(
         )
             .into_response();
     }
+    if let Some(target) = req.reply_to {
+        let msgs = state.store.get_messages_since(&id, 0).await;
+        if !msgs.iter().any(|m| m.id == target) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "reply_to message id {} does not exist in session '{}'",
+                        target, id
+                    ),
+                }),
+            )
+                .into_response();
+        }
+    }
+    let intent = req.intent.unwrap_or(Intent::Fyi);
+    let waiting_until = req
+        .wait_timeout
+        .map(|secs| chrono::Utc::now() + chrono::Duration::seconds(secs as i64));
     match state
         .store
-        .add_message(&id, &req.sender, &req.content)
+        .add_message_with(
+            &id,
+            crate::store::AddMessageParams {
+                sender: req.sender,
+                content: req.content,
+                intent,
+                reply_to: req.reply_to,
+                expect_reply: req.expect_reply,
+                waiting_until,
+            },
+        )
         .await
     {
         Some(msg) => (
@@ -158,6 +191,10 @@ async fn send_message(
                 sender: msg.sender,
                 content: msg.content,
                 timestamp: msg.timestamp,
+                intent: msg.intent,
+                reply_to: msg.reply_to,
+                expect_reply: msg.expect_reply,
+                waiting_until: msg.waiting_until,
             }),
         )
             .into_response(),
@@ -209,6 +246,8 @@ struct WaitParams {
     timeout_secs: Option<u64>,
     limit: Option<usize>,
     from: Option<String>,
+    identity: Option<String>,
+    reply_to: Option<u64>,
     /// Identity of the reader; used to record read receipts (B021).
     sender: Option<String>,
 }
@@ -222,6 +261,7 @@ fn wrap_wait(
     timeout: bool,
     timeout_after: Option<u64>,
     closed: bool,
+    overlaps: Vec<WaitOverlap>,
 ) -> WaitResponse {
     let cursor = compute_cursor(&messages);
     WaitResponse {
@@ -230,6 +270,7 @@ fn wrap_wait(
         timeout_after,
         closed,
         cursor,
+        overlaps,
     }
 }
 
@@ -242,6 +283,23 @@ async fn wait_for_message(
     let wait_timeout = params.timeout_secs.unwrap_or(60);
     let limit = params.limit.filter(|&l| l > 0);
     let from = params.from.as_deref();
+
+    let identity = params
+        .identity
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let (wait_id, overlaps) = state.store.register_wait(
+        WaitScope::Session(id.clone()),
+        identity.clone(),
+        wait_timeout,
+    );
+    let _guard = crate::store::WaitGuard::new(Arc::clone(&state.store.wait_registry), wait_id);
+    if !overlaps.is_empty() {
+        state
+            .store
+            .broadcast_wait_update(identity, WaitScope::Session(id.clone()))
+            .await;
+    }
 
     let session = state.store.get_session(&id).await;
     let is_closed = match &session {
@@ -259,14 +317,18 @@ async fn wait_for_message(
         }
         return (
             StatusCode::OK,
-            Json(wrap_wait(existing, false, None, is_closed)),
+            Json(wrap_wait(existing, false, None, is_closed, overlaps)),
         )
             .into_response();
     }
 
     match session {
         Some(s) if s.closed => {
-            return (StatusCode::OK, Json(wrap_wait(vec![], false, None, true))).into_response();
+            return (
+                StatusCode::OK,
+                Json(wrap_wait(vec![], false, None, true, overlaps)),
+            )
+                .into_response();
         }
         None => {
             return (
@@ -300,7 +362,11 @@ async fn wait_for_message(
         None => false,
     };
     if is_closed {
-        return (StatusCode::OK, Json(wrap_wait(vec![], false, None, true))).into_response();
+        return (
+            StatusCode::OK,
+            Json(wrap_wait(vec![], false, None, true, overlaps)),
+        )
+            .into_response();
     }
     let existing = state
         .store
@@ -312,11 +378,13 @@ async fn wait_for_message(
         }
         return (
             StatusCode::OK,
-            Json(wrap_wait(existing, false, None, is_closed)),
+            Json(wrap_wait(existing, false, None, is_closed, overlaps)),
         )
             .into_response();
     }
 
+    let reply_to = params.reply_to;
+    let store_for_check = state.store.clone();
     let timeout_dur = Duration::from_secs(wait_timeout);
     let result = timeout(timeout_dur, async {
         loop {
@@ -325,6 +393,12 @@ async fn wait_for_message(
                     if msg.id > since {
                         if let Some(sender) = from {
                             if msg.sender != sender {
+                                continue;
+                            }
+                        }
+                        if let Some(target) = reply_to {
+                            let answers = store_for_check.message_answers(&id, &msg, target).await;
+                            if !answers {
                                 continue;
                             }
                         }
@@ -344,20 +418,21 @@ async fn wait_for_message(
                         {
                             state.store.record_read(&id, sender, max).await;
                         }
-                        return wrap_wait(msgs, false, None, closed);
+                        return wrap_wait(msgs, false, None, closed, vec![]);
                     }
                 }
                 Ok(DaemonEvent::SessionClosed) => {
-                    return wrap_wait(vec![], false, None, true);
+                    return wrap_wait(vec![], false, None, true, vec![]);
                 }
                 Ok(
                     DaemonEvent::SessionCreated(_)
                     | DaemonEvent::SessionReopened(_)
-                    | DaemonEvent::SessionRenamed { .. },
+                    | DaemonEvent::SessionRenamed { .. }
+                    | DaemonEvent::WaitUpdate { .. },
                 ) => continue,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => {
-                    return wrap_wait(vec![], false, None, true);
+                    return wrap_wait(vec![], false, None, true, vec![]);
                 }
             }
         }
@@ -367,11 +442,449 @@ async fn wait_for_message(
     match result {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(_elapsed) => {
-            let mut resp = wrap_wait(vec![], true, Some(wait_timeout), false);
+            let mut resp = wrap_wait(vec![], true, Some(wait_timeout), false, overlaps);
             resp.cursor = Some(since);
             (StatusCode::OK, Json(resp)).into_response()
         }
     }
+}
+
+#[derive(Deserialize)]
+struct WaitStreamParams {
+    since: Option<u64>,
+    timeout_secs: Option<u64>,
+    limit: Option<usize>,
+    from: Option<String>,
+    identity: Option<String>,
+    reply_to: Option<u64>,
+    /// Reader identity; records read receipts (B021).
+    sender: Option<String>,
+}
+
+/// SSE wait for a session: delivers `overlap` events (pre-flight + in-wait),
+/// `message` events, and a terminal `result` event. The stream task holds the
+/// wait-registry guard; when the client disconnects, the send fails, the task
+/// ends, and the entry deregisters.
+async fn wait_stream(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<WaitStreamParams>,
+) -> impl IntoResponse {
+    let since = params.since.unwrap_or(0);
+    let wait_timeout = params.timeout_secs.unwrap_or(60);
+    let limit = params.limit.filter(|&l| l > 0);
+    let from_filter = params.from.clone();
+    let identity = params
+        .identity
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let session = state.store.get_session(&id).await;
+    match session {
+        Some(s) if s.closed => {
+            // Closed session: replay existing messages since the cursor, then closed result
+            let existing = state
+                .store
+                .get_messages_filtered(&id, since, limit, from_filter.as_deref())
+                .await;
+            let mut events: Vec<Result<Event, Infallible>> = Vec::new();
+            for m in &existing {
+                let data = serde_json::to_string(m).unwrap();
+                events.push(Ok(Event::default().event("message").data(data)));
+            }
+            let data =
+                serde_json::to_string(&wrap_wait(vec![], false, None, true, vec![])).unwrap();
+            events.push(Ok(Event::default().event("result").data(data)));
+            return (StatusCode::OK, Sse::new(stream::iter(events))).into_response();
+        }
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("session '{}' not found", id),
+                }),
+            )
+                .into_response();
+        }
+        _ => {}
+    }
+
+    let (wait_id, overlaps) = state.store.register_wait(
+        WaitScope::Session(id.clone()),
+        identity.clone(),
+        wait_timeout,
+    );
+
+    let mut rx = match state.store.subscribe(&id).await {
+        Some(rx) => rx,
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "failed to subscribe to session".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let (tx, rx_channel) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
+
+    // Replay existing messages since the cursor (matching old /wait semantics)
+    let existing = state
+        .store
+        .get_messages_filtered(&id, since, limit, from_filter.as_deref())
+        .await;
+    let mut existing_msgs: Vec<Message> = Vec::new();
+    if let Some(target) = params.reply_to {
+        for m in existing {
+            if state.store.message_answers(&id, &m, target).await {
+                existing_msgs.push(m);
+            }
+        }
+    } else {
+        existing_msgs = existing;
+    }
+    if !existing_msgs.is_empty() {
+        if let (Some(reader), Some(max)) =
+            (&params.sender, existing_msgs.iter().map(|m| m.id).max())
+        {
+            state.store.record_read(&id, reader, max).await;
+        }
+        let mut events: Vec<Result<Event, Infallible>> = Vec::new();
+        for m in &existing_msgs {
+            let data = serde_json::to_string(m).unwrap();
+            events.push(Ok(Event::default().event("message").data(data)));
+        }
+        let data = serde_json::to_string(&wrap_wait(vec![], false, None, false, vec![])).unwrap();
+        events.push(Ok(Event::default().event("result").data(data)));
+        return (StatusCode::OK, Sse::new(stream::iter(events))).into_response();
+    }
+
+    // Pre-flight overlap events
+    for o in &overlaps {
+        let data = serde_json::to_string(o).unwrap();
+        let evt = Event::default().event("overlap").data(data);
+        if tx.send(Ok(evt)).await.is_err() {
+            return (
+                StatusCode::OK,
+                Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx_channel)),
+            )
+                .into_response();
+        }
+    }
+    if !overlaps.is_empty() {
+        state
+            .store
+            .broadcast_wait_update(identity, WaitScope::Session(id.clone()))
+            .await;
+    }
+
+    let store_for_check = state.store.clone();
+    let my_scope = WaitScope::Session(id.clone());
+    let sid = id.clone();
+    let guard = crate::store::WaitGuard::new(Arc::clone(&state.store.wait_registry), wait_id);
+
+    let timeout_dur = Duration::from_secs(wait_timeout);
+    let effective_limit = limit.unwrap_or(1);
+    tokio::spawn(async move {
+        let _guard = guard;
+        let mut count: usize = 0;
+        loop {
+            let result = match tokio::time::timeout(timeout_dur, rx.recv()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    let data = serde_json::to_string(&wrap_wait(
+                        vec![],
+                        true,
+                        Some(wait_timeout),
+                        false,
+                        vec![],
+                    ))
+                    .unwrap();
+                    let evt = Event::default().event("result").data(data);
+                    let _ = tx.send(Ok(evt)).await;
+                    break;
+                }
+            };
+            match result {
+                Ok(DaemonEvent::NewMessage(msg)) => {
+                    if msg.id <= since {
+                        continue;
+                    }
+                    if let Some(sender) = from_filter.as_deref() {
+                        if msg.sender != sender {
+                            continue;
+                        }
+                    }
+                    if let Some(target) = params.reply_to {
+                        if !store_for_check.message_answers(&sid, &msg, target).await {
+                            continue;
+                        }
+                    }
+                    if let Some(reader) = &params.sender {
+                        store_for_check.record_read(&sid, reader, msg.id).await;
+                    }
+                    let data = serde_json::to_string(&msg).unwrap();
+                    let evt = Event::default().event("message").data(data);
+                    if tx.send(Ok(evt)).await.is_err() {
+                        break;
+                    }
+                    count += 1;
+                    if count >= effective_limit {
+                        let data =
+                            serde_json::to_string(&wrap_wait(vec![], false, None, false, vec![]))
+                                .unwrap();
+                        let evt = Event::default().event("result").data(data);
+                        let _ = tx.send(Ok(evt)).await;
+                        break;
+                    }
+                }
+                Ok(DaemonEvent::WaitUpdate { identity, scope }) => {
+                    if crate::store::scopes_overlap(&my_scope, &scope) {
+                        let remaining = state
+                            .store
+                            .list_active_waits()
+                            .iter()
+                            .find(|w| w.identity == identity && w.scope == scope)
+                            .map(|w| w.remaining_secs)
+                            .unwrap_or(0);
+                        let data = serde_json::to_string(&WaitOverlap {
+                            identity,
+                            scope,
+                            remaining_secs: remaining,
+                        })
+                        .unwrap();
+                        let evt = Event::default().event("overlap").data(data);
+                        if tx.send(Ok(evt)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Ok(DaemonEvent::SessionClosed) => {
+                    let data = serde_json::to_string(&wrap_wait(vec![], false, None, true, vec![]))
+                        .unwrap();
+                    let evt = Event::default().event("result").data(data);
+                    let _ = tx.send(Ok(evt)).await;
+                    break;
+                }
+                Ok(
+                    DaemonEvent::SessionCreated(_)
+                    | DaemonEvent::SessionReopened(_)
+                    | DaemonEvent::SessionRenamed { .. },
+                ) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    // Re-sync from store on lag so no messages are silently dropped
+                    let msgs = store_for_check
+                        .get_messages_filtered(&sid, since, limit, from_filter.as_deref())
+                        .await;
+                    for m in msgs {
+                        if let Some(target) = params.reply_to {
+                            if !store_for_check.message_answers(&sid, &m, target).await {
+                                continue;
+                            }
+                        }
+                        let data = serde_json::to_string(&m).unwrap();
+                        let evt = Event::default().event("message").data(data);
+                        if tx.send(Ok(evt)).await.is_err() {
+                            break;
+                        }
+                        count += 1;
+                    }
+                    if count >= effective_limit {
+                        let data =
+                            serde_json::to_string(&wrap_wait(vec![], false, None, false, vec![]))
+                                .unwrap();
+                        let evt = Event::default().event("result").data(data);
+                        let _ = tx.send(Ok(evt)).await;
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    let data = serde_json::to_string(&wrap_wait(vec![], false, None, true, vec![]))
+                        .unwrap();
+                    let evt = Event::default().event("result").data(data);
+                    let _ = tx.send(Ok(evt)).await;
+                    break;
+                }
+            }
+        }
+    });
+
+    use tokio_stream::wrappers::ReceiverStream;
+    let stream = ReceiverStream::new(rx_channel);
+    (StatusCode::OK, Sse::new(stream)).into_response()
+}
+
+#[derive(Deserialize)]
+struct WaitNewStreamParams {
+    timeout_secs: Option<u64>,
+    identity: Option<String>,
+    /// The waiting agent's own identity (B003): only sessions with an incoming
+    /// message from a DIFFERENT agent satisfy the wait; own creates are ignored.
+    sender: Option<String>,
+    /// The waiter's per-session read cursors (URL-encoded JSON map). Sessions
+    /// with a cursor entry are never "new" to the waiter (B029).
+    seen: Option<String>,
+}
+
+/// SSE wait for a new session: delivers `overlap` events and a terminal
+/// `result` event carrying `{"session_id": ...}` or a timeout marker.
+async fn wait_new_stream(
+    State(state): State<AppState>,
+    Query(params): Query<WaitNewStreamParams>,
+) -> impl IntoResponse {
+    let timeout_secs = params.timeout_secs.unwrap_or(60);
+    let identity = params.identity.unwrap_or_else(|| "unknown".to_string());
+    let caller = params.sender.clone();
+    let seen: HashMap<String, u64> = params
+        .seen
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+
+    // B003/B029: scan for an already-existing incoming session from another
+    // agent that the waiter has never seen; freshest first.
+    if let Some(ref me) = caller {
+        if let Some((sid, msg)) = find_incoming_session(&state.store, me, &seen).await {
+            let mut events: Vec<Result<Event, Infallible>> = Vec::new();
+            let mut resp = serde_json::json!({"session_id": sid});
+            resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
+            let data = serde_json::to_string(&resp).unwrap();
+            events.push(Ok(Event::default().event("result").data(data)));
+            return (StatusCode::OK, Sse::new(stream::iter(events))).into_response();
+        }
+    }
+
+    let (wait_id, overlaps) =
+        state
+            .store
+            .register_wait(WaitScope::AnyNewSession, identity.clone(), timeout_secs);
+
+    let mut rx = state.store.subscribe_global();
+    let existing_count = state.store.list_sessions().await.len();
+
+    let (tx, rx_channel) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
+
+    for o in &overlaps {
+        let data = serde_json::to_string(o).unwrap();
+        let evt = Event::default().event("overlap").data(data);
+        if tx.send(Ok(evt)).await.is_err() {
+            return (
+                StatusCode::OK,
+                Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx_channel)),
+            )
+                .into_response();
+        }
+    }
+    if !overlaps.is_empty() {
+        state
+            .store
+            .broadcast_wait_update(identity, WaitScope::AnyNewSession)
+            .await;
+    }
+
+    let store_for_task = state.store.clone();
+    let my_scope = WaitScope::AnyNewSession;
+    let guard = crate::store::WaitGuard::new(Arc::clone(&state.store.wait_registry), wait_id);
+
+    let timeout_dur = Duration::from_secs(timeout_secs);
+    tokio::spawn(async move {
+        let _guard = guard;
+        loop {
+            let result = match tokio::time::timeout(timeout_dur, rx.recv()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    let data = serde_json::to_string(&serde_json::json!({
+                        "timeout": true,
+                        "timeout_after": timeout_secs,
+                    }))
+                    .unwrap();
+                    let evt = Event::default().event("result").data(data);
+                    let _ = tx.send(Ok(evt)).await;
+                    break;
+                }
+            };
+            match result {
+                Ok((_sid, DaemonEvent::SessionCreated(id))) => {
+                    // With identity, a session create alone must NOT satisfy the
+                    // wait (B003: it fires on the waiter's OWN create).
+                    if caller.is_some() {
+                        continue;
+                    }
+                    let msgs = store_for_task.get_messages_since(&id, 0).await;
+                    let first = msgs.first().cloned();
+                    let mut resp = serde_json::json!({"session_id": id});
+                    if let Some(msg) = first {
+                        resp["message"] = serde_json::to_value(msg).unwrap_or_default();
+                    }
+                    let data = serde_json::to_string(&resp).unwrap();
+                    let evt = Event::default().event("result").data(data);
+                    let _ = tx.send(Ok(evt)).await;
+                    break;
+                }
+                Ok((_sid, DaemonEvent::NewMessage(msg))) => {
+                    if let Some(ref me) = caller {
+                        // Only incoming messages from OTHER agents satisfy the
+                        // wait; our own sends are ignored (B003).
+                        if msg.sender == *me {
+                            continue;
+                        }
+                        store_for_task
+                            .record_read(&msg.session_id, me, msg.id)
+                            .await;
+                        let mut resp = serde_json::json!({"session_id": msg.session_id});
+                        resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
+                        let data = serde_json::to_string(&resp).unwrap();
+                        let evt = Event::default().event("result").data(data);
+                        let _ = tx.send(Ok(evt)).await;
+                        break;
+                    }
+                    let sessions = store_for_task.list_sessions().await;
+                    if sessions.len() > existing_count {
+                        let mut resp = serde_json::json!({"session_id": msg.session_id});
+                        resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
+                        let data = serde_json::to_string(&resp).unwrap();
+                        let evt = Event::default().event("result").data(data);
+                        let _ = tx.send(Ok(evt)).await;
+                        break;
+                    }
+                }
+                Ok((_sid, DaemonEvent::WaitUpdate { identity, scope })) => {
+                    if crate::store::scopes_overlap(&my_scope, &scope) {
+                        let remaining = store_for_task
+                            .list_active_waits()
+                            .iter()
+                            .find(|w| w.identity == identity && w.scope == scope)
+                            .map(|w| w.remaining_secs)
+                            .unwrap_or(0);
+                        let data = serde_json::to_string(&WaitOverlap {
+                            identity,
+                            scope,
+                            remaining_secs: remaining,
+                        })
+                        .unwrap();
+                        let evt = Event::default().event("overlap").data(data);
+                        if tx.send(Ok(evt)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Ok((
+                    _sid,
+                    DaemonEvent::SessionClosed
+                    | DaemonEvent::SessionReopened(_)
+                    | DaemonEvent::SessionRenamed { .. },
+                )) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    use tokio_stream::wrappers::ReceiverStream;
+    let stream = ReceiverStream::new(rx_channel);
+    (StatusCode::OK, Sse::new(stream)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -466,6 +979,7 @@ async fn wait_new_session(
                 Ok((_sid, DaemonEvent::SessionClosed)) => continue,
                 Ok((_sid, DaemonEvent::SessionReopened(_))) => continue,
                 Ok((_sid, DaemonEvent::SessionRenamed { .. })) => continue,
+                Ok((_sid, DaemonEvent::WaitUpdate { .. })) => continue,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => {
                     return serde_json::json!({"error": "daemon shutting down"});
@@ -509,7 +1023,7 @@ async fn find_incoming_session(
         let msgs = store.get_messages_since(&s.id, 0).await;
         // Freshest incoming message from another agent (the waiter cannot have
         // sent here: sending records a cursor entry, excluding the session).
-        let freshest_incoming = msgs.iter().filter(|m| m.sender != me).next_back();
+        let freshest_incoming = msgs.iter().rfind(|m| m.sender != me);
         if let Some(m) = freshest_incoming {
             let is_better = match &best {
                 Some((_, bm)) => m.timestamp > bm.timestamp,
@@ -538,18 +1052,19 @@ async fn wait_all(
                     if let Some(ref me) = params.sender {
                         state.store.record_read(&msg.session_id, me, msg.id).await;
                     }
-                    return wrap_wait(vec![msg], false, None, false);
+                    return wrap_wait(vec![msg], false, None, false, vec![]);
                 }
                 Ok((
                     _sid,
                     DaemonEvent::SessionCreated(_)
                     | DaemonEvent::SessionReopened(_)
-                    | DaemonEvent::SessionRenamed { .. },
+                    | DaemonEvent::SessionRenamed { .. }
+                    | DaemonEvent::WaitUpdate { .. },
                 )) => continue,
                 Ok((_sid, DaemonEvent::SessionClosed)) => continue,
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => {
-                    return wrap_wait(vec![], false, None, true);
+                    return wrap_wait(vec![], false, None, true, vec![]);
                 }
             }
         }
@@ -560,7 +1075,7 @@ async fn wait_all(
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(_elapsed) => (
             StatusCode::OK,
-            Json(wrap_wait(vec![], true, Some(timeout_secs), false)),
+            Json(wrap_wait(vec![], true, Some(timeout_secs), false, vec![])),
         )
             .into_response(),
     }
@@ -730,7 +1245,8 @@ async fn stream_events(
             Ok(
                 DaemonEvent::SessionCreated(_)
                 | DaemonEvent::SessionReopened(_)
-                | DaemonEvent::SessionRenamed { .. },
+                | DaemonEvent::SessionRenamed { .. }
+                | DaemonEvent::WaitUpdate { .. },
             ) => None,
             Err(_) => None,
         }
@@ -942,6 +1458,7 @@ async fn observe_events(
                                     .data(serde_json::to_string(&observe).unwrap()),
                             )
                         }
+                        DaemonEvent::WaitUpdate { .. } => None,
                     };
 
                     if let Some(event) = opt {
@@ -959,6 +1476,16 @@ async fn observe_events(
     use tokio_stream::wrappers::ReceiverStream;
     let stream = ReceiverStream::new(rx_channel);
     (StatusCode::OK, Sse::new(stream)).into_response()
+}
+
+async fn pending(State(state): State<AppState>) -> impl IntoResponse {
+    let obligations = state.store.pending_obligations().await;
+    (StatusCode::OK, Json(obligations))
+}
+
+async fn active_waits(State(state): State<AppState>) -> impl IntoResponse {
+    let waits = state.store.list_active_waits();
+    (StatusCode::OK, Json(waits))
 }
 
 async fn agents(State(state): State<AppState>) -> impl IntoResponse {
@@ -1017,6 +1544,7 @@ async fn status(State(state): State<AppState>) -> impl IntoResponse {
         port: 0,
         uptime_seconds: started_at,
         session_count: sessions.len(),
+        active_waits: state.store.list_active_waits(),
     };
 
     (StatusCode::OK, Json(response))

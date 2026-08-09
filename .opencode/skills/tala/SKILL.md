@@ -5,7 +5,7 @@ license: MIT
 compatibility: Requires tala CLI (agent-to-agent messaging tool) v0.25+
 metadata:
   author: tala
-  version: "3.0"
+  version: "3.1"
 ---
 # tala — Agent-to-Agent Messaging
 
@@ -40,8 +40,12 @@ sess=$(tala wait --new-session --timeout 600)
 | `tala session rename <id> <name>` / `show <id>` / `reopen <id>` / `close <id>` / `list` | Manage sessions. |
 | `tala send [<session>] "<msg>"` | Send a message (active session if omitted). |
 | `tala send --wait "<msg>"` | Send and block for a reply (spinner; `--timeout` secs, default 60). |
+| `tala send --intent <req|fyi|reply|out> "<msg>"` | Declare message intent (default: `fyi`; `--wait` implies `req`; `--reply-to` implies `reply`). |
+| `tala send --reply-to <id> "<msg>"` | Correlate this message as a reply to message `<id>` (same session). |
+| `tala send --expect-reply "<msg>"` | This message also expects a reply (modifier for reply/fyi). |
 | `tala wait [<session>]` | Block until a new message arrives (poll). |
 | `tala wait --new-session` | Block until a session with an incoming message from another agent is ready (includes sessions that already existed; ignores your own creates). |
+| `tala pending` | List requests awaiting a reply (unanswered `req` + `--expect-reply` messages). |
 | `tala history [<session>]` | Full transcript. `--since <id>`, `--from <sender>`, `--limit <n>`. |
 | `tala stream [<session>]` | Real-time SSE for one session (push). |
 | `tala listen` | Real-time SSE across all sessions. Filters: `--from`, `--match`, `--name`, `--since`. |
@@ -71,6 +75,32 @@ sess=$(tala wait --new-session --timeout 600)
   location for isolated daemon instances. `tala stop` stops it.
 - Sessions are ephemeral (in-memory daemon). Message IDs are per-session.
 
+## Intent Protocol
+
+Every message can declare its intent, rendered as a badge in all output:
+- `[REQ]` — reply expected (use `--wait`, or `--intent req`)
+- `[FYI]` — informational, no reply needed (default)
+- `[REPLY→N]` — answers message N (use `--reply-to <id>`)
+- `[OUT]` — exchange over, no reply expected
+
+When you use `send --wait --timeout N`, the message carries a live countdown
+("waiting, 23s left") computed at read time — recipients see the *remaining*
+time, never a stale duration. An expired deadline does NOT cancel the
+obligation: the `req` stays pending until answered or closed with `[OUT]`.
+
+Track who owes whom: `tala pending` lists unanswered requests. Answer one
+with `tala send --reply-to <id>`. Sending `--intent out` closes your own
+open requests.
+
+## Waiting Visibility
+
+The daemon tracks active waits. If your wait overlaps another agent's wait
+you'll see a note (`⟳ note: alpha is waiting on sess_ab12 (13s left)`), and
+a wait timeout hints when sessions hold unread messages. `tala status` lists
+everyone waiting right now; `tala list` shows pending/waiting counts per
+session. Before waiting blind, check these — the tool does the checking for
+you on every `wait`.
+
 ## Common Patterns
 
 | Task | Command |
@@ -78,6 +108,8 @@ sess=$(tala wait --new-session --timeout 600)
 | Start a named session | `tala session create --name "my-project"` |
 | Broadcast FYI | `tala send "status: done"` |
 | Request + wait | `tala send --wait "need help" --timeout 60` |
+| Correlated reply | `tala send --reply-to 5 "fix is in parse_row"` |
+| What's unanswered | `tala pending` |
 | Wait for incoming session | `sess=$(tala wait --new-session --timeout 600)` |
 | Read transcript (tail) | `tala history --since <id>` |
 | Watch all sessions | `tala listen` |

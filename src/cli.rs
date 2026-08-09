@@ -63,7 +63,7 @@ pub enum Commands {
     },
     /// Send a message to a session. Use `tala session create` to create a session without a message.
     #[command(
-        after_help = "Use --wait / -w to block until a reply arrives.\nUse `tala session create --name` to create a named session.\nUse --stdin or pipe content for messages with special characters (backticks, quotes, leading dashes).\nUse `--` to separate options from message content, e.g. `tala send -- --my-flags`.\n\nEXIT CODES: 0 = sent (or reply received with --wait); 3 = --wait timed out; 1 = error"
+        after_help = "Use --wait / -w to block until a reply arrives.\nUse `tala session create --name` to create a named session.\nUse --stdin or pipe content for messages with special characters (backticks, quotes, leading dashes).\nUse `--` to separate options from message content, e.g. `tala send -- --my-flags`.\n\nINTENT:\n  --intent <req|fyi|reply|out>  Declare what you expect (default: fyi; --wait implies req; --reply-to implies reply)\n  --reply-to <id>               Correlate this message as a reply to message <id> (same session)\n  --expect-reply                This message also expects a reply (modifier for reply/fyi)\n  With --wait --timeout N, recipients see the live countdown via the stamped waiting_until.\n\nEXIT CODES: 0 = sent (or reply received with --wait); 3 = --wait timed out; 1 = error"
     )]
     Send {
         #[arg(help = "Session ID (positional, or use --session/-s)")]
@@ -99,6 +99,12 @@ pub enum Commands {
         quiet: bool,
         #[arg(long, help = "Seconds to wait for a reply (default: 60)")]
         timeout: Option<u64>,
+        #[arg(long, help = "Declare message intent: req, fyi, reply, or out")]
+        intent: Option<String>,
+        #[arg(long, help = "Correlate this message as a reply to a message id")]
+        reply_to: Option<u64>,
+        #[arg(long, help = "This message expects a reply (valid with reply/fyi)")]
+        expect_reply: bool,
     },
     /// Wait for new messages in a session (blocking poll — sends an HTTP request every few seconds).
     /// Use `tala stream` for real-time SSE on a single session, or `tala listen` to observe all sessions.
@@ -251,6 +257,14 @@ pub enum Commands {
         #[arg(long, short = 'q', help = "Suppress confirmation output")]
         quiet: bool,
     },
+    /// List requests awaiting a reply (who owes whom)
+    #[command(
+        after_help = "Shows open obligations across your sessions: unanswered [REQ] messages and\nmessages sent with --expect-reply. Use `tala send --reply-to <id>` to answer one.\n\nSee also: tala list (sessions), tala check (new messages)"
+    )]
+    Pending {
+        #[arg(long, short = 'j', help = "Output in JSON format")]
+        json: bool,
+    },
     /// Show daemon status
     Status {
         #[arg(long, short = 'j', help = "Output in JSON format")]
@@ -340,6 +354,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             json,
             quiet,
             timeout,
+            intent,
+            reply_to,
+            expect_reply,
         } => {
             let session_flag = session_arg.is_some();
             // A positional session ref may be an id OR a name (B035). A lone
@@ -373,6 +390,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 json,
                 quiet,
                 timeout,
+                intent.as_deref(),
+                reply_to,
+                expect_reply,
             )
             .await
         }
@@ -417,6 +437,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             json,
         } => cmd_listen(since, r#match, from, name, timeout, json).await,
         Commands::List { json } => cmd_list(json).await,
+        Commands::Pending { json } => cmd_pending(json).await,
         Commands::Discover { json } => cmd_discover(json).await,
         Commands::Agents { json } => cmd_agents(json).await,
         Commands::Close {
@@ -913,6 +934,9 @@ async fn cmd_send(
     json_output: bool,
     quiet: bool,
     chat_timeout: Option<u64>,
+    intent_arg: Option<&str>,
+    reply_to: Option<u64>,
+    expect_reply: bool,
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
 
@@ -950,21 +974,15 @@ async fn cmd_send(
     // configured agent name (`.tala/config.json`). A mismatched identity is a
     // hard error — nothing is sent. The honest way to speak as another agent
     // is to operate from that agent's project dir.
-    match sender_override {
-        Some(s) => {
-            let configured = store::get_sender_name(None);
-            if s != configured {
-                fail(
-                    json_output,
-                    &format!(
-                        "Cannot send as '{}': this project is configured as agent '{}'. Use the configured identity or run from the other agent's project directory.",
-                        s, configured
-                    ),
-                    "SENDER_MISMATCH",
-                );
-            }
+    if let Some(s) = sender_override {
+        let configured = store::get_sender_name(None);
+        if s != configured {
+            let msg = format!(
+                "Cannot send as '{}': this project is configured as agent '{}'. Use the configured identity or run from the other agent's project directory.",
+                s, configured
+            );
+            fail(json_output, &msg, "SENDER_MISMATCH");
         }
-        None => {}
     }
 
     // Resolve content
@@ -1067,6 +1085,9 @@ async fn cmd_send(
         quiet,
         &host,
         port,
+        intent_arg,
+        reply_to,
+        expect_reply,
     )
     .await
 }
@@ -1082,6 +1103,9 @@ async fn send_content(
     quiet: bool,
     host: &str,
     port: u16,
+    intent_arg: Option<&str>,
+    reply_to: Option<u64>,
+    expect_reply: bool,
 ) -> anyhow::Result<()> {
     let sender = store::get_sender_name(sender_override);
     let client = reqwest::Client::new();
@@ -1091,9 +1115,47 @@ async fn send_content(
         &format!("/api/sessions/{}/messages", session_id),
     );
 
+    // Resolve intent by precedence: explicit flag, then --reply-to implies reply,
+    // then --wait implies req, else fyi. --reply-to + --wait implies reply+expect.
+    let intent = if let Some(s) = intent_arg {
+        match Intent::from_str(s) {
+            Some(i) => i,
+            None => fail(
+                json_output,
+                format!(
+                    "invalid --intent '{}': must be one of req, fyi, reply, out",
+                    s
+                ),
+                "INVALID_INTENT",
+            ),
+        }
+    } else if reply_to.is_some() {
+        Intent::Reply
+    } else if should_wait {
+        Intent::Req
+    } else {
+        Intent::Fyi
+    };
+    let expect_reply = expect_reply || (reply_to.is_some() && should_wait && intent_arg.is_none());
+    if expect_reply && matches!(intent, Intent::Req | Intent::Out) {
+        fail(
+            json_output,
+            "--expect-reply is only valid with intent reply or fyi",
+            "INVALID_INTENT",
+        );
+    }
+
+    let config = store::read_user_config().await;
+    let default_timeout = config["default_timeout"].as_u64().unwrap_or(60);
+    let effective_timeout = chat_timeout.or(Some(default_timeout));
+
     let req = SendMessageRequest {
         sender,
         content: content.to_string(),
+        intent: Some(intent),
+        reply_to,
+        expect_reply,
+        wait_timeout: if should_wait { effective_timeout } else { None },
     };
     let resp = client.post(&url).json(&req).send().await?;
 
@@ -1126,6 +1188,16 @@ async fn send_content(
         return Ok(());
     }
 
+    // Delivery receipt, then SSE wait for the reply to this message
+    if json_output {
+        println!(
+            "{}",
+            serde_json::json!({"sent": true, "message_id": msg.id, "session_id": msg.session_id})
+        );
+    } else if !quiet {
+        println!("✓ sent (msg {}) — waiting for reply", msg.id);
+    }
+
     let spinner = if !json_output && !quiet {
         eprint!("⏎ Waiting for reply");
         let _ = std::io::Write::flush(&mut std::io::stderr());
@@ -1145,17 +1217,31 @@ async fn send_content(
         }
         None
     };
-    let mut wait_url = format!("/api/sessions/{}/wait?since={}", session_id, msg.id);
+
+    let identity = store::get_sender_name(sender_override);
+    let mut wait_url = format!(
+        "/api/sessions/{}/wait-stream?since={}&timeout_secs={}&reply_to={}&identity={}",
+        session_id,
+        msg.id,
+        effective_timeout.unwrap_or(60),
+        msg.id,
+        identity
+    );
     if let Some(to) = chat_timeout {
-        wait_url = format!("{}&timeout_secs={}", wait_url, to);
+        wait_url = format!(
+            "/api/sessions/{}/wait-stream?since={}&timeout_secs={}&reply_to={}&identity={}",
+            session_id, msg.id, to, msg.id, identity
+        );
     }
     let wait_url = daemon_url(host, port, &wait_url);
     let wait_resp = client.get(&wait_url).send().await?;
+
+    let result: WaitResponse = consume_wait_stream(wait_resp, json_output).await?;
+
     if let Some(s) = spinner {
         s.abort();
         let _ = s.await;
     }
-    let result: WaitResponse = wait_resp.json().await?;
 
     if !json_output && !quiet {
         eprintln!();
@@ -1179,6 +1265,103 @@ async fn send_content(
         }
     }
     Ok(())
+}
+
+/// Consumes an SSE wait stream, printing overlap/hint notes as they arrive and
+/// buffering messages into a single WaitResponse. In JSON mode, overlap and hint
+/// events are emitted as typed JSON lines and the WaitResponse document is
+/// printed last, preserving the single-document contract.
+async fn consume_wait_stream(
+    resp: reqwest::Response,
+    json_output: bool,
+) -> anyhow::Result<WaitResponse> {
+    let mut buffer = String::new();
+    let mut stream = resp.bytes_stream();
+    let mut messages: Vec<Message> = Vec::new();
+    let mut timeout = false;
+    let mut timeout_after: Option<u64> = None;
+    let mut closed = false;
+    let mut cursor: Option<u64> = None;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(pos) = buffer.find("\n\n") {
+            let event_block = buffer[..pos].to_string();
+            buffer = buffer[pos + 2..].to_string();
+
+            let event_type = event_block
+                .lines()
+                .find_map(|line| line.strip_prefix("event: "))
+                .unwrap_or("message");
+            let mut data = String::new();
+            for line in event_block.lines() {
+                if let Some(val) = line.strip_prefix("data: ") {
+                    data = val.to_string();
+                }
+            }
+
+            match event_type {
+                "message" => {
+                    if let Ok(msg) = serde_json::from_str::<Message>(&data) {
+                        cursor = Some(msg.id);
+                        messages.push(msg);
+                    }
+                }
+                "overlap" => {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::json!({"event": "overlap", "overlap": serde_json::from_str::<serde_json::Value>(&data).unwrap_or_default()})
+                        );
+                    } else if let Ok(o) = serde_json::from_str::<WaitOverlap>(&data) {
+                        let scope_desc = match &o.scope {
+                            WaitScope::Session(s) => format!("session {}", s),
+                            WaitScope::AnyNewSession => "a new session".to_string(),
+                        };
+                        eprintln!(
+                            "⟳ note: {} is waiting on {} ({}s left)",
+                            o.identity, scope_desc, o.remaining_secs
+                        );
+                    }
+                }
+                "result" => {
+                    if let Ok(res) = serde_json::from_str::<WaitResponse>(&data) {
+                        timeout = res.timeout;
+                        timeout_after = res.timeout_after;
+                        closed = res.closed;
+                        if res.messages.is_empty() && !messages.is_empty() {
+                            // buffered messages carry the result
+                        } else if !res.messages.is_empty() {
+                            messages = res.messages;
+                        }
+                        if let Some(c) = res.cursor {
+                            cursor = Some(c);
+                        }
+                    } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
+                        if v.get("timeout") == Some(&serde_json::json!(true)) {
+                            timeout = true;
+                            timeout_after = v["timeout_after"].as_u64();
+                        }
+                    }
+                }
+                "closed" => {
+                    closed = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(WaitResponse {
+        messages,
+        timeout,
+        timeout_after,
+        closed,
+        cursor,
+        overlaps: vec![],
+    })
 }
 
 async fn cmd_wait(
@@ -1348,8 +1531,12 @@ async fn cmd_wait(
         };
 
         let mut path = format!(
-            "/api/sessions/{}/wait?since={}&timeout_secs={}{}",
-            sid, since_id, wait_timeout, sender_param
+            "/api/sessions/{}/wait-stream?since={}&timeout_secs={}&identity={}{}",
+            sid,
+            since_id,
+            wait_timeout,
+            store::get_sender_name(None),
+            sender_param
         );
         if let Some(l) = limit.filter(|&l| l > 0) {
             path = format!("{}&limit={}", path, l);
@@ -1393,7 +1580,7 @@ async fn cmd_wait(
             fail(json_output, &err.error, "SESSION_NOT_FOUND");
         }
 
-        let result: WaitResponse = resp.json().await?;
+        let result: WaitResponse = consume_wait_stream(resp, json_output).await?;
 
         if json_output {
             println!("{}", serde_json::to_string(&result).unwrap());
@@ -1407,14 +1594,16 @@ async fn cmd_wait(
                 "timeout after {}s, no new messages",
                 result.timeout_after.unwrap_or(0)
             );
+            let _ = print_unread_hint(&host, port).await;
             process::exit(EXIT_TIMEOUT);
         } else {
             let _ = store::write_active_session(&sid).await;
             for msg in &result.messages {
                 println!(
-                    "[sess {}] [{}] {} ({}):\n    {}",
+                    "[sess {}] [{}] {}{} ({}):\n    {}",
                     sid,
                     msg.id,
+                    intent_badge(msg),
                     msg.sender,
                     msg.timestamp.format("%H:%M:%S"),
                     msg.content
@@ -1527,12 +1716,14 @@ async fn cmd_watch(
                         }
                     } else if let Ok(msg) = serde_json::from_str::<Message>(&data) {
                         println!(
-                            "[{}] {} ({}):\n    {}",
+                            "[{}] {} {} ({}):{}",
                             msg.id,
+                            intent_badge(&msg),
                             msg.sender,
                             msg.timestamp.format("%H:%M:%S"),
-                            msg.content
+                            render_deadline(&msg)
                         );
+                        println!("    {}", msg.content);
                     }
                 }
                 _ => {}
@@ -1650,12 +1841,14 @@ async fn cmd_listen(
                             }
                             let session_label = evt.session_name.unwrap_or(evt.session_id);
                             println!(
-                                "[{}] {} ({}):\n    {}",
+                                "[{}] {} {} ({}):{}",
                                 session_label,
+                                intent_badge(&msg),
                                 msg.sender,
                                 msg.timestamp.format("%H:%M:%S"),
-                                msg.content
+                                render_deadline(&msg)
                             );
+                            println!("    {}", msg.content);
                         }
                     }
                     "closed" => {
@@ -1768,12 +1961,14 @@ async fn cmd_recap(
         } else {
             for msg in &recap.messages {
                 println!(
-                    "[{}] {} ({}):\n    {}\n",
+                    "[{}] {} {} ({}):{}",
                     msg.id,
+                    intent_badge(msg),
                     msg.sender,
                     msg.timestamp.format("%H:%M:%S"),
-                    msg.content
+                    render_deadline(msg)
                 );
+                println!("    {}\n", msg.content);
             }
         }
     }
@@ -1781,6 +1976,58 @@ async fn cmd_recap(
     // write so an empty history can never reset read state (B025).
     if let Some(c) = recap.cursor {
         store::write_cursor(&session_id, c).await?;
+    }
+    Ok(())
+}
+
+async fn cmd_pending(json_output: bool) -> anyhow::Result<()> {
+    let (host, port) = ensure_daemon_running().await?;
+
+    let client = reqwest::Client::new();
+    let url = daemon_url(&host, port, "/api/pending");
+    let resp = client.get(&url).send().await?;
+    let obligations: Vec<PendingObligation> = resp.json().await?;
+
+    if json_output {
+        println!("{}", serde_json::to_string(&obligations).unwrap());
+    } else if obligations.is_empty() {
+        println!("Nothing pending — every request has been answered.");
+    } else {
+        for o in &obligations {
+            let label = o.session_name.as_deref().unwrap_or(&o.session_id);
+            let deadline = match o.waiting_until {
+                Some(until) => {
+                    let remaining = (until - chrono::Utc::now()).num_seconds();
+                    if remaining >= 0 {
+                        format!(" (waiting, {}s left)", remaining)
+                    } else {
+                        " (wait expired)".to_string()
+                    }
+                }
+                None => String::new(),
+            };
+            println!(
+                "[{}] [{}] [{}] {}{}: {}",
+                label,
+                o.message_id,
+                o.intent.badge(),
+                o.sender,
+                deadline,
+                o.content
+            );
+            let mins = o.elapsed_seconds / 60;
+            let secs = o.elapsed_seconds % 60;
+            println!(
+                "      unanswered for {}{} — answer with `tala send --reply-to {}`",
+                if mins > 0 {
+                    format!("{}m ", mins)
+                } else {
+                    String::new()
+                },
+                secs,
+                o.message_id
+            );
+        }
     }
     Ok(())
 }
@@ -1795,6 +2042,22 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
 
     let cursors = store::read_cursors().await;
     let active_session = store::read_active_session().await;
+    let pending: Vec<PendingObligation> = {
+        let client = reqwest::Client::new();
+        let url = daemon_url(&host, port, "/api/pending");
+        match client.get(&url).send().await {
+            Ok(resp) => resp.json().await.unwrap_or_default(),
+            Err(_) => vec![],
+        }
+    };
+    let waits: Vec<ActiveWaitInfo> = {
+        let client = reqwest::Client::new();
+        let url = daemon_url(&host, port, "/api/waits");
+        match client.get(&url).send().await {
+            Ok(resp) => resp.json().await.unwrap_or_default(),
+            Err(_) => vec![],
+        }
+    };
 
     if json_output {
         let mut enriched: Vec<serde_json::Value> = Vec::new();
@@ -1812,6 +2075,16 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
                     "active".to_string(),
                     serde_json::json!(active_session.as_deref() == Some(&s.id)),
                 );
+                let pending_count = pending.iter().filter(|p| p.session_id == s.id).count();
+                obj.insert(
+                    "pending_count".to_string(),
+                    serde_json::json!(pending_count),
+                );
+                let waiting = waits
+                    .iter()
+                    .filter(|w| matches!(&w.scope, WaitScope::Session(sid) if sid == &s.id))
+                    .count();
+                obj.insert("waiting".to_string(), serde_json::json!(waiting));
             }
             enriched.push(entry);
         }
@@ -1833,6 +2106,11 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
             } else {
                 "  "
             };
+            let pending_count = pending.iter().filter(|p| p.session_id == s.id).count();
+            let waiting = waits
+                .iter()
+                .filter(|w| matches!(&w.scope, WaitScope::Session(sid) if sid == &s.id))
+                .count();
             // B021: show readers OTHER than the local identity (self-reads are
             // noise in text; --json exposes the full read_by map).
             let local_identity = store::read_project_config()
@@ -1864,30 +2142,32 @@ async fn cmd_list(json_output: bool) -> anyhow::Result<()> {
             } else {
                 let since_id = cursors.get(&s.id).copied().unwrap_or(0);
                 let unread = compute_session_unread(&host, port, s, since_id).await;
+                let mut extra = Vec::new();
                 if unread > 0 {
-                    println!(
-                        "{}  {:width$}  {}  {} msgs ({} new){}{}",
-                        s.id,
-                        name,
-                        status,
-                        s.message_count,
-                        unread,
-                        marker,
-                        read_suffix,
-                        width = name_width
-                    );
-                } else {
-                    println!(
-                        "{}  {:width$}  {}  {} msgs{}{}",
-                        s.id,
-                        name,
-                        status,
-                        s.message_count,
-                        marker,
-                        read_suffix,
-                        width = name_width
-                    );
+                    extra.push(format!("{} new", unread));
                 }
+                if pending_count > 0 {
+                    extra.push(format!("{} pending", pending_count));
+                }
+                if waiting > 0 {
+                    extra.push(format!("{} waiting", waiting));
+                }
+                let extra_str = if extra.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", extra.join(", "))
+                };
+                println!(
+                    "{}  {:width$}  {}  {} msgs{}{}{}",
+                    s.id,
+                    name,
+                    status,
+                    s.message_count,
+                    extra_str,
+                    marker,
+                    read_suffix,
+                    width = name_width
+                );
             }
         }
     }
@@ -2257,6 +2537,7 @@ async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::R
     if !json_output {
         eprintln!("Waiting for a new session (timeout: {}s)...", timeout);
     }
+    let _ = print_unread_hint(&host, port).await;
     // B003: identify ourselves so the daemon only delivers sessions with an
     // incoming message from ANOTHER agent (not our own creates).
     let sender = store::read_project_config()
@@ -2271,13 +2552,16 @@ async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::R
         &host,
         port,
         &format!(
-            "/api/sessions/wait-new?timeout_secs={}{}{}",
-            timeout, sender_param, seen_param
+            "/api/sessions/wait-new-stream?timeout_secs={}&identity={}{}{}",
+            timeout,
+            store::get_sender_name(None),
+            sender_param,
+            seen_param
         ),
     );
     let client = reqwest::Client::new();
     let resp = client.get(&url).send().await?;
-    let result: serde_json::Value = resp.json().await?;
+    let result: serde_json::Value = consume_wait_new_stream(resp, json_output).await?;
 
     if json_output {
         println!("{}", serde_json::to_string(&result).unwrap());
@@ -2288,9 +2572,145 @@ async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::R
             "timeout after {}s, no new session",
             result["timeout_after"].as_u64().unwrap_or(timeout)
         );
+        let _ = print_unread_hint(&host, port).await;
         process::exit(EXIT_TIMEOUT);
     } else if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
         fail(json_output, err, "WAIT_NEW_ERROR");
+    }
+    Ok(())
+}
+
+/// Consumes the SSE wait-new stream; returns the terminal result JSON
+/// (session_id payload or timeout marker). Overlap notes are printed live.
+async fn consume_wait_new_stream(
+    resp: reqwest::Response,
+    json_output: bool,
+) -> anyhow::Result<serde_json::Value> {
+    let mut buffer = String::new();
+    let mut stream = resp.bytes_stream();
+    let mut result: serde_json::Value = serde_json::Value::Null;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(pos) = buffer.find("\n\n") {
+            let event_block = buffer[..pos].to_string();
+            buffer = buffer[pos + 2..].to_string();
+
+            let event_type = event_block
+                .lines()
+                .find_map(|line| line.strip_prefix("event: "))
+                .unwrap_or("message");
+            let mut data = String::new();
+            for line in event_block.lines() {
+                if let Some(val) = line.strip_prefix("data: ") {
+                    data = val.to_string();
+                }
+            }
+
+            match event_type {
+                "overlap" => {
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::json!({"event": "overlap", "overlap": serde_json::from_str::<serde_json::Value>(&data).unwrap_or_default()})
+                        );
+                    } else if let Ok(o) = serde_json::from_str::<WaitOverlap>(&data) {
+                        let scope_desc = match &o.scope {
+                            WaitScope::Session(s) => format!("session {}", s),
+                            WaitScope::AnyNewSession => "a new session".to_string(),
+                        };
+                        eprintln!(
+                            "⟳ note: {} is waiting on {} ({}s left) — this wait will not receive that session's messages",
+                            o.identity, scope_desc, o.remaining_secs
+                        );
+                    }
+                }
+                "result" => {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
+                        result = v;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Renders the intent badge + reply target, e.g. "[REQ]" or "[REPLY→3]".
+fn intent_badge(msg: &Message) -> String {
+    let base = msg.intent.badge();
+    match msg.reply_to {
+        Some(target) => format!("[{}→{}]", base, target),
+        None => format!("[{}]", base),
+    }
+}
+
+/// Renders the waiting_until deadline relative to now, e.g. " (waiting, 83s left)".
+fn render_deadline(msg: &Message) -> String {
+    match msg.waiting_until {
+        Some(until) => {
+            let now = chrono::Utc::now();
+            let remaining = (until - now).num_seconds();
+            if remaining >= 0 {
+                format!(" (waiting, {}s left)", remaining)
+            } else {
+                let mins = (-remaining) / 60;
+                let secs = -remaining % 60;
+                if mins > 0 {
+                    format!(" (wait expired {}m{}s ago)", mins, secs)
+                } else {
+                    format!(" (wait expired {}s ago)", secs)
+                }
+            }
+        }
+        None => String::new(),
+    }
+}
+
+/// Prints a hint when sessions exist with unread messages from other senders.
+async fn print_unread_hint(host: &str, port: u16) -> anyhow::Result<()> {
+    let cursors = store::read_cursors().await;
+    let local_agent = store::read_project_config()
+        .await
+        .or_else(|| Some(store::get_default_sender()));
+    let client = reqwest::Client::new();
+    let url = daemon_url(host, port, "/api/sessions");
+    let resp = client.get(&url).send().await?;
+    let sessions: Vec<SessionSummary> = resp.json().await?;
+    let mut named: Vec<String> = Vec::new();
+    for s in &sessions {
+        if s.closed {
+            continue;
+        }
+        let cursor = cursors.get(&s.id).copied().unwrap_or(0);
+        let msgs_url = daemon_url(
+            host,
+            port,
+            &format!("/api/sessions/{}/messages?since={}", s.id, cursor),
+        );
+        if let Ok(resp) = client.get(&msgs_url).send().await {
+            if let Ok(msgs) = resp.json::<Vec<Message>>().await {
+                let unread = match &local_agent {
+                    Some(agent) => msgs.iter().filter(|m| m.sender != *agent).count(),
+                    None => msgs.len(),
+                };
+                if unread > 0 {
+                    named.push(s.id.clone());
+                }
+            }
+        }
+    }
+    if !named.is_empty() {
+        let list = named.join(", ");
+        eprintln!(
+            "⟳ hint: {} session(s) with an unread message ({}) — run `tala check`",
+            named.len(),
+            list
+        );
     }
     Ok(())
 }
@@ -2330,6 +2750,14 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
     if alive {
         let cursors = store::read_cursors().await;
         let total_unread = compute_total_unread(&info.host, info.port, &cursors).await;
+        let waits: Vec<ActiveWaitInfo> = {
+            let client = reqwest::Client::new();
+            let url = daemon_url(&info.host, info.port, "/api/waits");
+            match client.get(&url).send().await {
+                Ok(resp) => resp.json().await.unwrap_or_default(),
+                Err(_) => vec![],
+            }
+        };
 
         if json_output {
             let resp = serde_json::json!({
@@ -2339,6 +2767,7 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
                 "host": info.host,
                 "started_at": info.started_at,
                 "total_unread": total_unread,
+                "active_waits": waits,
                 "home": home_path.display().to_string(),
                 "tala_home_set": tala_home_set,
             });
@@ -2363,6 +2792,19 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
                 );
             } else {
                 println!("  Unread: 0 new messages");
+            }
+            if !waits.is_empty() {
+                println!("  Waiting now:");
+                for w in &waits {
+                    let scope_desc = match &w.scope {
+                        WaitScope::Session(s) => format!("session {}", s),
+                        WaitScope::AnyNewSession => "a new session".to_string(),
+                    };
+                    println!(
+                        "    {}  → {}  ({}s left)",
+                        w.identity, scope_desc, w.remaining_secs
+                    );
+                }
             }
         }
     } else {
@@ -2486,12 +2928,14 @@ async fn cmd_whatsup(json_output: bool) -> anyhow::Result<()> {
             println!("[{}] ({} new message(s))", session_name, msgs.len());
             for msg in msgs {
                 println!(
-                    "  [{}] {} ({}):\n    {}",
+                    "  [{}] {}{} ({}):{}",
                     msg.id,
+                    intent_badge(msg),
                     msg.sender,
                     msg.timestamp.format("%H:%M:%S"),
-                    msg.content
+                    render_deadline(msg)
                 );
+                println!("    {}", msg.content);
             }
             println!();
         }
