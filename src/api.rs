@@ -434,7 +434,12 @@ async fn wait_for_message(
 
     let reply_to = params.reply_to;
     let store_for_check = state.store.clone();
-    let timeout_dur = Duration::from_secs(wait_timeout);
+    // B048: --timeout 0 = no deadline (u64::MAX seconds ≈ indefinite).
+    let timeout_dur = Duration::from_secs(if wait_timeout == 0 {
+        u64::MAX
+    } else {
+        wait_timeout
+    });
     let result = timeout(timeout_dur, async {
         loop {
             match rx.recv().await {
@@ -634,7 +639,12 @@ async fn wait_stream(
     let sid = id.clone();
     let guard = crate::store::WaitGuard::new(Arc::clone(&state.store.wait_registry), wait_id);
 
-    let timeout_dur = Duration::from_secs(wait_timeout);
+    // B048: --timeout 0 = no deadline (u64::MAX seconds ≈ indefinite).
+    let timeout_dur = Duration::from_secs(if wait_timeout == 0 {
+        u64::MAX
+    } else {
+        wait_timeout
+    });
     let effective_limit = limit.unwrap_or(1);
     tokio::spawn(async move {
         let _guard = guard;
@@ -844,7 +854,12 @@ async fn wait_new_stream(
     let my_scope = WaitScope::AnyNewSession;
     let guard = crate::store::WaitGuard::new(Arc::clone(&state.store.wait_registry), wait_id);
 
-    let timeout_dur = Duration::from_secs(timeout_secs);
+    // B048: --timeout 0 = no deadline (u64::MAX seconds ≈ indefinite).
+    let timeout_dur = Duration::from_secs(if timeout_secs == 0 {
+        u64::MAX
+    } else {
+        timeout_secs
+    });
     tokio::spawn(async move {
         let _guard = guard;
         loop {
@@ -1001,7 +1016,12 @@ async fn wait_new_session(
 
     let existing_count = state.store.list_sessions().await.len();
 
-    let timeout_dur = Duration::from_secs(timeout_secs);
+    // B048: --timeout 0 = no deadline (u64::MAX seconds ≈ indefinite).
+    let timeout_dur = Duration::from_secs(if timeout_secs == 0 {
+        u64::MAX
+    } else {
+        timeout_secs
+    });
     let result = timeout(timeout_dur, async {
         loop {
             match rx.recv().await {
@@ -1126,7 +1146,12 @@ async fn wait_all(
     let timeout_secs = params.timeout_secs.unwrap_or(60);
     let mut rx = state.store.subscribe_global();
 
-    let timeout_dur = Duration::from_secs(timeout_secs);
+    // B048: --timeout 0 = no deadline (u64::MAX seconds ≈ indefinite).
+    let timeout_dur = Duration::from_secs(if timeout_secs == 0 {
+        u64::MAX
+    } else {
+        timeout_secs
+    });
     let result = timeout(timeout_dur, async {
         loop {
             match rx.recv().await {

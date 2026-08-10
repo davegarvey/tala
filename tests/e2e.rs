@@ -59,6 +59,16 @@ fn tala_stop(home: &std::path::Path) {
     let _ = tala(home, &["stop"]);
 }
 
+// Creates a session in a named project dir and returns (session_id, project_dir)
+fn tala_start_in(home: &std::path::Path, name: &str) -> (String, std::path::PathBuf) {
+    let project = home.join(name);
+    std::fs::create_dir_all(&project).unwrap();
+    let (stdout, stderr, ok) = tala_in(home, Some(&project), &["session", "create"]);
+    assert!(ok, "session create failed: {} {}", stdout, stderr);
+    let sess = stdout.lines().next().unwrap_or("").trim().to_string();
+    (sess, project)
+}
+
 #[test]
 fn test_daemon_lifecycle() {
     let home = tempfile::tempdir().unwrap();
@@ -1582,32 +1592,6 @@ fn test_wait_after_close_returns_messages_and_closed_true() {
 }
 
 #[test]
-fn test_watch_after_close() {
-    let home = tempfile::tempdir().unwrap();
-    let sess = tala_start(home.path());
-
-    tala_ok(home.path(), &["close", &sess]);
-
-    let (stdout, _stderr, ok) = tala(
-        home.path(),
-        &[
-            "stream",
-            "--session",
-            &sess,
-            "--since",
-            "0",
-            "--timeout",
-            "3",
-            "--json",
-        ],
-    );
-    assert!(ok, "stream after close should succeed");
-    assert!(stdout.contains("closed"), "should emit closed event");
-
-    tala_stop(home.path());
-}
-
-#[test]
 fn test_empty_message_rejected() {
     let home = tempfile::tempdir().unwrap();
     let sess = tala_start(home.path());
@@ -1630,7 +1614,7 @@ fn test_empty_session_name_rejected() {
 }
 
 #[test]
-fn test_session_rename_and_show() {
+fn test_session_rename() {
     let home = tempfile::tempdir().unwrap();
     let sess = tala_start(home.path());
 
@@ -1640,90 +1624,8 @@ fn test_session_rename_and_show() {
     );
     assert!(close.contains("renamed"), "rename should confirm");
 
-    let show = tala_ok(home.path(), &["session", "show", &sess]);
-    assert!(show.contains("my-project"), "show should display name");
-
-    tala_stop(home.path());
-}
-
-#[test]
-fn test_session_close_alias() {
-    let home = tempfile::tempdir().unwrap();
-    let sess = tala_start(home.path());
-
-    let out = tala_ok(home.path(), &["session", "close", &sess]);
-    assert!(out.contains("closed"), "session close should confirm");
-
-    tala_stop(home.path());
-}
-
-#[test]
-fn test_session_close_alias_clears_active() {
-    let home = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
-    let sess = tala_start(home.path());
-    // two more open sessions so bare send hits the NO_ACTIVE_SESSION path
-    // (with ≤1 open session left, send auto-targets instead of erroring)
-    tala_start(home.path());
-    tala_start(home.path());
-
-    // Make sess the active session for this project dir
-    let out = tala_in(home.path(), Some(project.path()), &["use", &sess]).0;
-    assert!(
-        out.contains("Active session"),
-        "use should confirm: {}",
-        out
-    );
-
-    // Close the ACTIVE session via the `session close` alias (same CWD as `use`,
-    // since the active-session file is project-relative)
-    let out = tala_in(
-        home.path(),
-        Some(project.path()),
-        &["session", "close", &sess],
-    )
-    .0;
-    assert!(out.contains("closed"), "session close should confirm");
-
-    // The active-session marker must be cleared: `use` should list available
-    // sessions instead of reporting the closed session as active
-    let (stdout, _stderr, ok) = tala_in(home.path(), Some(project.path()), &["use"]);
-    assert!(ok);
-    assert!(
-        stdout.contains("Available sessions"),
-        "use should show available sessions, got: {}",
-        stdout
-    );
-    assert!(
-        !stdout.contains("Active session:"),
-        "use should not report a stale active session: {}",
-        stdout
-    );
-
-    // list must not show a * marker on the closed row
-    let list = tala_ok(home.path(), &["list"]);
-    assert!(
-        !list.contains(" *"),
-        "list should not show a * marker when active is cleared: {}",
-        list
-    );
-
-    // Bare send must fail with a no-active-session error, not "Session is closed"
-    let (_, stderr, ok) = tala_in(home.path(), Some(project.path()), &["send", "hello"]);
-    assert!(!ok, "bare send after closing active should fail");
-    assert!(
-        stderr.contains("No active session"),
-        "should mention no active session: {}",
-        stderr
-    );
-
-    // list must not show a * marker on the closed row
-    let list = tala_in(home.path(), Some(project.path()), &["list"]).0;
-    assert!(
-        !list.contains(" *"),
-        "list should not show a * marker when active is cleared: {}",
-        list
-    );
+    let listed = tala_ok(home.path(), &["list"]);
+    assert!(listed.contains("my-project"), "list should display name");
 
     tala_stop(home.path());
 }
@@ -1818,37 +1720,6 @@ fn test_close_non_active_keeps_active_marker() {
         recap.contains("still active"),
         "message should go to sess_a: {}",
         recap
-    );
-
-    tala_stop(home.path());
-}
-
-#[test]
-fn test_session_close_alias_json_active_cleared() {
-    let home = tempfile::tempdir().unwrap();
-    let project = tempfile::tempdir().unwrap();
-    let sess = tala_start(home.path());
-    // one more open session so the closed one isn't the only session
-    tala_start(home.path());
-
-    tala_in(home.path(), Some(project.path()), &["use", &sess]);
-
-    let out = tala_in(
-        home.path(),
-        Some(project.path()),
-        &["session", "close", &sess, "--json"],
-    )
-    .0;
-    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(
-        parsed["status"], "closed",
-        "status should be closed: {}",
-        out
-    );
-    assert_eq!(
-        parsed["active_cleared"], true,
-        "json should report active_cleared: {}",
-        out
     );
 
     tala_stop(home.path());
@@ -2365,38 +2236,6 @@ fn test_listen_banner_json_pure_stdout() {
 }
 
 #[test]
-fn test_stream_banner() {
-    let home = tempfile::tempdir().unwrap();
-    let sess = tala_start(home.path());
-
-    let output = std::process::Command::new(tala_bin())
-        .env("HOME", home.path())
-        .args([
-            "stream",
-            "--session",
-            &sess,
-            "--since",
-            "0",
-            "--timeout",
-            "3",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(output.status.success(), "stream should exit 0: {}", stdout);
-    assert!(
-        stdout.contains("Streaming session") && stdout.contains(&sess),
-        "stream should print a connection banner with the session id: {}",
-        stdout
-    );
-
-    tala_stop(home.path());
-}
-
-#[test]
 fn test_listen_streams_all_sessions() {
     let home = tempfile::tempdir().unwrap();
     let alpha_proj = init_project(home.path(), "alpha");
@@ -2625,121 +2464,6 @@ fn test_send_stdin() {
         recap.contains("piped stdin message"),
         "stdin message should be in recap"
     );
-
-    tala_stop(home.path());
-}
-
-#[test]
-fn test_stream_streams_messages() {
-    let home = tempfile::tempdir().unwrap();
-    let streamer_proj = init_project(home.path(), "streamer");
-    let sess = tala_start(home.path());
-
-    let mut child = Command::new(tala_bin())
-        .env("HOME", home.path())
-        .args(["stream", "--session", &sess, "--since", "0", "--json"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("failed to start stream");
-
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    let (sout, serr, ok) = tala_in(
-        home.path(),
-        Some(streamer_proj.path()),
-        &["send", "--session", &sess, "live-msg"],
-    );
-    assert!(ok, "streamer send failed: {sout} {serr}");
-
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    let _ = child.kill();
-    let output = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        stdout.contains("live-msg"),
-        "stream should stream msg: {}",
-        stdout
-    );
-    assert!(stdout.contains("streamer"), "stream should show sender");
-
-    tala_stop(home.path());
-}
-
-#[test]
-fn test_stream_limit_caps_messages() {
-    let home = tempfile::tempdir().unwrap();
-    let sess = tala_start(home.path());
-
-    let mut child = Command::new(tala_bin())
-        .env("HOME", home.path())
-        .args([
-            "stream",
-            "--session",
-            &sess,
-            "--since",
-            "0",
-            "--limit",
-            "1",
-            "--json",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("failed to start stream");
-
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    tala_ok(home.path(), &["send", "--session", &sess, "limit-1-a"]);
-    tala_ok(home.path(), &["send", "--session", &sess, "limit-1-b"]);
-
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    let _ = child.kill();
-    let output = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let count = stdout.matches("\"parts\"").count();
-    assert_eq!(count, 1, "stream --limit 1 should cap at 1: {}", stdout);
-
-    tala_stop(home.path());
-}
-
-#[test]
-fn test_stream_limit_zero_is_unlimited() {
-    let home = tempfile::tempdir().unwrap();
-    let sess = tala_start(home.path());
-
-    let mut child = Command::new(tala_bin())
-        .env("HOME", home.path())
-        .args([
-            "stream",
-            "--session",
-            &sess,
-            "--since",
-            "0",
-            "--limit",
-            "0",
-            "--json",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("failed to start stream");
-
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    tala_ok(home.path(), &["send", "--session", &sess, "unlim-a"]);
-    tala_ok(home.path(), &["send", "--session", &sess, "unlim-b"]);
-
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    let _ = child.kill();
-    let output = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("unlim-a"), "limit 0 should show unlim-a");
-    assert!(stdout.contains("unlim-b"), "limit 0 should show unlim-b");
 
     tala_stop(home.path());
 }
@@ -2979,63 +2703,6 @@ fn test_use_on_closed_session_shows_reopen_hint() {
 
     tala_stop(home.path());
 }
-
-#[test]
-fn test_stream_alias_works() {
-    let home = tempfile::tempdir().unwrap();
-    let sess = tala_start(home.path());
-
-    use std::process::{Command, Stdio};
-
-    let mut child = Command::new(tala_bin())
-        .env("HOME", home.path())
-        .args([
-            "stream",
-            "--session",
-            &sess,
-            "--since",
-            "0",
-            "--timeout",
-            "3",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to start stream");
-
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    tala_ok(
-        home.path(),
-        &["send", "--session", &sess, "stream-alias-test"],
-    );
-
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    let _ = child.kill();
-    let output = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        stdout.contains("stream-alias-test"),
-        "stream alias should show messages: {}",
-        stdout
-    );
-
-    tala_stop(home.path());
-}
-
-// Creates a session in a named project dir and returns (session_id, project_dir)
-fn tala_start_in(home: &std::path::Path, name: &str) -> (String, std::path::PathBuf) {
-    let project = home.join(name);
-    std::fs::create_dir_all(&project).unwrap();
-    let (stdout, stderr, ok) = tala_in(home, Some(&project), &["session", "create"]);
-    assert!(ok, "session create failed: {} {}", stdout, stderr);
-    let sess = stdout.lines().next().unwrap_or("").trim().to_string();
-    (sess, project)
-}
-
-// --- Intent protocol tests ---
 
 #[test]
 fn test_send_intent_badges() {
@@ -5256,20 +4923,12 @@ fn test_stale_daemon_read_only_commands_warn() {
     let val: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(val["protocol_version"], 0);
 
-    // discover and agents: warn, exit 0.
+    // discover: warn, exit 0.
     let (stdout, stderr, ok) = tala(home.path(), &["discover", "--json"]);
     assert!(ok, "discover must not fail: {}", stdout);
     assert!(
         stderr.contains("incompatible"),
         "discover should warn: {}",
-        stderr
-    );
-
-    let (stdout, stderr, ok) = tala(home.path(), &["agents", "--json"]);
-    assert!(ok, "agents must not fail: {}", stdout);
-    assert!(
-        stderr.contains("incompatible"),
-        "agents should warn: {}",
         stderr
     );
 }
@@ -5417,5 +5076,119 @@ fn test_wait_new_json_includes_session_name() {
         stderr_text
     );
 
+    tala_stop(home.path());
+}
+
+// --- Cycle-19 surface narrowing tests ---
+
+#[test]
+fn test_send_name_creates_named_session() {
+    let home = tempfile::tempdir().unwrap();
+    let (stdout, stderr, ok) = tala(
+        home.path(),
+        &["send", "--name", "named-start", "first message"],
+    );
+    assert!(ok, "send --name should succeed: {} {}", stdout, stderr);
+    assert!(
+        stdout.contains("sess_"),
+        "send --name should print the session id: {}",
+        stdout
+    );
+    let listed = tala_ok(home.path(), &["list"]);
+    assert!(
+        listed.contains("named-start"),
+        "list should show the named session: {}",
+        listed
+    );
+    let hist = tala_ok(home.path(), &["history"]);
+    assert!(
+        hist.contains("first message"),
+        "history should show the message: {}",
+        hist
+    );
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_name_with_explicit_session_errors() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+    let (stdout, stderr, ok) = tala(
+        home.path(),
+        &["send", "-s", &sess, "--name", "conflict", "message"],
+    );
+    assert!(!ok, "send --name with explicit session must fail");
+    assert!(
+        stdout.contains("--name") || stderr.contains("--name"),
+        "error should mention --name: {} {}",
+        stdout,
+        stderr
+    );
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_wait_timeout_zero_is_indefinite() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    // A wait with --timeout 0 must stay parked past the old "instant timeout"
+    // behavior and deliver a message that arrives after it starts.
+    let child = std::process::Command::new(tala_bin())
+        .env("HOME", home.path())
+        .args(["wait", "-s", &sess, "--timeout", "0", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to start wait");
+
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    tala_ok(
+        home.path(),
+        &["send", "-s", &sess, "delivered-while-parked"],
+    );
+
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("delivered-while-parked"),
+        "timeout-0 wait should deliver the message: {}",
+        stdout
+    );
+    assert!(
+        output.status.success(),
+        "timeout-0 wait should exit 0 on delivery"
+    );
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_bare_send_warns_with_multiple_open_sessions() {
+    let home = tempfile::tempdir().unwrap();
+    // Two sessions created from two project dirs; p-a holds the active marker.
+    let (a, project_a) = tala_start_in(home.path(), "p-a");
+    let (_b, _project_b) = tala_start_in(home.path(), "p-b");
+
+    let (stdout, stderr, ok) =
+        tala_in(home.path(), Some(&project_a), &["send", "bare-target-test"]);
+    assert!(ok, "bare send should still succeed: {} {}", stdout, stderr);
+    assert!(
+        stderr.contains("open sessions"),
+        "bare send with 2 open sessions should warn on stderr: {}",
+        stderr
+    );
+    assert!(
+        stdout.contains("Sent message"),
+        "message should be sent: {}",
+        stdout
+    );
+    // Message landed in the active session (p-a's session).
+    let listed = tala_ok(home.path(), &["list"]);
+    let a_line = listed.lines().find(|l| l.contains(&a)).unwrap_or("");
+    assert!(
+        a_line.contains("1 msgs"),
+        "active session should hold the message: {}",
+        listed
+    );
     tala_stop(home.path());
 }

@@ -17,9 +17,9 @@ You have access to `tala`, a CLI tool for communicating with agents in other ses
 # Initialize this project (agent name defaults to directory name)
 tala init
 
-# Create a session and send the first message (session create sets it active)
-tala session create --name "collab"
-tala send "starting work on the API endpoint"
+# Create a named session and send the first message in one command
+# (or `tala session create --name X` first, then plain `tala send`)
+tala send --name "collab" "starting work on the API endpoint"
 
 # Or send + block for a reply
 tala send --wait "need help with the CSV parser" --timeout 300
@@ -37,7 +37,7 @@ sess=$(tala wait --new-session --timeout 600)
 |---|---|
 | `tala init [name]` | Initialize tala config for this project (writes `.tala/config.json`). |
 | `tala session create [--name <label>]` | Create a new session; prints its ID and sets it active. |
-| `tala session rename <id> <name>` / `show <id>` / `reopen <id>` / `close <id>` / `list` | Manage sessions. |
+| `tala session create` / `rename` / `reopen` | Session lifecycle (create with `--name`, rename, reopen). |
 | `tala send [<session>] "<msg>"` | Send a message (active session if omitted). |
 | `tala send --wait "<msg>"` | Send and block for a reply (spinner; `--timeout` secs, default 60). |
 | `tala send --intent <req|fyi|reply|out> "<msg>"` | Declare message intent (default: `fyi`; `--wait` implies `req`; `--reply-to` implies `reply`). |
@@ -47,19 +47,18 @@ sess=$(tala wait --new-session --timeout 600)
 | `tala wait --new-session` | Block until a session with an incoming message from another agent that you haven't read is ready — new sessions first, then sessions you've participated in; ignores your own scratch sessions. |
 | `tala pending` | List requests awaiting a reply (unanswered `req` + `--expect-reply` messages). |
 | `tala history [<session>]` | Full transcript. `--since <id>`, `--from <sender>`, `--limit <n>`. |
-| `tala stream [<session>]` | Real-time SSE for one session (push). |
 | `tala listen` | Real-time SSE across all sessions. Filters: `--from`, `--match`, `--name`, `--since`. |
 | `tala check` | Non-blocking: new messages since last check. |
-| `tala list` / `tala status` / `tala agents` / `tala discover` | Sessions / daemon / active agents / cross-project agents. |
+| `tala list` / `tala status` / `tala discover` | Sessions / daemon info / cross-project agents. |
 | `tala use [<id-or-name>]` | Set/show the active session. `--clear` to unset. |
 | `tala close [<session>]` | Close a session. |
 | `tala stop` | Stop the background daemon. |
 
 ## Key Behaviors
 
-- **No auto-create on send**: `tala send "msg"` with no active session errors and lists
-  candidate sessions with `tala use <id>` — it does NOT create a session. Use
-  `tala session create` (optionally `--name`) first.
+- **Auto-create on send**: `tala send "msg"` with no active session creates a
+  new unnamed session and sends there. For a named session, `tala send --name
+  <label> "msg"` creates it named and active in one command.
 - **`tala use` matches by name, then ID prefix, then full ID.** Ambiguous input prints
   `Multiple sessions match '...'` and lists candidates. Session names need not be unique.
 - **`session create` and `session reopen` set the active session** for this project
@@ -72,7 +71,7 @@ sess=$(tala wait --new-session --timeout 600)
   then sessions the waiter has participated in (sent or read) with unread incoming.
   Sessions the waiter created and never engaged with never satisfy the wait — the
   timeout hint points at their unread messages instead.
-- **`stream`/`listen` stay connected** (SSE). `--timeout` (listen default 60, 0 = forever).
+- **`listen` stays connected** (SSE). `--timeout` (default 60, 0 = forever).
 - The daemon auto-starts on any command and writes its PID/port to
   `$TALA_HOME/daemon.json` (`~/.tala/daemon.json` by default). `TALA_HOME` overrides the
   location for isolated daemon instances. `tala stop` stops it.
@@ -114,7 +113,7 @@ you on every `wait`.
 
 | Task | Command |
 |---|---|
-| Start a named session | `tala session create --name "my-project"` |
+| Start a named session | `tala send --name "my-project" "first message"` |
 | Broadcast FYI | `tala send "status: done"` |
 | Request + wait | `tala send --wait "need help" --timeout 60` |
 | Correlated reply | `tala send --reply-to 5 "fix is in parse_row"` |
@@ -124,7 +123,7 @@ you on every `wait`.
 | Watch all sessions | `tala listen` |
 | Filtered watch | `tala listen --from "alpha" --match "urgent"` |
 | Non-blocking check | `tala check` |
-| Cross-project discovery | `tala discover` / `tala agents` |
+| Cross-project discovery | `tala discover` |
 
 ## Guidelines
 

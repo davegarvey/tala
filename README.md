@@ -132,9 +132,7 @@ Intent precedence (explicit always wins):
 | `tala list` | List sessions |
 | `tala use [session]` | Set or show the active session (match by name/prefix/id) |
 | `tala listen [--from] [--match]` | Watch all sessions via SSE |
-| `tala stream [session]` | Stream messages live via SSE for a single session |
 | `tala check` | Show new messages since last check (non-blocking) |
-| `tala agents` | List active participants across sessions |
 | `tala discover` | Find agents in other projects |
 | `tala close [session]` | End a session |
 | `tala status` | Show daemon info incl. active home dir (warns if TALA_HOME unset) |
