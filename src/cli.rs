@@ -1302,6 +1302,12 @@ async fn send_content(
     } else {
         Intent::Fyi
     };
+    // B040: a reply that is not correlated to anything defeats the intent model.
+    if intent == Intent::Reply && reply_to.is_none() {
+        eprintln!(
+            "warning: --intent reply without --reply-to — this reply is not correlated to a message"
+        );
+    }
     let expect_reply = expect_reply || (reply_to.is_some() && should_wait && intent_arg.is_none());
     if expect_reply && matches!(intent, Intent::Req | Intent::Out) {
         fail(
@@ -2726,7 +2732,11 @@ async fn cmd_session_reopen(session_id: String, json_output: bool) -> anyhow::Re
 
 async fn cmd_session_create(session_name: Option<String>, json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
-    auto_create_session(&host, port, None, false, json_output, session_name).await?;
+    // B039: --json success must emit a typed document, never silence.
+    let id = auto_create_session(&host, port, None, false, json_output, session_name).await?;
+    if json_output {
+        println!("{}", serde_json::json!({"session_id": id}));
+    }
     Ok(())
 }
 
@@ -2765,7 +2775,14 @@ async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::R
     if json_output {
         println!("{}", serde_json::to_string(&result).unwrap());
     } else if let Some(sid) = result.get("session_id").and_then(|v| v.as_str()) {
+        // B041: stdout stays the bare id (agents capture it via $(tala wait --new-session));
+        // the session name is context, so it goes to stderr.
         println!("{}", sid);
+        if let Some(name) = result.get("name").and_then(|v| v.as_str()) {
+            if !name.is_empty() {
+                eprintln!("session: {}", name);
+            }
+        }
     } else if result.get("timeout") == Some(&serde_json::json!(true)) {
         eprintln!(
             "timeout after {}s, no new session",

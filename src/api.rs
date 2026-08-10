@@ -777,6 +777,11 @@ struct WaitNewStreamParams {
     seen: Option<String>,
 }
 
+/// B041: session name for wait-new results (absent for unnamed sessions).
+async fn session_name_for(store: &Arc<Store>, session_id: &str) -> Option<String> {
+    store.get_session(session_id).await.and_then(|s| s.name)
+}
+
 /// SSE wait for a new session: delivers `overlap` events and a terminal
 /// `result` event carrying `{"session_id": ...}` or a timeout marker.
 async fn wait_new_stream(
@@ -798,6 +803,8 @@ async fn wait_new_stream(
         if let Some((sid, msg)) = find_incoming_session(&state.store, me, &seen).await {
             let mut events: Vec<Result<Event, Infallible>> = Vec::new();
             let mut resp = serde_json::json!({"session_id": sid});
+            resp["name"] =
+                serde_json::to_value(session_name_for(&state.store, &sid).await).unwrap();
             resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
             let data = serde_json::to_string(&resp).unwrap();
             events.push(Ok(Event::default().event("result").data(data)));
@@ -864,6 +871,8 @@ async fn wait_new_stream(
                     let msgs = store_for_task.get_messages_since(&id, 0).await;
                     let first = msgs.first().cloned();
                     let mut resp = serde_json::json!({"session_id": id});
+                    resp["name"] =
+                        serde_json::to_value(session_name_for(&store_for_task, &id).await).unwrap();
                     if let Some(msg) = first {
                         resp["message"] = serde_json::to_value(msg).unwrap_or_default();
                     }
@@ -883,6 +892,10 @@ async fn wait_new_stream(
                             .record_read(&msg.session_id, me, msg.id)
                             .await;
                         let mut resp = serde_json::json!({"session_id": msg.session_id});
+                        resp["name"] = serde_json::to_value(
+                            session_name_for(&store_for_task, &msg.session_id).await,
+                        )
+                        .unwrap();
                         resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
                         let data = serde_json::to_string(&resp).unwrap();
                         let evt = Event::default().event("result").data(data);
@@ -892,6 +905,10 @@ async fn wait_new_stream(
                     let sessions = store_for_task.list_sessions().await;
                     if sessions.len() > existing_count {
                         let mut resp = serde_json::json!({"session_id": msg.session_id});
+                        resp["name"] = serde_json::to_value(
+                            session_name_for(&store_for_task, &msg.session_id).await,
+                        )
+                        .unwrap();
                         resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
                         let data = serde_json::to_string(&resp).unwrap();
                         let evt = Event::default().event("result").data(data);
