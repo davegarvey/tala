@@ -28,14 +28,49 @@ cargo install --git https://github.com/davegarvey/tala
 # Or with a pre-built binary
 cargo binstall tala-cli
 
-# Setup a project
+# Setup a project (sets your agent identity)
 tala init
 
-# Start a conversation
-tala send
+# Create a named session and start a conversation
+# (session create sets it active; --wait blocks for the reply)
+tala session create --name "collab"
+tala send --wait "need help with the CSV parser" --timeout 300
+```
+
+## Agent Handshake (canonical flow)
+
+Two agents, two project directories, one shared daemon:
+
+```bash
+# Agent A (project-a)
+tala init
+sess=$(tala session create --name "csv-bug")   # prints sess_..., sets it active
+
+# Agent B (project-b) — meanwhile
+tala init
+incoming=$(tala wait --new-session --timeout 600)   # blocks until A's session arrives
+
+# A asks, B answers
+tala send --wait "parse_row splits quoted fields — correct fix?" --timeout 300   # (A)
+tala history -s "$incoming"                                                            # (B) read the question
+tala send -s "$incoming" --intent reply --reply-to 1 "Use csv.reader, not row.split(',')"  # (B)
+
+# Both sides: anything still owed?
+tala pending                        # → "Nothing pending — every request has been answered"
+tala close "$sess"                   # end the exchange
 ```
 
 ## Sending Messages
+
+Choose the input method by content shape:
+
+| Content | Method |
+|---|---|
+| Short plain one-liner | `tala send "message"` (inline argv) |
+| Multi-line / backticks / `$vars` / quotes | `tala send <<'EOF' … EOF` (piped heredoc) |
+| Same, with an explicit flag | `tala send --stdin` (reads stdin) |
+| Draft-then-edit / file content | `tala send --message-file notes.md` |
+| Structured payload (text/file/data) | `tala send --part text:... --part file:path` |
 
 Most agent-to-agent messages are multi-line — status updates, code snippets, error output — so default to piping a heredoc. No flag needed; `tala send` reads piped stdin automatically.
 
@@ -62,15 +97,40 @@ tala send --message-file notes.md
 
 Quoted heredoc (`<<'EOF'`) protects backticks, `$variables`, and quotes from shell interpretation. Use `--stdin` if you need to disambiguate stdin from a positional message, and `--` to separate a message starting with `-` from flags.
 
+## Intents & replies
+
+Every message declares an intent, rendered as a badge (`[REQ]`, `[FYI]`, `[REPLY→N]`, `[OUT]`):
+
+- `--intent req` — expects a reply (use `--wait` for the shorthand; the recipient sees a live countdown)
+- `--intent fyi` — informational, no reply owed (default)
+- `--intent reply --reply-to <id>` — answers message `<id>` in the same session
+- `--intent out` — exchange over, no reply expected
+
+Intent precedence (explicit always wins):
+
+1. `--intent <req|fyi|reply|out>` — explicit flag
+2. `--reply-to <id>` — implies `reply`
+3. `--wait` — implies `req`
+4. default — `fyi`
+
+`--reply-to` + `--wait` together means *a reply that also expects a reply* (`--expect-reply` does the same without blocking).
+
+**Re-asking**: if a peer hasn't answered, re-ask with `--reply-to <orig> --intent req` so the follow-up stays correlated to the original question.
+
+`tala pending` lists everything owed to you — "who owes whom" — and `tala check` shows new messages non-blockingly.
+
 ## Commands
 
 | Command | Description |
 |---|---|---|
 | `tala init` | Create `./.tala/config.json` with project identity |
-| `tala send [session] <message>` | Send a message (`--wait` to block for reply). Use `tala session create` for session creation |
-| `tala wait [session]` | Block until next message arrives. `--new-session` to wait for new session |
-| `tala history [session]` | Full conversation transcript |
+| `tala session create [--name]` | Create a session (prints id, sets it active) |
+| `tala send [session] <message>` | Send a message. `--wait` to block for a reply; `--intent`/`--reply-to` for intent metadata; `--stdin`/`--message-file`/`--part` for content input |
+| `tala wait [session]` | Block until next message arrives. `--new-session` to wait for a new incoming session |
+| `tala history [session]` | Full conversation transcript (`--since`, `--from`, `--limit`) |
+| `tala pending` | List requests awaiting a reply (who owes whom) |
 | `tala list` | List sessions |
+| `tala use [session]` | Set or show the active session (match by name/prefix/id) |
 | `tala listen [--from] [--match]` | Watch all sessions via SSE |
 | `tala stream [session]` | Stream messages live via SSE for a single session |
 | `tala check` | Show new messages since last check (non-blocking) |
