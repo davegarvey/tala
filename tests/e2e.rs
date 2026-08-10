@@ -5292,3 +5292,130 @@ fn test_status_reports_protocol_version() {
 
     tala_stop(home.path());
 }
+
+// --- Cycle-18 eval feedback fixes (B039-B041) ---
+
+#[test]
+fn test_session_create_json_outputs_session_id() {
+    let home = tempfile::tempdir().unwrap();
+    let (stdout, stderr, ok) = tala(
+        home.path(),
+        &["session", "create", "--name", "json-probe", "--json"],
+    );
+    assert!(
+        ok,
+        "session create --json should succeed: {} {}",
+        stdout, stderr
+    );
+    let val: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("--json success must emit a JSON doc");
+    let sid = val["session_id"]
+        .as_str()
+        .expect("JSON must contain session_id");
+    assert!(sid.starts_with("sess_"), "session_id shape: {}", sid);
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_reply_intent_without_reply_to_warns() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+    let (stdout, stderr, ok) = tala(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--intent",
+            "reply",
+            "uncorrelated answer",
+        ],
+    );
+    assert!(ok, "send should still succeed: {} {}", stdout, stderr);
+    assert!(
+        stderr.contains("--reply-to"),
+        "reply intent without --reply-to should warn on stderr: {}",
+        stderr
+    );
+    assert!(
+        !stdout.contains("--reply-to"),
+        "warning must not pollute stdout: {}",
+        stdout
+    );
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_wait_new_json_includes_session_name() {
+    let home = tempfile::tempdir().unwrap();
+    let alpha_proj = home.path().join("alpha-proj");
+    let beta_proj = home.path().join("beta-proj");
+    std::fs::create_dir_all(&alpha_proj).unwrap();
+    std::fs::create_dir_all(&beta_proj).unwrap();
+    run_init_in(&alpha_proj, home.path(), &["init", "alpha"]);
+    run_init_in(&beta_proj, home.path(), &["init", "beta"]);
+
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["session", "create", "--name", "named-handshake"],
+    );
+    assert!(ok, "alpha session create failed: {}", sout);
+    let alpha_sess = sout.trim().to_string();
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &alpha_sess, "hello from alpha"],
+    );
+    assert!(ok, "alpha send failed: {}", sout);
+
+    // --json carries the name
+    let (stdout, _stderr, ok) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["wait", "--new-session", "--timeout", "10", "--json"],
+    );
+    assert!(ok, "wait --new-session --json should succeed: {}", stdout);
+    assert!(
+        stdout.contains("named-handshake"),
+        "wait-new --json should include the session name: {}",
+        stdout
+    );
+
+    // text mode keeps the bare id on stdout (capture contract), name on stderr
+    let (sout2, _serr2, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["session", "create", "--name", "named-handshake-2"],
+    );
+    assert!(ok, "alpha second session create failed: {}", sout2);
+    let sess2 = sout2.trim().to_string();
+    let (sout3, _serr3, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &sess2, "second hello"],
+    );
+    assert!(ok, "alpha second send failed: {}", sout3);
+    let (stdout_text, stderr_text, ok) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["wait", "--new-session", "--timeout", "10"],
+    );
+    assert!(
+        ok,
+        "text wait --new-session should succeed: {}",
+        stdout_text
+    );
+    assert_eq!(
+        stdout_text.trim(),
+        sess2,
+        "text wait-new must print the bare session id on stdout"
+    );
+    assert!(
+        stderr_text.contains("named-handshake-2"),
+        "text wait-new should print the session name as stderr context: {}",
+        stderr_text
+    );
+
+    tala_stop(home.path());
+}
