@@ -23,3 +23,10 @@ from positional arguments.
 
 Use conventional commits (`feat:`, `fix:`, etc.) — the release pipeline bumps
 the version from them, and non-conventional messages silently skip releases.
+
+## Evaluation
+
+E2E evaluation scenarios live in `eval/scenarios/` (see `eval/README.md` for
+orchestration). They are manually orchestrated — no autonomous loop, no
+commits or PRs from evals. Findings feed OpenSpec change proposals that a
+human reviews.
