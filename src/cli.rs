@@ -1258,6 +1258,7 @@ async fn send_content(
             "[timeout after {}s, no reply]",
             result.timeout_after.unwrap_or(0)
         );
+        let _ = print_unread_hint(host, port).await;
         process::exit(EXIT_TIMEOUT);
     } else {
         for m in &result.messages {
