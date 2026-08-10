@@ -2125,7 +2125,7 @@ fn test_listen_timeout() {
 
     assert!(
         output.status.success(),
-        "listen with timeout should exit successfully"
+        "listen that captured a message should exit 0"
     );
     assert!(
         stdout.contains("listen-timeout-test"),
@@ -2151,9 +2151,10 @@ fn test_listen_banner_text() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(
-        output.status.success(),
-        "listen should exit 0: stdout={} stderr={}",
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "listen timeout should exit 3 (family contract): stdout={} stderr={}",
         stdout,
         stderr
     );
@@ -3367,7 +3368,11 @@ fn test_listen_replays_new_session_message_without_since() {
         .expect("failed to start listen");
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "listen should exit 0: {}", stdout);
+    assert!(
+        output.status.success(),
+        "listen that received messages should exit 0: {}",
+        stdout
+    );
     assert!(
         stdout.contains("fresh-listen-msg"),
         "listen must replay the new session's message: {}",
@@ -5278,17 +5283,43 @@ fn test_listen_advances_cursor_check_agrees() {
         check
     );
 
-    // A second listen (replay from beta's cursors) must not replay it either.
+    // A second listen (replay from beta's cursors) must not replay it either —
+    // it times out empty, which is exit 3 (family contract).
     let (stdout2, _stderr3, ok3) = tala_in(
         home.path(),
         Some(&beta_proj),
         &["listen", "--timeout", "2", "--json"],
     );
-    assert!(ok3, "second listen should succeed: {}", stdout2);
+    assert!(!ok3, "second listen should exit 3: {}", stdout2);
     assert!(
         !stdout2.contains("seen-by-listener"),
         "reconnect must not replay delivered messages: {}",
         stdout2
     );
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_listen_timeout_exits_3() {
+    let home = tempfile::tempdir().unwrap();
+    tala_start(home.path());
+
+    // Benign timeout exits 3 (family contract with wait/send), not 0.
+    let (stdout, stderr, ok) = tala(home.path(), &["listen", "--timeout", "2"]);
+    assert!(
+        !ok,
+        "listen timeout should exit nonzero: {} {}",
+        stdout, stderr
+    );
+    let code = {
+        // re-run capturing the exit code
+        let out = std::process::Command::new(tala_bin())
+            .env("HOME", home.path())
+            .args(["listen", "--timeout", "2"])
+            .output()
+            .unwrap();
+        out.status.code().unwrap_or(-1)
+    };
+    assert_eq!(code, 3, "listen benign timeout should exit 3");
     tala_stop(home.path());
 }

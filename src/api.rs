@@ -1455,7 +1455,15 @@ async fn observe_events(
             let result = if let Some(dur) = timeout_dur {
                 match tokio::time::timeout(dur, rx.recv()).await {
                     Ok(result) => result,
-                    Err(_) => break, // timeout expired
+                    // Plateau: emit a terminal timeout event so the CLI can
+                    // exit 3 (benign timeout family contract) instead of 0.
+                    Err(_) => {
+                        let data =
+                            serde_json::to_string(&serde_json::json!({"type": "timeout"})).unwrap();
+                        let evt = Event::default().event("timeout").data(data);
+                        let _ = tx.send(Ok(evt)).await;
+                        break;
+                    }
                 }
             } else {
                 rx.recv().await

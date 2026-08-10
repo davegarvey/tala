@@ -31,10 +31,9 @@ cargo binstall tala-cli
 # Setup a project (sets your agent identity)
 tala init
 
-# Create a named session and start a conversation
-# (session create sets it active; --wait blocks for the reply)
-tala session create --name "collab"
-tala send --wait "need help with the CSV parser" --timeout 300
+# Create a named session and start a conversation in ONE command
+# (--name creates the session, sets it active; --wait blocks for the reply)
+tala send --name "collab" --wait "need help with the CSV parser" --timeout 300
 ```
 
 ## Agent Handshake (canonical flow)
@@ -44,20 +43,19 @@ Two agents, two project directories, one shared daemon:
 ```bash
 # Agent A (project-a)
 tala init
-sess=$(tala session create --name "csv-bug")   # prints sess_..., sets it active
 
 # Agent B (project-b) — meanwhile
 tala init
 incoming=$(tala wait --new-session --timeout 600)   # blocks until A's session arrives
 
 # A asks, B answers
-tala send --wait "parse_row splits quoted fields — correct fix?" --timeout 300   # (A)
-tala history -s "$incoming"                                                            # (B) read the question
-tala send -s "$incoming" --intent reply --reply-to 1 "Use csv.reader, not row.split(',')"  # (B)
+tala send --name "csv-bug" --wait "parse_row splits quoted fields — correct fix?" --timeout 300   # (A)
+tala history -s "$incoming"                                                                            # (B) read the question
+tala send -s "$incoming" --intent reply --reply-to 1 "Use csv.reader, not row.split(',')"            # (B)
 
 # Both sides: anything still owed?
 tala pending                        # → "Nothing pending — every request has been answered"
-tala close "$sess"                   # end the exchange
+tala close "$incoming"               # end the exchange
 ```
 
 ## Sending Messages

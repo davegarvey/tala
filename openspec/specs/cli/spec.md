@@ -31,19 +31,15 @@ When `tala use` is run without arguments and no active session is set, the syste
 
 ### Requirement: CLI help cross-references wait/stream/listen
 
-The `--help` output for `tala wait`, `tala stream`, and `tala listen` SHALL include brief usage guidance explaining when to use each command.
+The `--help` output for `tala wait` and `tala listen` SHALL include brief usage guidance explaining when to use each command.
 
 #### Scenario: Wait help shows cross-references
 - **WHEN** user runs `tala wait --help`
-- **THEN** the help output SHALL mention `tala stream` for real-time SSE and `tala listen` for observing all sessions
-
-#### Scenario: Stream help shows cross-references
-- **WHEN** user runs `tala stream --help`
-- **THEN** the help output SHALL mention `tala wait` for blocking poll and `tala listen` for observing all sessions
+- **THEN** the help output SHALL mention `tala listen` for observing all sessions
 
 #### Scenario: Listen help shows cross-references
 - **WHEN** user runs `tala listen --help`
-- **THEN** the help output SHALL mention `tala stream` for single-session SSE and `tala wait` for blocking poll
+- **THEN** the help output SHALL mention `tala wait` for blocking poll
 
 ### Requirement: Wait --new-session mentioned in top-level help
 
@@ -100,7 +96,7 @@ The message workflow SHALL be built from three commands. `tala send` SHALL send 
 
 ### Requirement: Deprecated commands and flags removed
 
-The system SHALL NOT include the legacy `start`, `recap`, `whatsup`, `observe`, `follow`, or `watch` commands, and SHALL NOT ship deprecated aliases that only warn. Session creation without a message is done with `tala session create`; transcripts with `tala history`; new-message checks with `tala check`; all-session observation with `tala listen`; single-session streaming with `tala stream`. `tala send` SHALL NOT accept a `--file` flag (only `--message-file`). `tala wait` SHALL use `--new-session` and SHALL NOT accept a `--new` alias. `tala check` SHALL NOT accept `--cursor` or `--new` flag aliases.
+The system SHALL NOT include the legacy `start`, `recap`, `whatsup`, `observe`, `follow`, or `watch` commands, and SHALL NOT ship deprecated aliases that only warn. Session creation without a message is done with `tala session create` (or `tala send --name` for a named send); transcripts with `tala history`; new-message checks with `tala check`; all-session observation with `tala listen`. The removed commands `stream`, `agents`, `session list`, `session close`, and `session show` SHALL stay absent. `tala send` SHALL NOT accept a `--file` flag (only `--message-file`). `tala wait` SHALL use `--new-session` and SHALL NOT accept a `--new` alias. `tala check` SHALL NOT accept `--cursor` or `--new` flag aliases.
 
 #### Scenario: Start command is absent
 - **WHEN** user runs `tala start`
@@ -209,15 +205,3 @@ The default output of `tala list` SHALL include each session's name (or `-` when
 #### Scenario: List with mixed name lengths
 - **WHEN** sessions have names "a" and "very-long-name"
 - **THEN** columns SHALL remain aligned (space-padded to the longest name)
-
-### Requirement: `tala agents` hints at cross-project discovery
-
-`tala agents --help` SHALL reference `tala discover` for finding agents in other projects. When no agents are found, the output SHALL suggest `tala discover`.
-
-#### Scenario: Agents help mentions discover
-- **WHEN** user runs `tala agents --help`
-- **THEN** the help text SHALL include "See also: tala discover (cross-project agent discovery)"
-
-#### Scenario: Empty agents output mentions discover
-- **WHEN** user runs `tala agents` and no agents are found
-- **THEN** the output SHALL include a hint: "Try `tala discover` to find agents in other projects."

@@ -63,7 +63,7 @@ pub enum Commands {
     },
     /// Send a message to a session. Use `tala session create` to create a session without a message.
     #[command(
-        after_help = "Use --wait / -w to block until a reply arrives.\nUse `tala session create --name` to create a named session.\nUse --stdin or pipe content for messages with special characters (backticks, quotes, leading dashes).\nUse `--` to separate options from message content, e.g. `tala send -- --my-flags`.\n\nINTENT:\n  --intent <req|fyi|reply|out>  Declare what you expect (default: fyi; --wait implies req; --reply-to implies reply)\n  --reply-to <id>               Correlate this message as a reply to message <id> (same session)\n  --expect-reply                This message also expects a reply (modifier for reply/fyi)\n  With --wait --timeout N, recipients see the live countdown via the stamped waiting_until.\n\nEXIT CODES: 0 = sent (or reply received with --wait); 3 = --wait timed out; 1 = error"
+        after_help = "Use --wait / -w to block until a reply arrives.\nUse `tala send --name <label>` to create a named session in one command, or `tala session create --name` for an empty one.\nUse --stdin or pipe content for messages with special characters (backticks, quotes, leading dashes).\nUse `--` to separate options from message content, e.g. `tala send -- --my-flags`.\n\nINTENT:\n  --intent <req|fyi|reply|out>  Declare what you expect (default: fyi; --wait implies req; --reply-to implies reply)\n  --reply-to <id>               Correlate this message as a reply to message <id> (same session)\n  --expect-reply                This message also expects a reply (modifier for reply/fyi)\n  With --wait --timeout N, recipients see the live countdown via the stamped waiting_until.\n\nEXIT CODES: 0 = sent (or reply received with --wait); 3 = --wait timed out; 1 = error"
     )]
     Send {
         #[arg(help = "Session ID (positional, or use --session/-s)")]
@@ -134,7 +134,10 @@ pub enum Commands {
             help = "Session ID"
         )]
         session_arg: Option<String>,
-        #[arg(long, help = "Seconds to wait before timing out (default: 60)")]
+        #[arg(
+            long,
+            help = "Seconds to wait before timing out (default: 60, 0 = no timeout)"
+        )]
         timeout: Option<u64>,
         #[arg(long, help = "Only return messages with ID greater than this")]
         since: Option<u64>,
@@ -175,7 +178,7 @@ pub enum Commands {
     /// Observe all sessions for new messages (real-time SSE across all sessions).
     /// Use `tala wait` for a blocking poll.
     #[command(
-        after_help = "USAGE:\n  tala listen                Real-time SSE — observe all sessions at once\n  tala listen --since <n>   Skip history replay (only messages with ID > n)\n  tala listen --from <name> Filter messages from a specific sender\n  tala listen --match <text> Filter messages containing text\n  tala listen --name <name> Filter by session name\n\nCOMPARISON:\n  tala wait     Blocking poll — sends periodic HTTP requests, good for scripts and CI\n  tala check    Non-blocking -- show new messages and return immediately\n\nSee also: tala history (transcript)"
+        after_help = "USAGE:\n  tala listen                Real-time SSE — observe all sessions at once\n  tala listen --since <n>   Skip history replay (only messages with ID > n)\n  tala listen --from <name> Filter messages from a specific sender\n  tala listen --match <text> Filter messages containing text\n  tala listen --name <name> Filter by session name\n\nCOMPARISON:\n  tala wait     Blocking poll — sends periodic HTTP requests, good for scripts and CI\n  tala check    Non-blocking -- show new messages and return immediately\n\nEXIT CODES: 0 = received messages; 3 = timed out with no messages; 1 = error\n\nSee also: tala history (transcript)"
     )]
     Listen {
         #[arg(long, help = "Only show messages with ID greater than this")]
@@ -1850,16 +1853,22 @@ async fn cmd_listen(
 
     // B007: visible connection status. Text banner goes to stdout (matches the
     // "Waiting for a new session…" convention in wait); in --json mode it goes
-    // to stderr so stdout stays a pure JSON event stream.
+    // to stderr so stdout stays a pure JSON event stream. B046b: the since
+    // label must be truthful — cursor mode replays from last-read, not id 0.
+    let since_label = if since.is_none() {
+        "from last-read cursors".to_string()
+    } else {
+        format!("since id {}", since_id)
+    };
     if json_output {
         eprintln!(
-            "[listen] connected to tala daemon at {}:{} (since id {})",
-            host, port, since_id
+            "[listen] connected to tala daemon at {}:{} ({})",
+            host, port, since_label
         );
     } else {
         println!(
-            "Listening on tala daemon at {}:{} (all sessions, since id {})...",
-            host, port, since_id
+            "Listening on tala daemon at {}:{} (all sessions, {})...",
+            host, port, since_label
         );
     }
 
@@ -1867,6 +1876,7 @@ async fn cmd_listen(
     let mut stream = resp.bytes_stream();
     let mut message_count: u64 = 0;
     let mut max_by_session: HashMap<String, u64> = HashMap::new();
+    let mut timed_out = false;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -1917,6 +1927,18 @@ async fn cmd_listen(
                 continue;
             }
 
+            // Plateau: benign timeout is exit 3, matching the wait family
+            // (the daemon emits a terminal timeout event before closing).
+            if data.contains("\"timeout\"") {
+                timed_out = true;
+                if !json_output {
+                    eprintln!(
+                        "[listen] timed out after {}s — no new messages",
+                        timeout_secs.unwrap_or(60)
+                    );
+                }
+            }
+
             if json_output {
                 println!("{}", data);
             } else if let Ok(evt) = evt {
@@ -1963,6 +1985,12 @@ async fn cmd_listen(
         if *mid > store::read_cursor(sid).await {
             let _ = store::write_cursor(sid, *mid).await;
         }
+    }
+
+    // Plateau: benign timeout exits 3 ONLY when nothing was received
+    // (family contract: 0 = messages received; 3 = timed out empty).
+    if timed_out && message_count == 0 {
+        process::exit(EXIT_TIMEOUT);
     }
 
     Ok(())
