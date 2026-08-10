@@ -1832,8 +1832,9 @@ async fn cmd_listen(
     if let Some(ref n) = name {
         path = format!("{}&channel={}", path, n);
     }
-    // Default timeout to 60s if not specified, unless explicitly set to 0
-    let timeout_secs = timeout.filter(|&t| t != 0).or(Some(60u64));
+    // Default timeout to 60s if not specified; --timeout 0 = indefinite
+    // (B046: the old filter turned Some(0) into 60 — 0 must pass through).
+    let timeout_secs = timeout.or(Some(60u64));
     if let Some(t) = timeout_secs {
         path = format!("{}&timeout_secs={}", path, t);
     }
@@ -1888,6 +1889,32 @@ async fn cmd_listen(
                 if evt.r#type == "message" {
                     message_count += 1;
                 }
+            }
+
+            // B046: advance the per-session cursor as messages are delivered
+            // (both modes), so check agrees and a killed/reconnected listener
+            // never replays. Explicit --since is replay mode — leave cursors
+            // untouched there.
+            if let Ok(ref evt) = evt {
+                if evt.r#type == "message" {
+                    if let Some(msg) = &evt.message {
+                        if since.is_none() {
+                            let _ = store::write_cursor(&evt.session_id, msg.id).await;
+                        }
+                    }
+                }
+            }
+
+            // B046: a lagged broadcast warns instead of dropping silently.
+            if data.contains("\"overload\"") {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
+                    let skipped = v["skipped"].as_u64().unwrap_or(0);
+                    eprintln!(
+                        "warning: missed {} message(s) (daemon overload) — run `tala check` to catch up",
+                        skipped
+                    );
+                }
+                continue;
             }
 
             if json_output {
