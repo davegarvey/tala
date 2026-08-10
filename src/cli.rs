@@ -63,7 +63,7 @@ pub enum Commands {
     },
     /// Send a message to a session. Use `tala session create` to create a session without a message.
     #[command(
-        after_help = "Use --wait / -w to block until a reply arrives.\nUse `tala send --name <label>` to create a named session in one command, or `tala session create --name` for an empty one.\nUse --stdin or pipe content for messages with special characters (backticks, quotes, leading dashes).\nUse `--` to separate options from message content, e.g. `tala send -- --my-flags`.\n\nINTENT:\n  --intent <req|fyi|reply|out>  Declare what you expect (default: fyi; --wait implies req; --reply-to implies reply)\n  --reply-to <id>               Correlate this message as a reply to message <id> (same session)\n  --expect-reply                This message also expects a reply (modifier for reply/fyi)\n  With --wait --timeout N, recipients see the live countdown via the stamped waiting_until.\n\nEXIT CODES: 0 = sent (or reply received with --wait); 3 = --wait timed out; 1 = error"
+        after_help = "Use --wait / -w to block until a reply arrives.\nUse `tala send --name <label>` to create a named session in one command, or `tala session create --name` for an empty one.\nUse --stdin or pipe content for messages with special characters (backticks, quotes, leading dashes).\nUse `--` to separate options from message content, e.g. `tala send -- --my-flags`.\n\nINTENT PRECEDENCE: explicit --intent wins; --reply-to implies reply; --wait implies req; default fyi. With --wait --timeout N, recipients see the live countdown via the stamped waiting_until.\n\nEXIT CODES: 0 = sent (or reply received with --wait); 3 = --wait timed out; 2 = usage error; 1 = error"
     )]
     Send {
         #[arg(help = "Session ID (positional, or use --session/-s)")]
@@ -74,7 +74,7 @@ pub enum Commands {
         message: Option<String>,
         #[arg(
             long,
-            help = "Create a new named session and send there (name for the auto-created session)"
+            help = "Create a new named session, send there, and set it active (one-command named start)"
         )]
         name: Option<String>,
         #[arg(
@@ -219,7 +219,7 @@ pub enum Commands {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
-    /// Close a session
+    /// Close a session (clears the active marker if it was active)
     Close {
         #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
@@ -280,7 +280,7 @@ pub enum SessionCommands {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
-    /// Create a new empty session
+    /// Create a new empty session (sets it active for this project)
     Create {
         #[arg(
             long,
@@ -1983,7 +1983,7 @@ async fn cmd_listen(
                                 intent_badge(&msg),
                                 msg.sender,
                                 msg.timestamp.format("%H:%M:%S"),
-                                render_deadline(&msg)
+                                render_deadline(&msg, true)
                             );
                             println!("    {}", msg.render());
                         }
@@ -2109,7 +2109,7 @@ async fn cmd_recap(
                     intent_badge(msg),
                     msg.sender,
                     msg.timestamp.format("%H:%M:%S"),
-                    render_deadline(msg)
+                    render_deadline(msg, false)
                 );
                 println!("    {}\n", msg.render());
             }
@@ -2160,15 +2160,22 @@ async fn cmd_pending(json_output: bool) -> anyhow::Result<()> {
             );
             let mins = o.elapsed_seconds / 60;
             let secs = o.elapsed_seconds % 60;
+            // The actionable hint depends on who owes whom: my own unanswered
+            // request is owed BY the recipient; someone else's is owed BY me.
+            let hint = if o.sender == store::get_sender_name(None) {
+                format!("awaiting reply from {}", o.sender)
+            } else {
+                format!("answer with `tala send --reply-to {}`", o.message_id)
+            };
             println!(
-                "      unanswered for {}{} — answer with `tala send --reply-to {}`",
+                "      unanswered for {}{} — {}",
                 if mins > 0 {
                     format!("{}m ", mins)
                 } else {
                     String::new()
                 },
                 secs,
-                o.message_id
+                hint
             );
         }
     }
@@ -2745,13 +2752,18 @@ fn intent_badge(msg: &Message) -> String {
 }
 
 /// Renders the waiting_until deadline relative to now, e.g. " (waiting, 83s left)".
-fn render_deadline(msg: &Message) -> String {
+/// Renders the waiting_until deadline relative to now, e.g. " (waiting, 83s left)".
+/// Past deadlines render as "expired" only in live surfaces (check/listen/wait);
+/// history suppresses them — a completed exchange must not read like a failure.
+fn render_deadline(msg: &Message, show_expired: bool) -> String {
     match msg.waiting_until {
         Some(until) => {
             let now = chrono::Utc::now();
             let remaining = (until - now).num_seconds();
             if remaining >= 0 {
                 format!(" (waiting, {}s left)", remaining)
+            } else if !show_expired {
+                String::new()
             } else {
                 let mins = (-remaining) / 60;
                 let secs = -remaining % 60;
@@ -3039,7 +3051,7 @@ async fn cmd_whatsup(json_output: bool) -> anyhow::Result<()> {
                     intent_badge(msg),
                     msg.sender,
                     msg.timestamp.format("%H:%M:%S"),
-                    render_deadline(msg)
+                    render_deadline(msg, true)
                 );
                 println!("    {}", msg.render());
             }
