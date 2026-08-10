@@ -1,30 +1,22 @@
 ## Purpose
 
-Session lifecycle in tala: creating a session never silently hijacks the active session, initial messages are stored exactly once, and the active session is set only by explicit `use`.
+Session lifecycle in tala: `session create` creates a session and makes it active, `use` sets the active session explicitly, and the active session is never hijacked silently by message receipt.
 
-## ADDED Requirements
+## Requirements
 
-### Requirement: `tala start` creates session without setting active
+### Requirement: `tala session create` creates session and sets active
 
-`tala start` SHALL create a new session and print its ID. It SHALL NOT call `write_active_session()`. The new session SHALL NOT become the active session as a side effect.
+`tala session create` SHALL create a new session, print its ID, and make it the active session for the current project directory.
 
-#### Scenario: Start creates session, no side effect
-- **WHEN** user runs `tala start "hello"` while another session is active
-- **THEN** a new session is created with the initial message
-- **THEN** the active session SHALL remain unchanged
-
-#### Scenario: Start prints session ID
-- **WHEN** user runs `tala start`
+#### Scenario: Session create prints ID and sets active
+- **WHEN** user runs `tala session create` while another session is active
+- **THEN** a new session is created
 - **THEN** the session ID is printed to stdout
+- **THEN** the new session SHALL be the active session (a bare `tala send` targets it)
 
-### Requirement: `tala start` does not duplicate the initial message
-
-`tala start "message"` SHALL store the initial message exactly once. The message SHALL NOT be sent twice.
-
-#### Scenario: Initial message stored once
-- **WHEN** user runs `tala start "hello"`
-- **THEN** a single message "hello" exists in the session
-- **THEN** `tala recap` SHALL show exactly one message
+#### Scenario: Session create with a name
+- **WHEN** user runs `tala session create --name review`
+- **THEN** a new session named "review" is created and becomes active
 
 ### Requirement: `tala use` sets active session explicitly
 

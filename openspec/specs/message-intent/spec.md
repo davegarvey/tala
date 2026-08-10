@@ -2,7 +2,7 @@
 
 Message-level intent metadata for tala: senders declare what they expect (reply required, informational, answering, closing), correlate replies to requests, and stamp wait deadlines so recipients see live remaining time — making conversations unambiguous and machine-visible.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Intent field on messages
 

@@ -2,7 +2,7 @@
 
 Wait behavior in tala: `wait` adapts to the number of open sessions, sets the active session when messages arrive, and shows which session each message came from.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: `tala wait` adapts to session count
 
@@ -54,3 +54,55 @@ When displaying received messages, `tala wait` SHALL prefix each message with `[
 #### Scenario: Message display includes session
 - **WHEN** agent receives a message via `tala wait`
 - **THEN** the output SHALL be in format `[sess <id>] [<msg_id>] <sender> (<time>):\n    <content>`
+
+### Requirement: `tala wait` handles a stale active session gracefully
+
+When `tala wait` receives a `SESSION_NOT_FOUND` error from the daemon for the active session, it SHALL NOT hard-error. Instead, it SHALL clear the stale active session, print a note that the active session was stale, and re-resolve the wait target from scratch — falling back through the same session-count logic as the no-active-session path.
+
+#### Scenario: Stale active session, one active session exists
+
+- **GIVEN** `.tala/active-session` contains a stale session ID `sess_stale`
+- **AND** the daemon has one active session `sess_abc`
+- **WHEN** user runs `tala wait`
+- **THEN** the stale active session is cleared
+- **THEN** `tala wait` uses `sess_abc` and waits for new messages
+
+#### Scenario: Stale active session, no active sessions exist
+
+- **GIVEN** `.tala/active-session` contains a stale session ID `sess_stale`
+- **AND** the daemon has no active sessions (all closed or none)
+- **WHEN** user runs `tala wait`
+- **THEN** the stale active session is cleared
+- **THEN** `tala wait` SHALL wait for a new session
+
+#### Scenario: Stale active session, multiple active sessions exist
+
+- **GIVEN** `.tala/active-session` contains a stale session ID `sess_stale`
+- **AND** the daemon has multiple active sessions (`sess_abc`, `sess_def`)
+- **WHEN** user runs `tala wait`
+- **THEN** the stale active session is cleared
+- **THEN** `tala wait` SHALL resolve the target via the standard multi-session path (same as no active session being set)
+
+### Requirement: `tala wait` timeout feedback
+
+When `tala wait` times out with no new messages, the CLI SHALL print a message of the form "timeout after <N>s, no new messages" and SHALL exit with code 3 (the benign-timeout exit code, distinct from usage errors). `tala wait --timeout <N>` SHALL override the default wait timeout (in seconds).
+
+#### Scenario: Wait times out
+
+- **WHEN** user runs `tala wait <session>` and no new message arrives within the timeout
+- **THEN** the CLI SHALL print "timeout after <N>s, no new messages"
+- **THEN** the CLI SHALL return with exit code 3
+
+#### Scenario: Wait with custom timeout
+
+- **WHEN** user runs `tala wait <session> --timeout 60`
+- **THEN** the CLI SHALL block for up to 60 seconds
+
+### Requirement: `tala wait` notifies when the session closes
+
+The CLI SHALL notify waiters when the session they are waiting on is closed during the wait.
+
+#### Scenario: Wait receives session closed notification
+
+- **WHEN** user is blocked on `tala wait <session>` and another agent closes the session
+- **THEN** the wait SHALL return with "[session closed]" message

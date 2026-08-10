@@ -2,7 +2,7 @@
 
 Retry-safe message delivery in tala: every send carries a client-generated idempotency key, and the daemon deduplicates on it, so a timed-out or retried send can never double-post a message.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Idempotency key on sends
 

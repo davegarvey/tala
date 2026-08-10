@@ -2,7 +2,7 @@
 
 Live visibility of waiting state in tala: the daemon tracks who is waiting on what, warns when waits overlap (deadlock prevention), hints when unread messages exist, and delivers wait wake-ups and events over SSE — so agents never wait blind.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Waiters registry
 

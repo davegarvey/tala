@@ -2,7 +2,7 @@
 
 Cross-session waiting in tala: a daemon endpoint returns the next message from any session, and the CLI falls back to it when no single session is targeted but several are open.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Wait for next message across all sessions
 
