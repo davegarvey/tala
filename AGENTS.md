@@ -39,16 +39,16 @@ All feature work follows the OpenSpec change workflow in `openspec/` (see
 
 1. **Create** a change (`openspec-new-change`): proposal → delta specs → design → tasks.
 2. **Implement** the change, checking off tasks as they land.
-3. **Sync** the change's delta specs into main specs (`openspec-sync-specs`) — required
-   before archiving so `openspec/specs/` stays the accumulated source of truth.
-4. **Archive** completed changes (`openspec-archive-change` / `openspec-bulk-archive-change`),
-   moving them to `openspec/changes/archive/YYYY-MM-DD-<name>/`. Never archive without syncing
-   delta specs first, unless the change is superseded (document why).
-5. Sync and archive on the feature branch, in the same PR as the implementation, so `main` is
-   clean at every merge. If a reviewer objects to mixing docs with code, an immediate doc-only
-   follow-up PR is acceptable — but open it when the code PR merges, not later.
-6. Completed-but-unarchived changes are technical debt — archive promptly; keep `openspec list`
-   empty and `openspec validate --all` green.
+3. **Sync** the change's delta specs into main specs (`openspec-sync-specs`), then
+   **archive** it (`openspec-archive-change` / `openspec-bulk-archive-change`) to
+   `openspec/changes/archive/YYYY-MM-DD-<name>/`. Never archive without syncing first,
+   unless the change is superseded (document why).
+4. Do the sync and archive on the feature branch, in the same PR as the implementation,
+   so `main` is clean at every merge. If a reviewer objects to mixing docs with code, an
+   immediate doc-only follow-up PR is acceptable — but open it when the code PR merges,
+   not later.
+5. Completed-but-unarchived changes are technical debt — archive promptly; keep
+   `openspec list` empty and `openspec validate --all` green.
 
 ## Evaluation
 
