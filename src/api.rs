@@ -139,7 +139,32 @@ async fn send_message(
     Path(id): Path<String>,
     Json(req): Json<SendMessageRequest>,
 ) -> impl IntoResponse {
-    if req.content.trim().is_empty() {
+    // Idempotency key is required on every send (send-idempotency spec).
+    let Some(key) = req.idempotency_key.as_deref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "idempotency_key is required on send".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    // Normalize legacy `content` into a single text part; `parts` wins when
+    // both are present. At least one non-empty part is required.
+    let parts = match req.parts {
+        Some(p) => p,
+        None => match req.content {
+            Some(c) => vec![Part::Text { content: c }],
+            None => vec![],
+        },
+    };
+    let empty = parts.is_empty()
+        || parts.iter().any(|p| match p {
+            Part::Text { content } => content.trim().is_empty(),
+            _ => false,
+        });
+    if empty {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -148,6 +173,7 @@ async fn send_message(
         )
             .into_response();
     }
+
     if let Some(target) = req.reply_to {
         let msgs = state.store.get_messages_since(&id, 0).await;
         if !msgs.iter().any(|m| m.id == target) {
@@ -163,61 +189,84 @@ async fn send_message(
                 .into_response();
         }
     }
+
     let intent = req.intent.unwrap_or(Intent::Fyi);
     let waiting_until = req
         .wait_timeout
         .map(|secs| chrono::Utc::now() + chrono::Duration::seconds(secs as i64));
-    match state
+    let add_result = state
         .store
         .add_message_with(
             &id,
             crate::store::AddMessageParams {
                 sender: req.sender,
-                content: req.content,
+                parts,
                 intent,
                 reply_to: req.reply_to,
                 expect_reply: req.expect_reply,
                 waiting_until,
+                idempotency_key: Some(key.to_string()),
             },
         )
-        .await
-    {
-        Some(msg) => (
-            StatusCode::CREATED,
-            Json(SendMessageResponse {
-                cursor: Some(msg.id),
-                id: msg.id,
-                session_id: msg.session_id,
-                sender: msg.sender,
-                content: msg.content,
-                timestamp: msg.timestamp,
-                intent: msg.intent,
-                reply_to: msg.reply_to,
-                expect_reply: msg.expect_reply,
-                waiting_until: msg.waiting_until,
-            }),
-        )
-            .into_response(),
-        None => {
-            let session = state.store.get_session(&id).await;
-            match session {
-                Some(_) => (
-                    StatusCode::CONFLICT,
-                    Json(ErrorResponse {
-                        error: "session is closed".to_string(),
-                    }),
-                )
-                    .into_response(),
-                None => (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: format!("session '{}' not found", id),
-                    }),
-                )
-                    .into_response(),
-            }
-        }
+        .await;
+    if let crate::store::AddMessageResult::Unavailable = &add_result {
+        let session = state.store.get_session(&id).await;
+        return match session {
+            Some(_) => (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "session is closed".to_string(),
+                }),
+            )
+                .into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("session '{}' not found", id),
+                }),
+            )
+                .into_response(),
+        };
     }
+    let (status, msg, duplicate) = match add_result {
+        crate::store::AddMessageResult::Stored(msg) => (StatusCode::CREATED, msg, false),
+        crate::store::AddMessageResult::Duplicate(msg) => (StatusCode::OK, msg, true),
+        crate::store::AddMessageResult::KeyConflict(original) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: format!(
+                        "idempotency key conflict: key already used for message {} in session {} with different content",
+                        original.id, original.session_id
+                    ),
+                }),
+            )
+                .into_response()
+        }
+        crate::store::AddMessageResult::Unavailable => unreachable!(),
+    };
+
+    // A deduplicated replay must not record a reply_to correlation against a
+    // message that never got stored — but the original message id is valid in
+    // its own session, so the response carries the original id and session.
+    (
+        status,
+        Json(SendMessageResponse {
+            cursor: Some(msg.id),
+            id: msg.id,
+            session_id: msg.session_id.clone(),
+            sender: msg.sender.clone(),
+            content: msg.text_content(),
+            parts: msg.parts.clone(),
+            timestamp: msg.timestamp,
+            intent: msg.intent,
+            reply_to: msg.reply_to,
+            expect_reply: msg.expect_reply,
+            waiting_until: msg.waiting_until,
+            duplicate,
+        }),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -1321,7 +1370,7 @@ async fn observe_events(
                 }
             }
             if let Some(ref m) = match_str {
-                if !msg.content.contains(m.as_str()) {
+                if !msg.matches(m.as_str()) {
                     continue;
                 }
             }
@@ -1396,7 +1445,7 @@ async fn observe_events(
                                 }
                             }
                             if let Some(ref m) = match_str {
-                                if !msg.content.contains(m.as_str()) {
+                                if !msg.matches(m.as_str()) {
                                     continue;
                                 }
                             }
@@ -1561,6 +1610,7 @@ async fn status(State(state): State<AppState>) -> impl IntoResponse {
         uptime_seconds: started_at,
         session_count: sessions.len(),
         active_waits: state.store.list_active_waits(),
+        protocol_version: PROTOCOL_VERSION,
     };
 
     (StatusCode::OK, Json(response))

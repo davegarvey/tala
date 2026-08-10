@@ -705,7 +705,7 @@ fn test_wait_limit_cap() {
     );
     assert!(ok, "wait --limit should succeed");
 
-    let count = stdout.matches("\"content\"").count();
+    let count = stdout.matches("\"parts\"").count();
     assert_eq!(count, 2, "should cap at 2 messages: {}", stdout);
 
     tala_stop(home.path());
@@ -2700,7 +2700,7 @@ fn test_stream_limit_caps_messages() {
     let _ = child.kill();
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let count = stdout.matches("\"content\"").count();
+    let count = stdout.matches("\"parts\"").count();
     assert_eq!(count, 1, "stream --limit 1 should cap at 1: {}", stdout);
 
     tala_stop(home.path());
@@ -4887,6 +4887,408 @@ fn test_broken_pipe_no_panic() {
         Some(101),
         "broken pipe must not exit with the panic code"
     );
+
+    tala_stop(home.path());
+}
+
+// ---- adopt-a2a-principles: message parts ----
+
+#[test]
+fn test_parts_send_and_render() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    tala_ok(
+        home.path(),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--part",
+            "text:review the change",
+            "--part",
+            "file:src/api.rs",
+            "--part",
+            r#"data:{"status":"ok"}"#,
+        ],
+    );
+
+    let hist = tala_ok(home.path(), &["history", &sess]);
+    assert!(
+        hist.contains("review the change"),
+        "text part should render as content: {}",
+        hist
+    );
+    assert!(
+        hist.contains("[file: src/api.rs]"),
+        "file part should render as annotation: {}",
+        hist
+    );
+    assert!(
+        hist.contains(r#"[data: {"status":"ok"}]"#),
+        "data part should render as annotation: {}",
+        hist
+    );
+
+    // --json exposes the typed parts array.
+    let json_out = tala_ok(home.path(), &["history", &sess, "--json"]);
+    let val: serde_json::Value = serde_json::from_str(&json_out).unwrap();
+    let msg = &val["messages"][0];
+    let parts = msg["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0]["type"], "text");
+    assert_eq!(parts[1]["type"], "file");
+    assert_eq!(parts[1]["path"], "src/api.rs");
+    assert_eq!(parts[2]["type"], "data");
+    // Legacy content view still present for older clients.
+    assert_eq!(msg["content"], "review the change");
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_parts_only_send_creates_session() {
+    let home = tempfile::tempdir().unwrap();
+    let project = init_project(home.path(), "parts-agent");
+
+    let (stdout, stderr, ok) = tala_in(
+        home.path(),
+        Some(project.path()),
+        &["send", "--part", "text:hello", "--part", "file:x"],
+    );
+    assert!(
+        ok,
+        "parts-only send should auto-create a session: {stdout} {stderr}"
+    );
+    assert!(
+        stdout.contains("✓ Sent message 1"),
+        "parts-only send should succeed: {}",
+        stdout
+    );
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_parts_validation_errors() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &["send", "--session", &sess, "--part", "bogus:value"],
+            "invalid --part kind",
+        ),
+        (
+            &["send", "--session", &sess, "--part", "text:"],
+            "empty text part",
+        ),
+        (
+            &["send", "--session", &sess, "--part", "data:not-json"],
+            "invalid --part data",
+        ),
+        (
+            &["send", "--session", &sess, "pos", "--part", "text:x"],
+            "--part cannot be combined",
+        ),
+    ];
+    for (args, needle) in cases {
+        let (stdout, stderr, ok) = tala(home.path(), args);
+        assert!(!ok, "{args:?} should fail, got: {stdout}");
+        assert!(
+            stderr.contains(needle) || stdout.contains(needle),
+            "{args:?} stderr should mention '{needle}', got: {stderr}"
+        );
+    }
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_legacy_messages_load_after_restart() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    tala_ok(home.path(), &["send", "--session", &sess, "legacy text"]);
+
+    // Restart the daemon: persisted legacy messages must load as text parts.
+    tala_stop(home.path());
+    let sess2 = tala_start(home.path());
+    let hist = tala_ok(home.path(), &["history", &sess]);
+    assert!(
+        hist.contains("legacy text"),
+        "legacy message must survive restart: {} (session {} persisted, restarted daemon on {})",
+        hist,
+        sess,
+        sess2
+    );
+    tala_stop(home.path());
+}
+
+// ---- adopt-a2a-principles: send idempotency ----
+
+fn daemon_addr(home: &std::path::Path) -> (String, u16) {
+    let info: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(home.join(".tala").join("daemon.json")).unwrap(),
+    )
+    .unwrap();
+    (
+        info["host"].as_str().unwrap_or("127.0.0.1").to_string(),
+        info["port"].as_u64().unwrap_or(0) as u16,
+    )
+}
+
+/// Raw HTTP/1.1 POST against the daemon (the CLI always generates fresh keys,
+/// so daemon-side dedup is exercised at the wire level).
+fn raw_post(home: &std::path::Path, path: &str, body: &str) -> (u16, String) {
+    use std::io::{Read, Write};
+    let (host, port) = daemon_addr(home);
+    let mut stream = std::net::TcpStream::connect((host.as_str(), port)).unwrap();
+    let request = format!(
+        "POST {} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        path,
+        host,
+        port,
+        body.len(),
+        body
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).unwrap();
+    let text = String::from_utf8_lossy(&buf);
+    let status: u16 = text
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+    (status, body)
+}
+
+fn send_body(sender: &str, content: &str, key: Option<&str>) -> String {
+    let mut body = format!(
+        r#"{{"sender":"{}","content":"{}""#,
+        sender,
+        content.replace('"', "\\\"")
+    );
+    if let Some(k) = key {
+        body.push_str(&format!(r#","idempotency_key":"{}""#, k));
+    }
+    body.push('}');
+    body
+}
+
+#[test]
+fn test_idempotency_dedup_and_conflict() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+    let path = format!("/api/sessions/{}/messages", sess);
+
+    let (status, body) = raw_post(
+        home.path(),
+        &path,
+        &send_body("wire-agent", "hello", Some("k1")),
+    );
+    assert_eq!(status, 201, "first send should store: {}", body);
+    let first: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(first["duplicate"], false);
+
+    // Retry with the same key and content: deduplicated, original returned.
+    let (status, body) = raw_post(
+        home.path(),
+        &path,
+        &send_body("wire-agent", "hello", Some("k1")),
+    );
+    assert_eq!(status, 200, "duplicate should return OK: {}", body);
+    let dup: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(dup["duplicate"], true, "duplicate flag set: {}", body);
+    assert_eq!(dup["id"], first["id"], "original message id returned");
+    assert_eq!(dup["session_id"], first["session_id"]);
+
+    // Same key, different content: conflict, nothing stored.
+    let (status, body) = raw_post(
+        home.path(),
+        &path,
+        &send_body("wire-agent", "different", Some("k1")),
+    );
+    assert_eq!(status, 409, "key conflict should fail: {}", body);
+    assert!(body.contains("conflict"), "conflict named: {}", body);
+
+    // Missing key: rejected.
+    let (status, body) = raw_post(home.path(), &path, &send_body("wire-agent", "no-key", None));
+    assert_eq!(status, 400, "missing key rejected: {}", body);
+
+    // Exactly one message stored.
+    let hist = tala_ok(home.path(), &["history", &sess, "--json"]);
+    let val: serde_json::Value = serde_json::from_str(&hist).unwrap();
+    assert_eq!(val["messages"].as_array().unwrap().len(), 1);
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_idempotency_survives_daemon_restart() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+    let path = format!("/api/sessions/{}/messages", sess);
+
+    let (status, body) = raw_post(
+        home.path(),
+        &path,
+        &send_body("wire-agent", "once", Some("k9")),
+    );
+    assert_eq!(status, 201, "first send should store: {}", body);
+
+    // Restart the daemon; the dedup index must be rebuilt from persistence.
+    tala_stop(home.path());
+    tala_start(home.path());
+    let (status, body) = raw_post(
+        home.path(),
+        &path,
+        &send_body("wire-agent", "once", Some("k9")),
+    );
+    assert_eq!(status, 200, "dedup must survive restart: {}", body);
+    let dup: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(dup["duplicate"], true);
+
+    let hist = tala_ok(home.path(), &["history", &sess, "--json"]);
+    let val: serde_json::Value = serde_json::from_str(&hist).unwrap();
+    assert_eq!(
+        val["messages"].as_array().unwrap().len(),
+        1,
+        "retry after restart must not duplicate"
+    );
+
+    tala_stop(home.path());
+}
+
+// ---- adopt-a2a-principles: daemon version negotiation ----
+
+/// Spawns a fake "stale" daemon: an HTTP server reporting protocol_version 0
+/// on /api/status, plus empty list endpoints. Writes daemon.json in `home`.
+fn fake_stale_daemon(home: &std::path::Path) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for _ in 0..32 {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let req = String::from_utf8_lossy(&buf);
+            let path = req.split_whitespace().nth(1).unwrap_or("/");
+            let body = match path {
+                p if p.starts_with("/api/status") => {
+                    r#"{"pid":1,"port":1,"uptime_seconds":1,"session_count":0,"protocol_version":0}"#.to_string()
+                }
+                p if p.starts_with("/api/sessions") => "[]".to_string(),
+                p if p.starts_with("/api/waits") => "[]".to_string(),
+                p if p.starts_with("/api/agents") => "[]".to_string(),
+                _ => r#"{"error":"not found"}"#.to_string(),
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+
+    let info = serde_json::json!({
+        "pid": 1,
+        "port": port,
+        "host": "127.0.0.1",
+        "started_at": "2024-01-01T00:00:00Z",
+        "protocol_version": 0,
+    });
+    let daemon_dir = home.join(".tala");
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    std::fs::write(
+        daemon_dir.join("daemon.json"),
+        serde_json::to_string(&info).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_stale_daemon_blocks_commands() {
+    let home = tempfile::tempdir().unwrap();
+    fake_stale_daemon(home.path());
+
+    let (stdout, stderr, ok) = tala(home.path(), &["send", "--json", "hello"]);
+    assert!(!ok, "send must fail against a stale daemon: {}", stdout);
+    let err: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap();
+    assert_eq!(
+        err["code"], "VERSION_MISMATCH",
+        "json error doc: {}",
+        stderr
+    );
+    assert!(
+        err["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("protocol version 0"),
+        "error names the versions: {}",
+        stderr
+    );
+
+    let (stdout, stderr, ok) = tala(home.path(), &["history", "sess_x", "--json"]);
+    assert!(!ok, "history must fail against a stale daemon: {}", stdout);
+    assert!(stderr.contains("VERSION_MISMATCH"), "stderr: {}", stderr);
+}
+
+#[test]
+fn test_stale_daemon_read_only_commands_warn() {
+    let home = tempfile::tempdir().unwrap();
+    fake_stale_daemon(home.path());
+
+    // status: warns, still exits 0, still reports the version.
+    let (stdout, stderr, ok) = tala(home.path(), &["status", "--json"]);
+    assert!(ok, "status must not fail: {}", stdout);
+    assert!(
+        stderr.contains("incompatible"),
+        "status should warn about the mismatch: {}",
+        stderr
+    );
+    let val: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(val["protocol_version"], 0);
+
+    // discover and agents: warn, exit 0.
+    let (stdout, stderr, ok) = tala(home.path(), &["discover", "--json"]);
+    assert!(ok, "discover must not fail: {}", stdout);
+    assert!(
+        stderr.contains("incompatible"),
+        "discover should warn: {}",
+        stderr
+    );
+
+    let (stdout, stderr, ok) = tala(home.path(), &["agents", "--json"]);
+    assert!(ok, "agents must not fail: {}", stdout);
+    assert!(
+        stderr.contains("incompatible"),
+        "agents should warn: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_status_reports_protocol_version() {
+    let home = tempfile::tempdir().unwrap();
+    tala_start(home.path());
+
+    let human = tala_ok(home.path(), &["status"]);
+    assert!(
+        human.contains("Protocol: 1"),
+        "status should show the protocol version: {}",
+        human
+    );
+
+    let json_out = tala_ok(home.path(), &["status", "--json"]);
+    let val: serde_json::Value = serde_json::from_str(&json_out).unwrap();
+    assert_eq!(val["protocol_version"], 1);
 
     tala_stop(home.path());
 }

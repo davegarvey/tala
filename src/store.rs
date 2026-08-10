@@ -33,6 +33,11 @@ pub fn local_config_path() -> PathBuf {
     PathBuf::from(".tala").join("config.json")
 }
 
+/// Idempotency index key: (sender, idempotency key).
+type DedupKey = (String, String);
+/// Idempotency index value: (session_id, message_id).
+type DedupLoc = (String, u64);
+
 pub struct Store {
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     messages: Arc<RwLock<HashMap<String, Vec<Message>>>>,
@@ -41,17 +46,36 @@ pub struct Store {
     read_state: Arc<RwLock<HashMap<(String, String), u64>>>,
     global_tx: broadcast::Sender<(String, DaemonEvent)>,
     pub wait_registry: Arc<Mutex<WaitRegistry>>,
+    /// Idempotency index: key → location. Rebuilt from persisted messages at
+    /// load; entries live on the Message itself so dedup survives restarts.
+    dedup: Arc<RwLock<HashMap<DedupKey, DedupLoc>>>,
 }
 
 /// Parameters for a new message, mirroring the intent metadata fields.
 #[derive(Debug, Clone, Default)]
 pub struct AddMessageParams {
     pub sender: String,
-    pub content: String,
+    pub parts: Vec<Part>,
     pub intent: Intent,
     pub reply_to: Option<u64>,
     pub expect_reply: bool,
     pub waiting_until: Option<chrono::DateTime<chrono::Utc>>,
+    pub idempotency_key: Option<String>,
+}
+
+/// Outcome of an add-message attempt.
+#[derive(Debug)]
+pub enum AddMessageResult {
+    /// A new message was stored.
+    Stored(Message),
+    /// A retry with a known idempotency key; the original message is returned
+    /// and nothing new was stored or broadcast.
+    Duplicate(Message),
+    /// The idempotency key was already used by this sender with different
+    /// content; the conflicting original is returned.
+    KeyConflict(Message),
+    /// Session is closed or does not exist.
+    Unavailable,
 }
 
 /// Tracks active waits so overlapping waits can be surfaced (deadlock visibility).
@@ -139,6 +163,7 @@ impl Store {
             read_state: Arc::new(RwLock::new(HashMap::new())),
             global_tx,
             wait_registry: Arc::new(Mutex::new(WaitRegistry::default())),
+            dedup: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -196,32 +221,46 @@ impl Store {
         sender: &str,
         content: &str,
     ) -> Option<Message> {
-        self.add_message_with(
-            session_id,
-            AddMessageParams {
-                sender: sender.to_string(),
-                content: content.to_string(),
-                ..AddMessageParams::default()
-            },
-        )
-        .await
+        match self
+            .add_message_with(
+                session_id,
+                AddMessageParams {
+                    sender: sender.to_string(),
+                    parts: vec![Part::Text {
+                        content: content.to_string(),
+                    }],
+                    ..AddMessageParams::default()
+                },
+            )
+            .await
+        {
+            AddMessageResult::Stored(m) | AddMessageResult::Duplicate(m) => Some(m),
+            AddMessageResult::KeyConflict(_) | AddMessageResult::Unavailable => None,
+        }
     }
 
     pub async fn add_message_with(
         &self,
         session_id: &str,
         params: AddMessageParams,
-    ) -> Option<Message> {
+    ) -> AddMessageResult {
+        // Closed/unknown sessions are rejected before any dedup bookkeeping.
         let mut sessions = self.sessions.write().await;
-        let session = sessions.get_mut(session_id)?;
-        if session.closed {
-            return None;
+        let session = sessions.get_mut(session_id).map(|s| s.closed);
+        match session {
+            Some(false) => {
+                let s = sessions.get_mut(session_id).unwrap();
+                s.last_activity = Utc::now();
+            }
+            Some(true) => return AddMessageResult::Unavailable,
+            None => return AddMessageResult::Unavailable,
         }
-        session.last_activity = Utc::now();
         drop(sessions);
 
         let mut msg_ids = self.next_msg_id.write().await;
-        let current_id = msg_ids.get_mut(session_id)?;
+        let Some(current_id) = msg_ids.get_mut(session_id) else {
+            return AddMessageResult::Unavailable;
+        };
         let msg_id = *current_id;
         *current_id += 1;
         drop(msg_ids);
@@ -230,19 +269,56 @@ impl Store {
         let msg = Message {
             id: msg_id,
             session_id: session_id.to_string(),
-            sender: params.sender,
-            content: params.content,
+            sender: params.sender.clone(),
+            parts: params.parts.clone(),
             timestamp: now,
             intent: params.intent,
             reply_to: params.reply_to,
             expect_reply: params.expect_reply,
             waiting_until: params.waiting_until,
+            idempotency_key: params.idempotency_key.clone(),
         };
 
+        // Dedup check: the messages + dedup write locks are held together with
+        // no awaits in between, so check+insert is atomic against concurrent
+        // sends with the same key.
         let mut msgs = self.messages.write().await;
+        let mut dedup = self.dedup.write().await;
+        if let Some(key) = &params.idempotency_key {
+            let lookup = (params.sender.clone(), key.clone());
+            if let Some((orig_sid, orig_mid)) = dedup.get(&lookup).cloned() {
+                let existing = msgs
+                    .get(&orig_sid)
+                    .and_then(|v| v.iter().find(|m| m.id == orig_mid))
+                    .cloned();
+                if let Some(existing) = existing {
+                    // Canonical serialization (serde_json map ordering is
+                    // deterministic) — same key + same parts is a retry.
+                    let same = serde_json::to_string(&existing.parts)
+                        .ok()
+                        .zip(serde_json::to_string(&msg.parts).ok())
+                        .map(|(a, b)| a == b)
+                        .unwrap_or(false);
+                    if same {
+                        return AddMessageResult::Duplicate(existing);
+                    }
+                    return AddMessageResult::KeyConflict(existing);
+                }
+                // Stale index entry (message evicted) — fall through and store.
+                dedup.remove(&lookup);
+            }
+        }
+
         msgs.entry(session_id.to_string())
             .or_default()
             .push(msg.clone());
+        if let Some(key) = &params.idempotency_key {
+            dedup.insert(
+                (params.sender.clone(), key.clone()),
+                (msg.session_id.clone(), msg.id),
+            );
+        }
+        drop(dedup);
 
         if let Some(tx) = self.broadcast.read().await.get(session_id) {
             let _ = tx.send(DaemonEvent::NewMessage(msg.clone()));
@@ -257,7 +333,7 @@ impl Store {
         // or crash does not lose it (B024).
         self.persist_state().await;
 
-        Some(msg)
+        AddMessageResult::Stored(msg)
     }
 
     pub async fn get_messages_since(&self, session_id: &str, since: u64) -> Vec<Message> {
@@ -572,7 +648,7 @@ impl Store {
                         session_name: session.name.clone(),
                         message_id: m.id,
                         sender: m.sender.clone(),
-                        content: m.content.chars().take(120).collect(),
+                        content: m.snippet(),
                         elapsed_seconds: (now - m.timestamp).num_seconds(),
                         intent: m.intent,
                         waiting_until: m.waiting_until,
@@ -673,6 +749,18 @@ impl Store {
         for sid in session_ids {
             msg_ids.entry(sid).or_insert(1);
         }
+        drop(msg_ids);
+
+        // Rebuild the idempotency index from persisted messages so dedup
+        // survives daemon restarts.
+        let mut dedup = self.dedup.write().await;
+        for (sid, list) in msgs.iter() {
+            for m in list {
+                if let Some(key) = &m.idempotency_key {
+                    dedup.insert((m.sender.clone(), key.clone()), (sid.clone(), m.id));
+                }
+            }
+        }
     }
 }
 
@@ -692,6 +780,7 @@ pub async fn write_daemon_json(port: u16) -> anyhow::Result<()> {
         port,
         host: "127.0.0.1".to_string(),
         started_at: chrono::Utc::now(),
+        protocol_version: crate::models::PROTOCOL_VERSION,
     };
 
     let path = home.join("daemon.json");
@@ -924,8 +1013,8 @@ mod tests {
 
         let messages = store.get_messages_since(&id, 0).await;
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].content, "hello");
-        assert_eq!(messages[1].content, "reply");
+        assert_eq!(messages[0].text_content(), "hello");
+        assert_eq!(messages[1].text_content(), "reply");
     }
 
     #[tokio::test]
@@ -942,7 +1031,7 @@ mod tests {
 
         let since_1 = store.get_messages_since(&id, 1).await;
         assert_eq!(since_1.len(), 2);
-        assert_eq!(since_1[0].content, "second");
+        assert_eq!(since_1[0].text_content(), "second");
 
         let since_3 = store.get_messages_since(&id, 3).await;
         assert!(since_3.is_empty());
@@ -986,7 +1075,7 @@ mod tests {
         let messages = store.get_messages_since(&id, 0).await;
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].sender, "init-agent");
-        assert_eq!(messages[0].content, "initial message");
+        assert_eq!(messages[0].text_content(), "initial message");
     }
 
     #[test]
@@ -1000,12 +1089,15 @@ mod tests {
             id,
             session_id: "s".into(),
             sender: sender.into(),
-            content: format!("m{}", id),
+            parts: vec![Part::Text {
+                content: format!("m{}", id),
+            }],
             timestamp: Utc::now(),
             intent,
             reply_to,
             expect_reply: false,
             waiting_until: None,
+            idempotency_key: None,
         }
     }
 
@@ -1102,7 +1194,9 @@ mod tests {
                 &sid,
                 AddMessageParams {
                     sender: "alpha".into(),
-                    content: "help".into(),
+                    parts: vec![Part::Text {
+                        content: "help".into(),
+                    }],
                     intent: Intent::Req,
                     ..AddMessageParams::default()
                 },
@@ -1113,7 +1207,9 @@ mod tests {
                 &sid,
                 AddMessageParams {
                     sender: "alpha".into(),
-                    content: "answered req".into(),
+                    parts: vec![Part::Text {
+                        content: "answered req".into(),
+                    }],
                     intent: Intent::Req,
                     ..AddMessageParams::default()
                 },
@@ -1124,7 +1220,9 @@ mod tests {
                 &sid,
                 AddMessageParams {
                     sender: "beta".into(),
-                    content: "fixed".into(),
+                    parts: vec![Part::Text {
+                        content: "fixed".into(),
+                    }],
                     intent: Intent::Reply,
                     reply_to: Some(2),
                     ..AddMessageParams::default()
@@ -1136,7 +1234,9 @@ mod tests {
                 &sid,
                 AddMessageParams {
                     sender: "beta".into(),
-                    content: "expecting more".into(),
+                    parts: vec![Part::Text {
+                        content: "expecting more".into(),
+                    }],
                     intent: Intent::Fyi,
                     expect_reply: true,
                     ..AddMessageParams::default()
@@ -1153,6 +1253,49 @@ mod tests {
         store.close_session(&sid).await;
         let pending = store.pending_obligations().await;
         assert!(pending.is_empty(), "closed sessions excluded");
+    }
+
+    #[tokio::test]
+    async fn test_idempotency_dedup_and_conflict() {
+        let store = Store::new();
+        let (sid, _) = store.create_session(None, None).await;
+
+        let params = || AddMessageParams {
+            sender: "alpha".into(),
+            parts: vec![Part::Text {
+                content: "retry me".into(),
+            }],
+            idempotency_key: Some("k1".into()),
+            ..AddMessageParams::default()
+        };
+
+        let first = store.add_message_with(&sid, params()).await;
+        let AddMessageResult::Stored(first) = first else {
+            panic!("first send must store");
+        };
+
+        // Retry with the same key and content: deduplicated, nothing stored.
+        let dup = store.add_message_with(&sid, params()).await;
+        match dup {
+            AddMessageResult::Duplicate(m) => assert_eq!(m.id, first.id),
+            other => panic!("expected Duplicate, got {:?}", other),
+        }
+        assert_eq!(store.get_messages_since(&sid, 0).await.len(), 1);
+
+        // Same key, different content: conflict.
+        let conflict = store
+            .add_message_with(
+                &sid,
+                AddMessageParams {
+                    parts: vec![Part::Text {
+                        content: "different".into(),
+                    }],
+                    ..params()
+                },
+            )
+            .await;
+        assert!(matches!(conflict, AddMessageResult::KeyConflict(_)));
+        assert_eq!(store.get_messages_since(&sid, 0).await.len(), 1);
     }
 
     #[test]

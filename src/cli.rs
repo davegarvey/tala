@@ -83,6 +83,12 @@ pub enum Commands {
         )]
         stdin: bool,
         #[arg(
+            long = "part",
+            value_name = "KIND:VALUE",
+            help = "Structured message part, repeatable: text:<value>, file:<path>, data:<json>. Cannot be combined with positional content, --message-file, or --stdin"
+        )]
+        parts: Vec<String>,
+        #[arg(
             long,
             short = 'w',
             help = "Wait for a reply after sending (default: return immediately)"
@@ -336,6 +342,7 @@ pub enum SessionCommands {
 }
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
+    let _ = precheck_daemon_compat(&cli.command).await;
     match cli.command {
         Commands::Init { name } => cmd_init(name).await,
         Commands::Use {
@@ -349,6 +356,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             message,
             message_file,
             stdin,
+            parts,
             wait,
             sender_name,
             json,
@@ -385,6 +393,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 resolved_message,
                 message_file,
                 stdin,
+                parts,
                 wait,
                 sender_name.as_deref(),
                 json,
@@ -477,6 +486,83 @@ fn daemon_home_display() -> String {
     } else {
         path.display().to_string()
     }
+}
+
+/// Read-only commands may inspect a stale daemon (with a warning); everything
+/// else must fail fast before issuing any command to an incompatible daemon.
+fn command_is_read_only(cmd: &Commands) -> bool {
+    matches!(
+        cmd,
+        Commands::Status { .. }
+            | Commands::Discover { .. }
+            | Commands::Agents { .. }
+            | Commands::Stop
+            | Commands::Init { .. }
+            | Commands::Use { .. }
+            | Commands::Daemon
+    )
+}
+
+fn command_json_output(cmd: &Commands) -> bool {
+    match cmd {
+        Commands::Use { json, .. }
+        | Commands::Send { json, .. }
+        | Commands::Wait { json, .. }
+        | Commands::Stream { json, .. }
+        | Commands::History { json, .. }
+        | Commands::Listen { json, .. }
+        | Commands::List { json }
+        | Commands::Pending { json }
+        | Commands::Discover { json }
+        | Commands::Agents { json }
+        | Commands::Close { json, .. }
+        | Commands::Check { json }
+        | Commands::Status { json } => *json,
+        Commands::Session { command } => match command {
+            SessionCommands::List { json }
+            | SessionCommands::Close { json, .. }
+            | SessionCommands::Show { json, .. }
+            | SessionCommands::Rename { json, .. }
+            | SessionCommands::Reopen { json, .. }
+            | SessionCommands::Create { json, .. } => *json,
+        },
+        _ => false,
+    }
+}
+
+/// daemon-compat gate: refuse to talk to a stale daemon (live `/api/status`
+/// version differs from PROTOCOL_VERSION) before any command runs. Read-only
+/// commands warn instead of failing. Skips when no daemon is running — the
+/// command's own ensure_daemon_running spawns a fresh, same-binary daemon.
+async fn precheck_daemon_compat(cmd: &Commands) -> anyhow::Result<()> {
+    let info = match store::read_daemon_json().await {
+        Ok(info) => info,
+        Err(_) => return Ok(()),
+    };
+    let client = reqwest::Client::new();
+    let url = daemon_url(&info.host, info.port, "/api/status");
+    let Ok(resp) = client.get(&url).send().await else {
+        return Ok(());
+    };
+    if !resp.status().is_success() {
+        return Ok(());
+    }
+    let Ok(status) = resp.json::<StatusResponse>().await else {
+        return Ok(());
+    };
+    if status.protocol_version == PROTOCOL_VERSION {
+        return Ok(());
+    }
+    let msg = format!(
+        "daemon protocol version {} is incompatible with this tala (requires {}). Restart the daemon with `tala stop` and retry, or upgrade tala.",
+        status.protocol_version, PROTOCOL_VERSION
+    );
+    if command_is_read_only(cmd) {
+        eprintln!("warning: {}", msg);
+    } else {
+        fail(command_json_output(cmd), &msg, "VERSION_MISMATCH");
+    }
+    Ok(())
 }
 
 async fn ensure_daemon_running() -> anyhow::Result<(String, u16)> {
@@ -929,6 +1015,7 @@ async fn cmd_send(
     message: Option<String>,
     message_file: Option<String>,
     stdin_flag: bool,
+    parts_arg: Vec<String>,
     should_wait: bool,
     sender_override: Option<&str>,
     json_output: bool,
@@ -940,7 +1027,18 @@ async fn cmd_send(
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
 
-    let has_content = message.is_some() || message_file.is_some() || stdin_flag;
+    // --part is the structured content form; it must not be mixed with the
+    // legacy content sources.
+    let legacy_content = message.is_some() || message_file.is_some() || stdin_flag;
+    if !parts_arg.is_empty() && legacy_content {
+        fail(
+            json_output,
+            "--part cannot be combined with positional content, --message-file, or --stdin",
+            "INVALID_PART",
+        );
+    }
+
+    let has_content = legacy_content || !parts_arg.is_empty();
 
     if !has_content && session_arg.is_none() && store::read_active_session().await.is_none() {
         let mut hint = String::new();
@@ -985,30 +1083,39 @@ async fn cmd_send(
         }
     }
 
-    // Resolve content
-    let content = if let Some(f) = message_file {
-        if f == "-" {
-            let piped = try_read_piped_stdin().await
-                .ok_or_else(|| anyhow::anyhow!("No piped input. Use `--stdin` for explicit stdin, or provide a filename for --message-file"))?;
-            piped
-        } else {
-            tokio::fs::read_to_string(&f)
-                .await?
-                .trim_end_matches('\n')
-                .to_string()
-        }
-    } else if stdin_flag {
-        try_read_piped_stdin().await.ok_or_else(|| {
-            anyhow::anyhow!("No message provided via stdin (use `--stdin` flag with piped input)")
-        })?
-    } else if let Some(msg) = &message {
-        if msg.is_empty() {
-            fail(json_output, "Message cannot be empty.", "EMPTY_MESSAGE");
-        }
-        msg.clone()
+    // Resolve content: structured parts take the --part path; legacy content
+    // sources (positional, --message-file, --stdin, piped stdin) produce a
+    // single text part.
+    let parts: Vec<Part> = if !parts_arg.is_empty() {
+        parse_parts(&parts_arg, json_output)
     } else {
-        try_read_piped_stdin().await
-            .ok_or_else(|| anyhow::anyhow!("No message provided. Use a positional argument, --message-file <path>, --stdin, or pipe to stdin"))?
+        let content = if let Some(f) = message_file {
+            if f == "-" {
+                let piped = try_read_piped_stdin().await
+                    .ok_or_else(|| anyhow::anyhow!("No piped input. Use `--stdin` for explicit stdin, or provide a filename for --message-file"))?;
+                piped
+            } else {
+                tokio::fs::read_to_string(&f)
+                    .await?
+                    .trim_end_matches('\n')
+                    .to_string()
+            }
+        } else if stdin_flag {
+            try_read_piped_stdin().await.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No message provided via stdin (use `--stdin` flag with piped input)"
+                )
+            })?
+        } else if let Some(msg) = &message {
+            if msg.is_empty() {
+                fail(json_output, "Message cannot be empty.", "EMPTY_MESSAGE");
+            }
+            msg.clone()
+        } else {
+            try_read_piped_stdin().await
+                .ok_or_else(|| anyhow::anyhow!("No message provided. Use a positional argument, --message-file <path>, --stdin, or pipe to stdin"))?
+        };
+        vec![Part::Text { content }]
     };
 
     // Resolve session: explicit (id or name, B035), active, stale-replace, or auto-create
@@ -1077,7 +1184,7 @@ async fn cmd_send(
 
     send_content(
         session_id,
-        &content,
+        &parts,
         sender_override,
         should_wait,
         chat_timeout,
@@ -1092,10 +1199,69 @@ async fn cmd_send(
     .await
 }
 
+/// Parses `--part KIND:VALUE` flags into an ordered part list. Values are
+/// split on the FIRST colon so text values may contain colons. `data:` values
+/// must parse as JSON; unknown kinds and empty text parts are usage errors.
+fn parse_parts(arg: &[String], json_output: bool) -> Vec<Part> {
+    let mut out = Vec::with_capacity(arg.len());
+    for a in arg {
+        let (kind, value) = match a.split_once(':') {
+            Some((k, v)) => (k, v),
+            None => fail(
+                json_output,
+                format!(
+                    "invalid --part '{}': expected KIND:VALUE with kind text, file, or data",
+                    a
+                ),
+                "INVALID_PART",
+            ),
+        };
+        match kind {
+            "text" => {
+                if value.trim().is_empty() {
+                    fail(json_output, "empty text part", "INVALID_PART");
+                }
+                out.push(Part::Text {
+                    content: value.to_string(),
+                });
+            }
+            "file" => {
+                if value.is_empty() {
+                    fail(json_output, "empty file part", "INVALID_PART");
+                }
+                out.push(Part::File {
+                    path: value.to_string(),
+                    label: None,
+                });
+            }
+            "data" => match serde_json::from_str::<serde_json::Value>(value) {
+                Ok(v) => out.push(Part::Data {
+                    value: v,
+                    label: None,
+                }),
+                Err(e) => fail(
+                    json_output,
+                    format!("invalid --part data value '{}': {}", value, e),
+                    "INVALID_PART",
+                ),
+            },
+            other => fail(
+                json_output,
+                format!(
+                    "invalid --part kind '{}': must be one of text, file, data",
+                    other
+                ),
+                "INVALID_PART",
+            ),
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn send_content(
     session_id: String,
-    content: &str,
+    parts: &[Part],
     sender_override: Option<&str>,
     should_wait: bool,
     chat_timeout: Option<u64>,
@@ -1149,15 +1315,36 @@ async fn send_content(
     let default_timeout = config["default_timeout"].as_u64().unwrap_or(60);
     let effective_timeout = chat_timeout.or(Some(default_timeout));
 
+    // Idempotency key: generated once per invocation, reused across every
+    // retry below, so a retried send can never double-post (send-idempotency).
+    let idempotency_key = uuid::Uuid::new_v4().to_string();
     let req = SendMessageRequest {
         sender,
-        content: content.to_string(),
+        content: None,
+        parts: Some(parts.to_vec()),
+        idempotency_key: Some(idempotency_key.clone()),
         intent: Some(intent),
         reply_to,
         expect_reply,
         wait_timeout: if should_wait { effective_timeout } else { None },
     };
-    let resp = client.post(&url).json(&req).send().await?;
+
+    // Retry connection failures only (up to two additional attempts) with the
+    // same key; HTTP error responses are never retried.
+    let mut resp: Option<reqwest::Response> = None;
+    for attempt in 0..3u32 {
+        match client.post(&url).json(&req).send().await {
+            Ok(r) => {
+                resp = Some(r);
+                break;
+            }
+            Err(_) if attempt < 2 => {
+                tokio::time::sleep(Duration::from_millis(200 * (attempt as u64 + 1))).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let resp = resp.unwrap();
 
     if !resp.status().is_success() {
         let err: ErrorResponse = resp.json().await?;
@@ -1177,6 +1364,17 @@ async fn send_content(
 
     let msg: SendMessageResponse = resp.json().await?;
     let _ = store::write_cursor(&msg.session_id, msg.id).await;
+
+    // A deduplicated replay: report the original message and stop — nothing
+    // new was stored, so there is nothing to wait on.
+    if msg.duplicate {
+        if json_output {
+            println!("{}", serde_json::to_string(&msg).unwrap());
+        } else if !quiet {
+            println!("duplicate suppressed (msg {})", msg.id);
+        }
+        return Ok(());
+    }
 
     if !should_wait {
         if json_output {
@@ -1262,7 +1460,7 @@ async fn send_content(
         process::exit(EXIT_TIMEOUT);
     } else {
         for m in &result.messages {
-            println!("{}: {}", m.sender, m.content);
+            println!("{}: {}", m.sender, m.render());
         }
     }
     Ok(())
@@ -1607,7 +1805,7 @@ async fn cmd_wait(
                     intent_badge(msg),
                     msg.sender,
                     msg.timestamp.format("%H:%M:%S"),
-                    msg.content
+                    msg.render()
                 );
             }
         }
@@ -1724,7 +1922,7 @@ async fn cmd_watch(
                             msg.timestamp.format("%H:%M:%S"),
                             render_deadline(&msg)
                         );
-                        println!("    {}", msg.content);
+                        println!("    {}", msg.render());
                     }
                 }
                 _ => {}
@@ -1849,7 +2047,7 @@ async fn cmd_listen(
                                 msg.timestamp.format("%H:%M:%S"),
                                 render_deadline(&msg)
                             );
-                            println!("    {}", msg.content);
+                            println!("    {}", msg.render());
                         }
                     }
                     "closed" => {
@@ -1969,7 +2167,7 @@ async fn cmd_recap(
                     msg.timestamp.format("%H:%M:%S"),
                     render_deadline(msg)
                 );
-                println!("    {}\n", msg.content);
+                println!("    {}\n", msg.render());
             }
         }
     }
@@ -2741,12 +2939,21 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
     };
 
     let status_url = daemon_url(&info.host, info.port, "/api/status");
-    let alive = reqwest::Client::new()
-        .get(&status_url)
-        .send()
-        .await
-        .map(|r| r.status().is_success())
-        .unwrap_or(false);
+    // Live protocol version from the daemon's own status response (the
+    // on-disk daemon.json claim can be stale if the daemon restarted).
+    let live_version = {
+        let client = reqwest::Client::new();
+        match client.get(&status_url).send().await {
+            Ok(r) if r.status().is_success() => r
+                .json::<StatusResponse>()
+                .await
+                .ok()
+                .map(|s| s.protocol_version),
+            _ => None,
+        }
+    };
+    let alive = live_version.is_some();
+    let version = live_version.or(Some(info.protocol_version));
 
     if alive {
         let cursors = store::read_cursors().await;
@@ -2767,6 +2974,7 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
                 "port": info.port,
                 "host": info.host,
                 "started_at": info.started_at,
+                "protocol_version": version,
                 "total_unread": total_unread,
                 "active_waits": waits,
                 "home": home_path.display().to_string(),
@@ -2778,6 +2986,7 @@ async fn cmd_status(json_output: bool) -> anyhow::Result<()> {
             println!("  PID:  {}", info.pid);
             println!("  Port: {}", info.port);
             println!("  Host: {}", info.host);
+            println!("  Protocol: {}", version.unwrap_or(0));
             println!("  Since: {}", info.started_at.format("%Y-%m-%d %H:%M:%S"));
             println!("  Home: {}", daemon_home_display());
             if !tala_home_set {
@@ -2936,7 +3145,7 @@ async fn cmd_whatsup(json_output: bool) -> anyhow::Result<()> {
                     msg.timestamp.format("%H:%M:%S"),
                     render_deadline(msg)
                 );
-                println!("    {}", msg.content);
+                println!("    {}", msg.render());
             }
             println!();
         }
