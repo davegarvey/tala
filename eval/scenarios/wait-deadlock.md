@@ -95,7 +95,7 @@ beta's confirmation of the CSV fix. Send your question with
 answer — if a wait times out, re-wait with a longer timeout. Do not abandon
 the request. Note any waiting-visibility signals you see (overlap notes,
 unread hints, `tala pending` output, countdowns in history) and how they
-affected you. Work from project-alpha with `TALA_HOME=$SCRATCH/.tala`. Write
+affected you. Work EXCLUSIVELY from project-alpha with `TALA_HOME=$SCRATCH/.tala` — never run tala from the scratch root or the repo (identity, active session, and cursors are per-directory; see eval/README.md "Isolation"). Write
 feedback to `$SCRATCH/feedback/alpha.md`:
 - Total time waiting before the exchange completed
 - Did you ever suspect the other agent was also waiting? What told you?
@@ -109,8 +109,8 @@ write a thorough verification plan to PLANNING.md (steps, checks, edge
 cases, risks — take your time, several minutes). THEN watch for a message
 from project-alpha via tala. Note any waiting-visibility signals you see
 (overlap notes, unread hints, `tala status` "Waiting now", `tala pending`)
-and how they affected you. Work from project-beta with
-`TALA_HOME=$SCRATCH/.tala`. Write feedback to `$SCRATCH/feedback/beta.md`
+and how they affected you. Work EXCLUSIVELY from project-beta with
+`TALA_HOME=$SCRATCH/.tala` — never run tala from the scratch root or the repo (identity, active session, and cursors are per-directory; see eval/README.md "Isolation"). Write feedback to `$SCRATCH/feedback/beta.md`
 (same questions).
 
 ## Metrics

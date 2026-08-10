@@ -86,8 +86,8 @@ You are Agent Alpha in `$SCRATCH/project-alpha`. You maintain a CSV processor
 whose `parse_row()` breaks on quoted fields like "New York, NY". Use tala to
 collaborate with the schema expert in project-beta: describe the bug, get the
 fix confirmed, apply it, and verify. Use tala's intent flags (`--intent req`
-when you expect a reply, `--reply-to <id>` when answering). Work from the
-project-alpha directory with `TALA_HOME=$SCRATCH/.tala`. When done, write
+when you expect a reply, `--reply-to <id>` when answering). Work
+EXCLUSIVELY from the project-alpha directory with `TALA_HOME=$SCRATCH/.tala` — never run tala from the scratch root or the repo (identity, active session, and cursors are per-directory; see eval/README.md "Isolation"). When done, write
 feedback to `$SCRATCH/feedback/alpha.md`:
 - Commands tried, what was intuitive/confusing, most frustrating moment
 - Did you always know whether a reply was expected from you?
@@ -99,7 +99,7 @@ feedback to `$SCRATCH/feedback/alpha.md`:
 You are Agent Beta in `$SCRATCH/project-beta`. You know the CSV schema inside
 out. Watch for a message from project-alpha via tala (`tala wait --new-session`
 or `tala check`), diagnose their bug, and confirm the fix. Use tala's intent
-flags. Work from the project-beta directory with `TALA_HOME=$SCRATCH/.tala`.
+flags. Work EXCLUSIVELY from the project-beta directory with `TALA_HOME=$SCRATCH/.tala` — never run tala from the scratch root or the repo (identity, active session, and cursors are per-directory; see eval/README.md "Isolation").
 When done, write feedback to `$SCRATCH/feedback/beta.md` (same questions).
 
 ## Metrics

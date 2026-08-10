@@ -104,7 +104,7 @@ ask you. Use tala's intent flags properly:
 - Check `tala pending` before closing — you are NOT done while any of your
   requests are unanswered, and you must not close while their question to you
   is open
-Work from project-alpha with `TALA_HOME=$SCRATCH/.tala`. Write feedback to
+Work EXCLUSIVELY from project-alpha with `TALA_HOME=$SCRATCH/.tala` — never run tala from the scratch root or the repo (identity, active session, and cursors are per-directory; see eval/README.md "Isolation"). Write feedback to
 `$SCRATCH/feedback/alpha.md`:
 - Were you ever unsure which reply answered which question?
 - Did `tala pending` reflect reality? Did the countdowns render sensibly?
@@ -116,7 +116,7 @@ You are Agent Beta in `$SCRATCH/project-beta`. You must answer alpha's CSV
 questions AND get their answer to the whitespace question before publishing
 schema v2. Use tala's intent flags. Check `tala pending` before closing —
 NOT done until both your question is answered and their bug is fixed. Work
-from project-beta with `TALA_HOME=$SCRATCH/.tala`. Write feedback to
+Work EXCLUSIVELY from project-beta with `TALA_HOME=$SCRATCH/.tala` — never run tala from the scratch root or the repo (identity, active session, and cursors are per-directory; see eval/README.md "Isolation"). Write feedback to
 `$SCRATCH/feedback/beta.md` (same questions).
 
 ## Metrics

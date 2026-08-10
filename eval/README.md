@@ -19,6 +19,37 @@ turned into a change proposal that a human reviews.
 | [`intent-protocol`](scenarios/intent-protocol.md) | Intent metadata: `--intent`, `--reply-to`, `pending` | 2 |
 | [`wait-deadlock`](scenarios/wait-deadlock.md) | Waiting visibility: deadlock prevention, countdowns, hints | 2 |
 
+## Isolation (read before running)
+
+The daemon and all sessions are shared through `TALA_HOME` — that is the
+point, it is how the agents collaborate. But several pieces of state are
+**per working directory**, not per daemon:
+
+- `.tala/active-session` — which session `send`/`wait` target without `-s`
+- `.tala/cursor` / `.tala/cursors.json` — read receipts and unread counts
+- `.tala/config.json` — the agent identity used as the sender name
+
+This creates real confusion traps, all hit during eval runs:
+
+- **Running tala from the wrong directory** (scratch root, repo root, or the
+  other agent's project) silently makes you *that* directory's identity. From
+  the repo root the sender becomes `tala`, polluting the conversation.
+- **Two agents sharing a working directory** share identity, active session,
+  and cursors — one agent's `send` marks the other's messages as read, and a
+  stray send can land in the wrong conversation.
+- **`--sender` mismatches** are hard errors (B004): an agent can only send as
+  its own configured identity, so `--sender <other>` from the wrong project
+  fails.
+
+Rules:
+
+1. Each agent works **exclusively from its own project directory**
+   (`cd $SCRATCH/project-alpha` / `project-beta`) for the whole run.
+2. Each project is `tala init`'d with a distinct name before anything else.
+3. Never run tala from the scratch root or the repo while a scenario is live.
+4. Target sessions explicitly with `-s <id>` when in doubt — don't rely on
+   the active-session file across agents.
+
 ## Orchestration (per scenario)
 
 Run everything in a scratch directory (`/tmp` or your temp dir — never the
