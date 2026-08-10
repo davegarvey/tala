@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0] - 2026-08-10
+
+### Added
+
+- narrow CLI surface to the golden path (cycle-19 evals) (#78)
+
+### Changed
+
+- archive cycle-18 openspec changes (eval feedback fixes, agent messaging docs)
+
 ## [0.28.1] - 2026-08-10
 
 ### Changed
