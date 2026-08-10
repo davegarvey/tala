@@ -1574,7 +1574,19 @@ async fn observe_events(
                         }
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // B046: don't drop silently — tell the listener it missed
+                // messages so it can run `tala check` to catch up.
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    let data = serde_json::to_string(&serde_json::json!({
+                        "type": "overload",
+                        "skipped": n
+                    }))
+                    .unwrap();
+                    let evt = Event::default().event("overload").data(data);
+                    if tx.send(Ok(evt)).await.is_err() {
+                        break;
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }

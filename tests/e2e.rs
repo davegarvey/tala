@@ -5192,3 +5192,103 @@ fn test_bare_send_warns_with_multiple_open_sessions() {
     );
     tala_stop(home.path());
 }
+
+// --- Cycle-20 listen trust tests (B046) ---
+
+#[test]
+fn test_listen_timeout_zero_stays_connected_and_delivers() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+
+    // --timeout 0 must NOT be converted to 60 (B046): the listener stays
+    // connected and delivers a message sent after it connects.
+    let mut child = std::process::Command::new(tala_bin())
+        .env("HOME", home.path())
+        .args(["listen", "--timeout", "0", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to start listen");
+
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    tala_ok(home.path(), &["send", "-s", &sess, "listener-gets-this"]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Listener must still be alive (no 0s/60s timeout closed it) and must
+    // have received the message: delivery while connected proves liveness.
+    // Kill first (timeout 0 never exits on its own), then drain the pipe.
+    let _ = child.kill();
+    let _ = child.wait();
+    let mut stdout_buf = String::new();
+    use std::io::Read;
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout_buf)
+        .ok();
+    assert!(
+        stdout_buf.contains("listener-gets-this"),
+        "listen --timeout 0 should deliver the message: {}",
+        stdout_buf
+    );
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_listen_advances_cursor_check_agrees() {
+    let home = tempfile::tempdir().unwrap();
+    // Alpha sends; beta monitors from a different project dir (fresh cursors).
+    let alpha_proj = home.path().join("alpha-proj");
+    let beta_proj = home.path().join("beta-proj");
+    std::fs::create_dir_all(&alpha_proj).unwrap();
+    std::fs::create_dir_all(&beta_proj).unwrap();
+    run_init_in(&alpha_proj, home.path(), &["init", "alpha"]);
+    run_init_in(&beta_proj, home.path(), &["init", "beta"]);
+
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "alpha session create failed: {}", sout);
+    let sess = sout.trim().to_string();
+    let (sout, _serr, ok) = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "-s", &sess, "seen-by-listener"],
+    );
+    assert!(ok, "alpha send failed: {}", sout);
+
+    // Beta listens: the pre-existing message is replayed (beta cursor = 0),
+    // and listen advances beta's cursor as it delivers.
+    let (stdout, _stderr, ok) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["listen", "--timeout", "15", "--json"],
+    );
+    assert!(ok, "listen should succeed: {}", stdout);
+    assert!(
+        stdout.contains("seen-by-listener"),
+        "listen should deliver the message: {}",
+        stdout
+    );
+
+    let (check, _serr2, ok2) = tala_in(home.path(), Some(&beta_proj), &["check", "--json"]);
+    assert!(ok2, "check should succeed: {}", check);
+    assert!(
+        !check.contains("seen-by-listener"),
+        "check must not re-show a message listen already delivered: {}",
+        check
+    );
+
+    // A second listen (replay from beta's cursors) must not replay it either.
+    let (stdout2, _stderr3, ok3) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["listen", "--timeout", "2", "--json"],
+    );
+    assert!(ok3, "second listen should succeed: {}", stdout2);
+    assert!(
+        !stdout2.contains("seen-by-listener"),
+        "reconnect must not replay delivered messages: {}",
+        stdout2
+    );
+    tala_stop(home.path());
+}
