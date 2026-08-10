@@ -1010,31 +1010,47 @@ async fn find_incoming_session(
     seen: &HashMap<String, u64>,
 ) -> Option<(String, Message)> {
     let sessions = store.list_sessions().await;
-    let mut best: Option<(String, Message)> = None;
+    // Tier 1 (B029): never-seen sessions with an incoming message from another
+    // agent, freshest first. Tier 2 (fallback): sessions the waiter has
+    // PARTICIPATED in (cursor >= 1 — sent or read, beyond the 0 written by
+    // `session create`) with UNREAD incoming messages (id > cursor) — the same
+    // event the live loop fires on, keeping the scan consistent with it.
+    // Sessions the waiter created and never engaged with (cursor == 0) stay
+    // excluded: they are scratch sessions, covered by check/hints, not
+    // handshakes.
+    let mut best_new: Option<(String, Message)> = None;
+    let mut best_unread: Option<(String, Message)> = None;
     for s in sessions {
         if s.closed {
             continue;
         }
-        // B029: any cursor entry (created, sent in, or read) marks the session
-        // as known to the waiter — never a candidate for `--new-session`.
-        if seen.contains_key(&s.id) {
-            continue;
+        let cursor = seen.get(&s.id).copied().unwrap_or(0);
+        let engaged = seen.contains_key(&s.id) && cursor >= 1;
+        if seen.contains_key(&s.id) && !engaged {
+            continue; // waiter's own scratch session
         }
-        let msgs = store.get_messages_since(&s.id, 0).await;
-        // Freshest incoming message from another agent (the waiter cannot have
-        // sent here: sending records a cursor entry, excluding the session).
+        let msgs = store.get_messages_since(&s.id, cursor).await;
+        // Freshest incoming message from another agent that the waiter has not
+        // read. (The waiter cannot have sent here unread: sending records a
+        // cursor entry past its own message.)
         let freshest_incoming = msgs.iter().rfind(|m| m.sender != me);
-        if let Some(m) = freshest_incoming {
-            let is_better = match &best {
-                Some((_, bm)) => m.timestamp > bm.timestamp,
-                None => true,
-            };
-            if is_better {
-                best = Some((s.id.clone(), m.clone()));
-            }
+        let Some(m) = freshest_incoming else {
+            continue;
+        };
+        let slot = if engaged {
+            &mut best_unread
+        } else {
+            &mut best_new
+        };
+        let is_better = match slot {
+            Some((_, bm)) => m.timestamp > bm.timestamp,
+            None => true,
+        };
+        if is_better {
+            *slot = Some((s.id.clone(), m.clone()));
         }
     }
-    best
+    best_new.or(best_unread)
 }
 
 async fn wait_all(
