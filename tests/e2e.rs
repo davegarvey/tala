@@ -3838,8 +3838,8 @@ fn test_pending_lists_and_clears() {
         stdout
     );
     assert!(
-        stdout.contains("--reply-to 1"),
-        "pending suggests the answer command: {}",
+        stdout.contains("awaiting reply"),
+        "pending says who owes whom (own req is owed to me): {}",
         stdout
     );
 
@@ -4456,8 +4456,8 @@ fn test_send_wait_stamps_deadline_and_expires() {
     std::thread::sleep(std::time::Duration::from_secs(2));
     let (stdout, _stderr, _) = tala(home.path(), &["history", "--session", &sess]);
     assert!(
-        stdout.contains("wait expired"),
-        "history renders the expired deadline: {}",
+        !stdout.contains("wait expired"),
+        "history must not render expired deadlines (live surfaces only): {}",
         stdout
     );
 
@@ -5381,6 +5381,73 @@ fn test_pending_json_includes_full_content() {
             .unwrap_or("")
             .contains("padding-padding"),
         "pending --json should carry the full content: {}",
+        stdout
+    );
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_pending_hint_depends_on_who_owes_whom() {
+    let home = tempfile::tempdir().unwrap();
+    let alpha_proj = home.path().join("alpha-proj");
+    let beta_proj = home.path().join("beta-proj");
+    std::fs::create_dir_all(&alpha_proj).unwrap();
+    std::fs::create_dir_all(&beta_proj).unwrap();
+    run_init_in(&alpha_proj, home.path(), &["init", "alpha"]);
+    run_init_in(&beta_proj, home.path(), &["init", "beta"]);
+
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["session", "create"]);
+    assert!(ok, "session create failed: {}", sout);
+    let sess = sout.trim().to_string();
+
+    // Alpha asks (req): alpha's own pending says "awaiting reply", not
+    // "answer with --reply-to" (you cannot answer your own question).
+    let _ = tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &[
+            "send",
+            "-s",
+            &sess,
+            "--intent",
+            "req",
+            "question-from-alpha",
+        ],
+    );
+    let (stdout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["pending"]);
+    assert!(ok, "pending should succeed: {}", stdout);
+    assert!(
+        stdout.contains("awaiting reply"),
+        "own unanswered req should say 'awaiting reply': {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("answer with"),
+        "own unanswered req must not say 'answer with': {}",
+        stdout
+    );
+
+    // Beta replies with expect-reply: now alpha owes beta — the hint flips.
+    let _ = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &[
+            "send",
+            "-s",
+            &sess,
+            "--intent",
+            "reply",
+            "--reply-to",
+            "1",
+            "--expect-reply",
+            "answer — confirm?",
+        ],
+    );
+    let (stdout, _serr, ok) = tala_in(home.path(), Some(&alpha_proj), &["pending"]);
+    assert!(ok, "second pending should succeed: {}", stdout);
+    assert!(
+        stdout.contains("answer with"),
+        "owed reply should say 'answer with --reply-to': {}",
         stdout
     );
     tala_stop(home.path());
