@@ -91,6 +91,12 @@ When you use `send --wait --timeout N`, the message carries a live countdown
 time, never a stale duration. An expired deadline does NOT cancel the
 obligation: the `req` stays pending until answered or closed with `[OUT]`.
 
+Intent precedence (explicit always wins): `--intent` flag, then `--reply-to`
+implies `reply`, then `--wait` implies `req`, else `fyi`. `--reply-to` +
+`--wait` together = a reply that also expects a reply. Re-asking a peer:
+use `--reply-to <orig> --intent req` so the follow-up stays correlated to
+the original question.
+
 Track who owes whom: `tala pending` lists unanswered requests. Answer one
 with `tala send --reply-to <id>`. Sending `--intent out` closes your own
 open requests.
