@@ -5323,3 +5323,65 @@ fn test_listen_timeout_exits_3() {
     assert_eq!(code, 3, "listen benign timeout should exit 3");
     tala_stop(home.path());
 }
+
+#[test]
+fn test_wait_stale_active_session_hints_and_clears() {
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    run_init_in(&project, home.path(), &["init", "alice"]);
+
+    // Fabricate a stale active marker (e.g. left over from another daemon):
+    // the session id does not exist on this daemon.
+    let tala_dir = project.join(".tala");
+    std::fs::create_dir_all(&tala_dir).unwrap();
+    std::fs::write(tala_dir.join("active-session"), "sess_deadbeef").unwrap();
+
+    // A bare wait must NOT die with SESSION_NOT_FOUND; it clears the stale
+    // marker, hints, and falls back to waiting for a new session (exit 3).
+    let (stdout, stderr, ok) = tala_in(home.path(), Some(&project), &["wait", "--timeout", "2"]);
+    assert!(
+        !ok,
+        "bare wait with stale active should exit nonzero: {}",
+        stdout
+    );
+    assert!(
+        stderr.contains("cleared"),
+        "stale active should be cleared with a hint: {}",
+        stderr
+    );
+    assert!(
+        !stdout.contains("SESSION_NOT_FOUND"),
+        "stale active must not surface SESSION_NOT_FOUND: {}",
+        stdout
+    );
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_pending_json_includes_full_content() {
+    let home = tempfile::tempdir().unwrap();
+    let sess = tala_start(home.path());
+    let long = format!(
+        "request with a very long body {}",
+        "padding-padding-padding-".repeat(30)
+    );
+    tala_ok(
+        home.path(),
+        &["send", "-s", &sess, "--intent", "req", &long],
+    );
+
+    let (stdout, _stderr, ok) = tala(home.path(), &["pending", "--json"]);
+    assert!(ok, "pending --json should succeed: {}", stdout);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let first = &val[0];
+    assert!(
+        first["content_full"]
+            .as_str()
+            .unwrap_or("")
+            .contains("padding-padding"),
+        "pending --json should carry the full content: {}",
+        stdout
+    );
+    tala_stop(home.path());
+}
