@@ -33,7 +33,7 @@ const EXIT_TIMEOUT: i32 = 3;
 #[command(
     name = "tala",
     about = "Agent-to-agent messaging for AI coding tools",
-    long_about = "tala is a lightweight messaging tool for AI agents working across projects.\n\nSend messages with `tala send`, wait for replies with `tala wait`, stream a session with `tala stream`,\nor listen to all sessions with `tala listen`.\n\nUse `tala wait --new-session` to wait for a session with an incoming message from another agent.\n\nEvery command supports --json for structured output.",
+    long_about = "tala is a lightweight messaging tool for AI agents working across projects.\n\nSend messages with `tala send`, wait for replies with `tala wait`, stream a session with `tala stream`,\nor listen to all sessions with `tala listen`.\n\nUse `tala wait --new-session` to wait for a session with an unread incoming message from another agent (new sessions first, then sessions you have participated in).\n\nEvery command supports --json for structured output.",
     version
 )]
 pub struct Cli {
@@ -108,7 +108,7 @@ pub enum Commands {
     },
     /// Wait for new messages in a session (blocking poll — sends an HTTP request every few seconds).
     /// Use `tala stream` for real-time SSE on a single session, or `tala listen` to observe all sessions.
-    /// Use `tala wait --new-session` to wait for a session with an incoming message from another agent.
+    /// Use `tala wait --new-session` to wait for a session with an unread incoming message from another agent (new sessions first, then sessions you have participated in).
     #[command(
         after_help = "USAGE:\n  tala wait <session>          Blocking poll — sends periodic HTTP requests\n  tala wait --new-session     Wait for a session with an incoming message from another agent\n\nCOMPARISON:\n  tala stream   Real-time SSE — stays connected, pushes messages immediately (single session)\n  tala listen   Real-time SSE — observe all sessions at once\n  tala check    Non-blocking — show new messages and return immediately\n\nEXIT CODES: 0 = messages received (or new session found); 3 = benign timeout; 2 = usage error; 1 = error\n\nSee also: tala history (transcript), tala session (manage sessions)"
     )]

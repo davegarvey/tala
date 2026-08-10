@@ -44,7 +44,7 @@ sess=$(tala wait --new-session --timeout 600)
 | `tala send --reply-to <id> "<msg>"` | Correlate this message as a reply to message `<id>` (same session). |
 | `tala send --expect-reply "<msg>"` | This message also expects a reply (modifier for reply/fyi). |
 | `tala wait [<session>]` | Block until a new message arrives (poll). |
-| `tala wait --new-session` | Block until a session with an incoming message from another agent is ready (includes sessions that already existed; ignores your own creates). |
+| `tala wait --new-session` | Block until a session with an incoming message from another agent that you haven't read is ready — new sessions first, then sessions you've participated in; ignores your own scratch sessions. |
 | `tala pending` | List requests awaiting a reply (unanswered `req` + `--expect-reply` messages). |
 | `tala history [<session>]` | Full transcript. `--since <id>`, `--from <sender>`, `--limit <n>`. |
 | `tala stream [<session>]` | Real-time SSE for one session (push). |
@@ -67,8 +67,11 @@ sess=$(tala wait --new-session --timeout 600)
 - **`history --limit <n>` returns the first n messages of the filtered set (oldest first)**;
   to tail the transcript, pass `--since <last-seen-id>`.
 - **`wait --new-session` returns a session that already has an incoming message from
-  another agent**, whether it existed before the wait started or is created during it.
-  Sessions the waiter itself creates never satisfy the wait.
+  another agent that the waiter has not read**, whether it existed before the wait
+  started or is created during it. Preference: never-seen sessions (freshest first),
+  then sessions the waiter has participated in (sent or read) with unread incoming.
+  Sessions the waiter created and never engaged with never satisfy the wait — the
+  timeout hint points at their unread messages instead.
 - **`stream`/`listen` stay connected** (SSE). `--timeout` (listen default 60, 0 = forever).
 - The daemon auto-starts on any command and writes its PID/port to
   `$TALA_HOME/daemon.json` (`~/.tala/daemon.json` by default). `TALA_HOME` overrides the

@@ -1146,6 +1146,104 @@ fn test_wait_new_prefers_never_seen_over_seen_session() {
 }
 
 #[test]
+fn test_wait_new_returns_seen_session_with_new_unread() {
+    // B029 follow-up (v6 rerun finding): when NO never-seen session exists,
+    // wait --new-session falls back to known sessions with UNREAD incoming
+    // messages from another agent (id > the waiter's cursor) — the same event
+    // the live loop fires on.
+    let home = tempfile::tempdir().unwrap();
+    let alpha_proj = home.path().join("alpha-proj");
+    let beta_proj = home.path().join("beta-proj");
+    std::fs::create_dir_all(&alpha_proj).unwrap();
+    std::fs::create_dir_all(&beta_proj).unwrap();
+    run_init_in(&alpha_proj, home.path(), &["init", "alpha"]);
+    run_init_in(&beta_proj, home.path(), &["init", "beta"]);
+
+    // beta participates in S1 (create + send => cursor entry)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["session", "create"]);
+    assert!(ok, "beta create failed: {}", sout);
+    let sess = sout.trim().to_string();
+    tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["send", "--session", &sess, "beta-note"],
+    );
+
+    // alpha replies into the KNOWN session after beta's last message
+    tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &sess, "alpha-follow-up"],
+    );
+
+    let (stdout, _stderr, ok) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["wait", "--new-session", "--timeout", "10", "--json"],
+    );
+    assert!(ok, "wait --new-session should succeed: {}", stdout);
+    assert!(
+        stdout.contains(&sess),
+        "known session with unread incoming must be returned: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("alpha-follow-up"),
+        "should include the unread message: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_wait_new_seen_session_without_unread_never_returns() {
+    // B029 symptom 2 guard: fully-read known sessions are never re-delivered
+    // by the scan (no re-looping on consumed traffic).
+    let home = tempfile::tempdir().unwrap();
+    let alpha_proj = home.path().join("alpha-proj");
+    let beta_proj = home.path().join("beta-proj");
+    std::fs::create_dir_all(&alpha_proj).unwrap();
+    std::fs::create_dir_all(&beta_proj).unwrap();
+    run_init_in(&alpha_proj, home.path(), &["init", "alpha"]);
+    run_init_in(&beta_proj, home.path(), &["init", "beta"]);
+
+    // beta participates in S1 and READ everything (history advances the cursor)
+    let (sout, _serr, ok) = tala_in(home.path(), Some(&beta_proj), &["session", "create"]);
+    assert!(ok, "beta create failed: {}", sout);
+    let sess = sout.trim().to_string();
+    tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["send", "--session", &sess, "beta-note"],
+    );
+    tala_in(
+        home.path(),
+        Some(&alpha_proj),
+        &["send", "--session", &sess, "alpha-answer"],
+    );
+    tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["history", "--session", &sess],
+    );
+
+    let (stdout, _stderr, ok) = tala_in(
+        home.path(),
+        Some(&beta_proj),
+        &["wait", "--new-session", "--timeout", "2", "--json"],
+    );
+    assert!(ok, "wait --new-session timeout exits 2: {}", stdout);
+    assert!(
+        !stdout.contains(&sess),
+        "fully-read session must not be re-delivered: {}",
+        stdout
+    );
+
+    tala_stop(home.path());
+}
+
+#[test]
 fn test_recap_from_filter() {
     let home = tempfile::tempdir().unwrap();
     let alpha_proj = init_project(home.path(), "alpha");
