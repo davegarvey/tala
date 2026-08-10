@@ -649,6 +649,14 @@ impl Store {
                         message_id: m.id,
                         sender: m.sender.clone(),
                         content: m.snippet(),
+                        content_full: m
+                            .parts
+                            .iter()
+                            .find(|p| matches!(p, Part::Text { .. }))
+                            .and_then(|p| match p {
+                                Part::Text { content } => Some(content.clone()),
+                                _ => None,
+                            }),
                         elapsed_seconds: (now - m.timestamp).num_seconds(),
                         intent: m.intent,
                         waiting_until: m.waiting_until,

@@ -51,7 +51,7 @@ pub enum Commands {
 
     /// Set or show the active session for this project directory
     #[command(
-        after_help = "See also: tala session (show, rename, reopen) for advanced session management"
+        after_help = "See also: tala session (create, rename, reopen) for advanced session management"
     )]
     Use {
         #[arg(help = "Session ID to set as active (omit to show current)")]
@@ -1586,6 +1586,32 @@ async fn cmd_wait(
                 "warning: waiting on active session ({} open sessions) — use -s <id> to target a specific session",
                 open
             );
+        }
+    }
+
+    // Plateau: a stale active session must not produce a bare SESSION_NOT_FOUND
+    // (beta, plateau eval). Validate once; on missing/closed, clear it and fall
+    // through to the no-active path, which waits for a new session.
+    if session_arg.is_none() {
+        if let Some(id) = store::read_active_session().await {
+            let check_url = daemon_url(&host, port, &format!("/api/sessions/{}", id));
+            let valid = match client.get(&check_url).send().await {
+                Ok(r) if r.status().is_success() => r
+                    .json::<Session>()
+                    .await
+                    .map(|s| !s.closed)
+                    .unwrap_or(false),
+                _ => false,
+            };
+            if !valid {
+                store::clear_active_session().await?;
+                if !json_output {
+                    eprintln!(
+                        "Active session {} is gone or closed — cleared. Use `tala use --clear` or target explicitly with -s <id>.",
+                        id
+                    );
+                }
+            }
         }
     }
 
