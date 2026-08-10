@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.1] - 2026-08-10
+
+### Changed
+
+- agent messaging golden path — handshake example, input-method guide, intent precedence (#65) (#76)
+- Merge pull request #71 from davegarvey/docs/openspec-merge-ordering
+- consolidate sync/archive into single workflow step
+- state sync+archive must land in the implementation PR
+- Merge pull request #70 from davegarvey/chore/openspec-archive-cleanup
+- retro-sync archived delta specs into main specs
+- archive completed openspec changes and sync delta specs
+
+### Fixed
+
+- cycle-18 eval feedback — session create --json output, reply correlation warning, wait-new session name (B039-B041) (#75)
+
 ## [0.28.0] - 2026-08-10
 
 ### Added
