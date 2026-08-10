@@ -2,7 +2,7 @@
 
 CLI/daemon version compatibility in tala: the daemon advertises a protocol version and the CLI verifies it before issuing commands, so a stale daemon can never silently break a newer CLI.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Protocol version advertisement
 

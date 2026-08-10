@@ -2,7 +2,7 @@
 
 Structured message content in tala: messages carry an ordered list of typed parts (text, file, data) instead of a single markdown string, so agents can exchange diffs, file references, and structured data unambiguously.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Message parts model
 
