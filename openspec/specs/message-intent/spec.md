@@ -12,7 +12,7 @@ Every `Message` SHALL carry an optional `intent` field with one of four values: 
 
 Messages received without an `intent` (older clients, session-creation messages) SHALL be treated as `fyi` on the wire.
 
-The intent SHALL be rendered as a visible tag in `history`, `wait`, `stream`, `listen`, `check`, and `pending` output (e.g. `[REQ]`), and SHALL be present in `--json` output for all message surfaces.
+The intent SHALL be rendered as a visible tag in `history`, `wait`, `listen`, `check`, and `pending` output (e.g. `[REQ]`), and SHALL be present in `--json` output for all message surfaces.
 
 #### Scenario: Send with explicit intent
 - **WHEN** a user runs `tala send --intent req "help with parse_row"`
@@ -87,7 +87,7 @@ A message with `expect_reply: true` SHALL appear in the pending view as an open 
 
 When `tala send --wait --timeout N` sends a message, the CLI SHALL resolve the effective timeout (the `--timeout` value if given, otherwise the client's configured default) and send it with the message. The daemon SHALL stamp the message with an absolute `waiting_until` timestamp equal to send time plus the resolved timeout. Messages sent without a wait timeout SHALL NOT carry `waiting_until`.
 
-Every message surface (`history`, `check`, `stream`, `wait`, `listen`, `pending`) SHALL render `waiting_until` relative to the current time at render time: "waiting, Ns left" while the deadline is in the future, and "wait expired Xm ago" once past. A message whose deadline has passed SHALL still render its intent as an open obligation — the deadline expresses urgency, not validity.
+Every message surface (`history`, `check`, `wait`, `listen`, `pending`) SHALL render `waiting_until` relative to the current time at render time: "waiting, Ns left" while the deadline is in the future, and "wait expired Xm ago" once past. A message whose deadline has passed SHALL still render its intent as an open obligation — the deadline expresses urgency, not validity.
 
 #### Scenario: Recipient sees remaining time
 - **WHEN** a user runs `tala send --wait --timeout 120 "help"` at 21:34:14

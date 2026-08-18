@@ -433,6 +433,10 @@ pub struct PendingObligation {
     pub message_id: u64,
     pub sender: String,
     pub content: String,
+    /// Full text-part content for automation (--json); text mode shows the
+    /// truncated `content` snippet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_full: Option<String>,
     pub elapsed_seconds: i64,
     #[serde(default)]
     pub intent: Intent,

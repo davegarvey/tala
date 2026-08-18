@@ -434,7 +434,12 @@ async fn wait_for_message(
 
     let reply_to = params.reply_to;
     let store_for_check = state.store.clone();
-    let timeout_dur = Duration::from_secs(wait_timeout);
+    // B048: --timeout 0 = no deadline (u64::MAX seconds ≈ indefinite).
+    let timeout_dur = Duration::from_secs(if wait_timeout == 0 {
+        u64::MAX
+    } else {
+        wait_timeout
+    });
     let result = timeout(timeout_dur, async {
         loop {
             match rx.recv().await {
@@ -634,7 +639,12 @@ async fn wait_stream(
     let sid = id.clone();
     let guard = crate::store::WaitGuard::new(Arc::clone(&state.store.wait_registry), wait_id);
 
-    let timeout_dur = Duration::from_secs(wait_timeout);
+    // B048: --timeout 0 = no deadline (u64::MAX seconds ≈ indefinite).
+    let timeout_dur = Duration::from_secs(if wait_timeout == 0 {
+        u64::MAX
+    } else {
+        wait_timeout
+    });
     let effective_limit = limit.unwrap_or(1);
     tokio::spawn(async move {
         let _guard = guard;
@@ -777,6 +787,11 @@ struct WaitNewStreamParams {
     seen: Option<String>,
 }
 
+/// B041: session name for wait-new results (absent for unnamed sessions).
+async fn session_name_for(store: &Arc<Store>, session_id: &str) -> Option<String> {
+    store.get_session(session_id).await.and_then(|s| s.name)
+}
+
 /// SSE wait for a new session: delivers `overlap` events and a terminal
 /// `result` event carrying `{"session_id": ...}` or a timeout marker.
 async fn wait_new_stream(
@@ -798,6 +813,8 @@ async fn wait_new_stream(
         if let Some((sid, msg)) = find_incoming_session(&state.store, me, &seen).await {
             let mut events: Vec<Result<Event, Infallible>> = Vec::new();
             let mut resp = serde_json::json!({"session_id": sid});
+            resp["name"] =
+                serde_json::to_value(session_name_for(&state.store, &sid).await).unwrap();
             resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
             let data = serde_json::to_string(&resp).unwrap();
             events.push(Ok(Event::default().event("result").data(data)));
@@ -837,7 +854,12 @@ async fn wait_new_stream(
     let my_scope = WaitScope::AnyNewSession;
     let guard = crate::store::WaitGuard::new(Arc::clone(&state.store.wait_registry), wait_id);
 
-    let timeout_dur = Duration::from_secs(timeout_secs);
+    // B048: --timeout 0 = no deadline (u64::MAX seconds ≈ indefinite).
+    let timeout_dur = Duration::from_secs(if timeout_secs == 0 {
+        u64::MAX
+    } else {
+        timeout_secs
+    });
     tokio::spawn(async move {
         let _guard = guard;
         loop {
@@ -864,6 +886,8 @@ async fn wait_new_stream(
                     let msgs = store_for_task.get_messages_since(&id, 0).await;
                     let first = msgs.first().cloned();
                     let mut resp = serde_json::json!({"session_id": id});
+                    resp["name"] =
+                        serde_json::to_value(session_name_for(&store_for_task, &id).await).unwrap();
                     if let Some(msg) = first {
                         resp["message"] = serde_json::to_value(msg).unwrap_or_default();
                     }
@@ -883,6 +907,10 @@ async fn wait_new_stream(
                             .record_read(&msg.session_id, me, msg.id)
                             .await;
                         let mut resp = serde_json::json!({"session_id": msg.session_id});
+                        resp["name"] = serde_json::to_value(
+                            session_name_for(&store_for_task, &msg.session_id).await,
+                        )
+                        .unwrap();
                         resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
                         let data = serde_json::to_string(&resp).unwrap();
                         let evt = Event::default().event("result").data(data);
@@ -892,6 +920,10 @@ async fn wait_new_stream(
                     let sessions = store_for_task.list_sessions().await;
                     if sessions.len() > existing_count {
                         let mut resp = serde_json::json!({"session_id": msg.session_id});
+                        resp["name"] = serde_json::to_value(
+                            session_name_for(&store_for_task, &msg.session_id).await,
+                        )
+                        .unwrap();
                         resp["message"] = serde_json::to_value(&msg).unwrap_or_default();
                         let data = serde_json::to_string(&resp).unwrap();
                         let evt = Event::default().event("result").data(data);
@@ -984,7 +1016,12 @@ async fn wait_new_session(
 
     let existing_count = state.store.list_sessions().await.len();
 
-    let timeout_dur = Duration::from_secs(timeout_secs);
+    // B048: --timeout 0 = no deadline (u64::MAX seconds ≈ indefinite).
+    let timeout_dur = Duration::from_secs(if timeout_secs == 0 {
+        u64::MAX
+    } else {
+        timeout_secs
+    });
     let result = timeout(timeout_dur, async {
         loop {
             match rx.recv().await {
@@ -1109,7 +1146,12 @@ async fn wait_all(
     let timeout_secs = params.timeout_secs.unwrap_or(60);
     let mut rx = state.store.subscribe_global();
 
-    let timeout_dur = Duration::from_secs(timeout_secs);
+    // B048: --timeout 0 = no deadline (u64::MAX seconds ≈ indefinite).
+    let timeout_dur = Duration::from_secs(if timeout_secs == 0 {
+        u64::MAX
+    } else {
+        timeout_secs
+    });
     let result = timeout(timeout_dur, async {
         loop {
             match rx.recv().await {
@@ -1413,7 +1455,15 @@ async fn observe_events(
             let result = if let Some(dur) = timeout_dur {
                 match tokio::time::timeout(dur, rx.recv()).await {
                     Ok(result) => result,
-                    Err(_) => break, // timeout expired
+                    // Plateau: emit a terminal timeout event so the CLI can
+                    // exit 3 (benign timeout family contract) instead of 0.
+                    Err(_) => {
+                        let data =
+                            serde_json::to_string(&serde_json::json!({"type": "timeout"})).unwrap();
+                        let evt = Event::default().event("timeout").data(data);
+                        let _ = tx.send(Ok(evt)).await;
+                        break;
+                    }
                 }
             } else {
                 rx.recv().await
@@ -1532,7 +1582,19 @@ async fn observe_events(
                         }
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // B046: don't drop silently — tell the listener it missed
+                // messages so it can run `tala check` to catch up.
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    let data = serde_json::to_string(&serde_json::json!({
+                        "type": "overload",
+                        "skipped": n
+                    }))
+                    .unwrap();
+                    let evt = Event::default().event("overload").data(data);
+                    if tx.send(Ok(evt)).await.is_err() {
+                        break;
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }

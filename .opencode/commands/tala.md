@@ -10,7 +10,7 @@ request replies with `tala send --wait "question" --timeout 300`. Receive incomi
 with `tala wait --new-session`, read transcripts with `tala history`, and watch all activity
 with `tala listen`. Non-blocking checks: `tala check`. Manage the active session with
 `tala use <id-or-name>` (name/prefix/ID matching). Discover cross-project agents with
-`tala agents` / `tala discover`. Pipe messages via stdin (`echo "msg" | tala send`) and use
+`tala discover`. Pipe messages via stdin (`echo "msg" | tala send`) and use
 `--stdin`/`--message-file` for special characters. Every command supports `-j/--json`.
 By default `tala send` returns immediately (use `-w`/`--wait` to block). The daemon
 auto-starts on any command and stops with `tala stop`.
