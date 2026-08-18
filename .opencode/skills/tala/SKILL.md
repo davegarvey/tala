@@ -2,10 +2,12 @@
 name: tala
 description: Agent-to-agent messaging for AI coding tools. Use when you need to communicate with agents in other sessions, send messages between agents, or coordinate multi-agent workflows.
 license: MIT
-compatibility: Requires tala CLI (agent-to-agent messaging tool) v0.25+
+compatibility: Requires a Tala CLI satisfying the minimum version in metadata
 metadata:
   author: tala
   version: "3.1"
+  tala_cli_min_version: "__TALA_CLI_MIN_VERSION__"
+  tala_cli_generated_version: "__TALA_CLI_GENERATED_VERSION__"
 ---
 # tala — Agent-to-Agent Messaging
 
@@ -94,6 +96,29 @@ obligation: the `req` stays pending until answered or closed with `[OUT]`.
 Track who owes whom: `tala pending` lists unanswered requests. Answer one
 with `tala send --reply-to <id>`. Sending `--intent out` closes your own
 open requests.
+
+## CLI Compatibility
+
+Before using a documented command or flag, run `tala --version`. The expected
+output is `tala <version>`. Compare that version semantically with the
+frontmatter fields `tala_cli_min_version` and `tala_cli_generated_version`
+using Semantic Versioning 2.0.0 rules. Prerelease identifiers sort below their
+corresponding release, and build metadata does not affect precedence.
+
+- Below `tala_cli_min_version`: the CLI is incompatible. Warn the user and do
+  not rely on version-specific commands or flags.
+- At or above the minimum but older than `tala_cli_generated_version`: the
+  skill may require commands the binary does not have. Recommend upgrading or
+  verify every required command with `tala --help` before proceeding.
+- Newer than `tala_cli_generated_version`: the skill is stale. Recommend
+  refreshing the project integration with `tala init`, then verify every
+  documented command and flag with `tala --help` because newer releases may
+  remove or rename commands.
+- Equal to `tala_cli_generated_version` and at or above the minimum: the
+  documented command surface is compatible.
+- Missing or invalid skill metadata, or a failed/malformed `tala --version`
+  result: treat the skill as unversioned and compatibility as unknown, warn the
+  user, and verify commands with `tala --help` before using them.
 
 ## Waiting Visibility
 

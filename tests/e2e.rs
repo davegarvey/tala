@@ -59,6 +59,69 @@ fn tala_stop(home: &std::path::Path) {
     let _ = tala(home, &["stop"]);
 }
 
+const TALA_SKILL_MIN_VERSION: &str = "0.27.3";
+const TALA_CLI_MIN_VERSION_PLACEHOLDER: &str = "__TALA_CLI_MIN_VERSION__";
+const TALA_CLI_GENERATED_VERSION_PLACEHOLDER: &str = "__TALA_CLI_GENERATED_VERSION__";
+
+fn render_embedded_document(template: &str) -> String {
+    template
+        .replace(TALA_CLI_MIN_VERSION_PLACEHOLDER, TALA_SKILL_MIN_VERSION)
+        .replace(
+            TALA_CLI_GENERATED_VERSION_PLACEHOLDER,
+            env!("CARGO_PKG_VERSION"),
+        )
+}
+
+fn assert_versioned_document(document: &str, includes_skill_version: bool) {
+    assert!(
+        document.contains(&format!(
+            "tala_cli_min_version: \"{}\"",
+            TALA_SKILL_MIN_VERSION
+        )),
+        "document should contain the CLI minimum version: {}",
+        document
+    );
+    assert!(
+        document.contains(&format!(
+            "tala_cli_generated_version: \"{}\"",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "document should contain the generating CLI version: {}",
+        document
+    );
+    if includes_skill_version {
+        assert!(
+            document.contains("version: \"3.1\""),
+            "skill should retain its independent content version"
+        );
+    }
+}
+
+fn assert_versioned_template(template: &str, includes_skill_version: bool) {
+    assert_eq!(
+        template.matches(TALA_CLI_MIN_VERSION_PLACEHOLDER).count(),
+        1,
+        "template should contain one CLI minimum placeholder"
+    );
+    assert_eq!(
+        template
+            .matches(TALA_CLI_GENERATED_VERSION_PLACEHOLDER)
+            .count(),
+        1,
+        "template should contain one generated-version placeholder"
+    );
+    if includes_skill_version {
+        assert!(
+            template.contains("version: \"3.1\""),
+            "skill template should retain its independent content version"
+        );
+        assert!(
+            template.contains("tala --version") && template.contains("Semantic Versioning 2.0.0"),
+            "skill template should document CLI compatibility checks"
+        );
+    }
+}
+
 #[test]
 fn test_daemon_lifecycle() {
     let home = tempfile::tempdir().unwrap();
@@ -316,6 +379,28 @@ fn test_init_with_custom_name() {
 }
 
 #[test]
+fn test_init_preserves_existing_config() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let tala_dir = project.path().join(".tala");
+    std::fs::create_dir_all(&tala_dir).unwrap();
+    let config_path = tala_dir.join("config.json");
+    std::fs::write(&config_path, "{\"name\":\"existing-agent\"}").unwrap();
+
+    let (_stdout, stderr, ok) = tala_in(
+        home.path(),
+        Some(project.path()),
+        &["init", "replacement-agent"],
+    );
+    assert!(ok, "init should preserve an existing config: {}", stderr);
+    assert_eq!(
+        std::fs::read_to_string(config_path).unwrap(),
+        "{\"name\":\"existing-agent\"}"
+    );
+    assert!(stderr.contains("already exists"));
+}
+
+#[test]
 fn test_init_detects_opencode_harness() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -341,6 +426,7 @@ fn test_init_detects_opencode_harness() {
         "skill should have YAML frontmatter with name"
     );
     assert!(skill.contains("tala"), "skill should reference tala");
+    assert_versioned_document(&skill, true);
 
     let command_path = project
         .path()
@@ -351,6 +437,8 @@ fn test_init_detects_opencode_harness() {
         command_path.exists(),
         "init should detect .opencode/ and create command file at .opencode/commands/tala.md"
     );
+    let command = std::fs::read_to_string(&command_path).unwrap();
+    assert_versioned_document(&command, false);
 }
 
 #[test]
@@ -386,8 +474,9 @@ fn test_init_installs_repo_skill_docs() {
     let installed =
         std::fs::read_to_string(project.path().join(".opencode/skills/tala/SKILL.md")).unwrap();
     assert_eq!(
-        installed, repo_skill,
-        "installed SKILL.md must be byte-identical to the repo file (single source of truth)"
+        installed,
+        render_embedded_document(&repo_skill),
+        "installed SKILL.md must equal the rendered repo template"
     );
     assert!(
         !installed.contains("tala start"),
@@ -403,9 +492,11 @@ fn test_init_installs_repo_skill_docs() {
         std::fs::read_to_string(project.path().join(".opencode/commands/tala.md")).unwrap();
     assert_eq!(
         installed_cmd,
-        std::fs::read_to_string(repo_cmd).unwrap(),
-        "installed tala.md must match the repo file"
+        render_embedded_document(&std::fs::read_to_string(repo_cmd).unwrap()),
+        "installed tala.md must equal the rendered repo template"
     );
+    assert_versioned_document(&installed, true);
+    assert_versioned_document(&installed_cmd, false);
 }
 
 /// Collect every `tala <command>` first-token referenced inside backtick spans and
@@ -486,9 +577,14 @@ fn test_docs_reference_only_real_commands() {
         repo.join(".opencode/commands/tala.md"),
     ];
 
+    let skill_template = std::fs::read_to_string(&docs[1]).unwrap();
+    let command_template = std::fs::read_to_string(&docs[2]).unwrap();
+    assert_versioned_template(&skill_template, true);
+    assert_versioned_template(&command_template, false);
+
     // `tala-cli` (cargo binstall) and `tala <command>`-style placeholders are the only
     // non-subcommand tokens the docs legitimately contain.
-    let allowlist = ["cli"];
+    let allowlist = ["cli", "version", "<version>"];
 
     let mut failures: Vec<String> = Vec::new();
     for doc in &docs {
@@ -509,6 +605,19 @@ fn test_docs_reference_only_real_commands() {
         "docs reference commands that do not exist in the binary:\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+fn test_version_compatibility_guidance_handles_legacy_docs() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let skill = std::fs::read_to_string(repo.join(".opencode/skills/tala/SKILL.md")).unwrap();
+    let legacy_skill = "---\nname: tala\nmetadata:\n  version: \"3.0\"\n---\n";
+
+    assert!(!legacy_skill.contains("tala_cli_min_version"));
+    assert!(!legacy_skill.contains("tala_cli_generated_version"));
+    assert!(skill.contains("unversioned"));
+    assert!(skill.contains("tala --help"));
+    assert!(skill.contains("tala init"));
 }
 
 #[test]

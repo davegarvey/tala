@@ -1,5 +1,7 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io::Read;
+use std::path::Path;
 use std::process;
 use std::time::Duration;
 
@@ -28,6 +30,207 @@ fn fail(json: bool, msg: impl std::fmt::Display, code: &str) -> ! {
 /// code 2: a timeout is not a usage error, and scripts must be able to tell
 /// "nothing happened yet" apart from "you called me wrong".
 const EXIT_TIMEOUT: i32 = 3;
+
+const TALA_SKILL_MIN_VERSION: &str = "0.27.3";
+const TALA_CLI_MIN_VERSION_PLACEHOLDER: &str = "__TALA_CLI_MIN_VERSION__";
+const TALA_CLI_GENERATED_VERSION_PLACEHOLDER: &str = "__TALA_CLI_GENERATED_VERSION__";
+
+#[derive(Debug, Eq, PartialEq)]
+struct SemanticVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    prerelease: Vec<PrereleaseIdentifier>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum PrereleaseIdentifier {
+    Numeric(u64),
+    Text(String),
+}
+
+impl Ord for PrereleaseIdentifier {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Numeric(left), Self::Numeric(right)) => left.cmp(right),
+            (Self::Numeric(_), Self::Text(_)) => Ordering::Less,
+            (Self::Text(_), Self::Numeric(_)) => Ordering::Greater,
+            (Self::Text(left), Self::Text(right)) => left.cmp(right),
+        }
+    }
+}
+
+impl PartialOrd for PrereleaseIdentifier {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SemanticVersion {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.major
+            .cmp(&other.major)
+            .then(self.minor.cmp(&other.minor))
+            .then(self.patch.cmp(&other.patch))
+            .then_with(
+                || match (self.prerelease.is_empty(), other.prerelease.is_empty()) {
+                    (true, true) => Ordering::Equal,
+                    (true, false) => Ordering::Greater,
+                    (false, true) => Ordering::Less,
+                    (false, false) => self
+                        .prerelease
+                        .iter()
+                        .zip(&other.prerelease)
+                        .map(|(left, right)| left.cmp(right))
+                        .find(|ordering| *ordering != Ordering::Equal)
+                        .unwrap_or_else(|| self.prerelease.len().cmp(&other.prerelease.len())),
+                },
+            )
+    }
+}
+
+impl PartialOrd for SemanticVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn parse_semantic_version(value: &str) -> anyhow::Result<SemanticVersion> {
+    let (without_build, build) = match value.split_once('+') {
+        Some((core, build)) if !build.is_empty() => (core, build),
+        Some(_) => bail!("invalid semantic version '{}': empty build metadata", value),
+        None => (value, ""),
+    };
+    validate_version_identifiers(build, "build metadata")?;
+
+    let (core, prerelease) = match without_build.split_once('-') {
+        Some((core, prerelease)) if !prerelease.is_empty() => (core, prerelease),
+        Some(_) => bail!("invalid semantic version '{}': empty prerelease", value),
+        None => (without_build, ""),
+    };
+    let core_parts: Vec<&str> = core.split('.').collect();
+    if core_parts.len() != 3 {
+        bail!(
+            "invalid semantic version '{}': expected MAJOR.MINOR.PATCH",
+            value
+        );
+    }
+
+    let major = parse_version_number(core_parts[0], value)?;
+    let minor = parse_version_number(core_parts[1], value)?;
+    let patch = parse_version_number(core_parts[2], value)?;
+    let prerelease = if prerelease.is_empty() {
+        Vec::new()
+    } else {
+        validate_version_identifiers(prerelease, "prerelease")?;
+        prerelease
+            .split('.')
+            .map(|identifier| {
+                if identifier.chars().all(|c| c.is_ascii_digit()) {
+                    if identifier.len() > 1 && identifier.starts_with('0') {
+                        bail!(
+                            "invalid semantic version '{}': numeric prerelease identifiers cannot have leading zeroes",
+                            value
+                        );
+                    }
+                    Ok(PrereleaseIdentifier::Numeric(identifier.parse().map_err(
+                        |_| anyhow::anyhow!("numeric prerelease identifier is too large"),
+                    )?))
+                } else {
+                    Ok(PrereleaseIdentifier::Text(identifier.to_string()))
+                }
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+    };
+
+    Ok(SemanticVersion {
+        major,
+        minor,
+        patch,
+        prerelease,
+    })
+}
+
+fn parse_version_number(value: &str, full_version: &str) -> anyhow::Result<u64> {
+    if value.is_empty()
+        || !value.chars().all(|character| character.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
+        bail!(
+            "invalid semantic version '{}': invalid numeric component",
+            full_version
+        );
+    }
+    value
+        .parse()
+        .map_err(|_| anyhow::anyhow!("numeric component is too large"))
+}
+
+fn validate_version_identifiers(value: &str, label: &str) -> anyhow::Result<()> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    if value.split('.').any(|identifier| {
+        identifier.is_empty()
+            || !identifier
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    }) {
+        bail!("invalid {} in semantic version", label);
+    }
+    Ok(())
+}
+
+fn replace_placeholder_once(
+    template: &str,
+    placeholder: &str,
+    replacement: &str,
+) -> anyhow::Result<String> {
+    match template.matches(placeholder).count() {
+        0 => bail!("template is missing required placeholder '{}'", placeholder),
+        1 => Ok(template.replace(placeholder, replacement)),
+        count => bail!(
+            "template contains {} copies of required placeholder '{}'; expected one",
+            count,
+            placeholder
+        ),
+    }
+}
+
+fn render_integration_document(
+    template: &str,
+    min_version: &str,
+    generated_version: &str,
+) -> anyhow::Result<String> {
+    let min = parse_semantic_version(min_version)?;
+    let generated = parse_semantic_version(generated_version)?;
+    if min > generated {
+        bail!(
+            "skill minimum CLI version {} is newer than generating CLI version {}",
+            min_version,
+            generated_version
+        );
+    }
+
+    let with_min =
+        replace_placeholder_once(template, TALA_CLI_MIN_VERSION_PLACEHOLDER, min_version)?;
+    replace_placeholder_once(
+        &with_min,
+        TALA_CLI_GENERATED_VERSION_PLACEHOLDER,
+        generated_version,
+    )
+}
+
+fn render_integration_documents(
+    skill_template: &str,
+    command_template: &str,
+    min_version: &str,
+    generated_version: &str,
+) -> anyhow::Result<(String, String)> {
+    let skill = render_integration_document(skill_template, min_version, generated_version)?;
+    let command = render_integration_document(command_template, min_version, generated_version)?;
+    Ok((skill, command))
+}
 
 #[derive(Parser)]
 #[command(
@@ -768,23 +971,71 @@ async fn install_opencode_skills() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let skill_dir = opencode_dir.join("skills").join("tala");
-    tokio::fs::create_dir_all(&skill_dir).await?;
+    let skill_path = opencode_dir.join("skills").join("tala").join("SKILL.md");
+    let command_path = opencode_dir.join("commands").join("tala.md");
+    install_rendered_documents(
+        &skill_path,
+        &command_path,
+        include_str!("../.opencode/skills/tala/SKILL.md"),
+        include_str!("../.opencode/commands/tala.md"),
+        TALA_SKILL_MIN_VERSION,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await?;
 
-    let skill_path = skill_dir.join("SKILL.md");
-    // Canonical docs live in the repo (.opencode/...) and are embedded at build time
-    // so the binary always ships exactly the docs that are committed.
-    let skill = include_str!("../.opencode/skills/tala/SKILL.md");
-    tokio::fs::write(&skill_path, skill).await?;
     println!("Created .opencode/skills/tala/SKILL.md");
-
-    let commands_dir = opencode_dir.join("commands");
-    tokio::fs::create_dir_all(&commands_dir).await?;
-    let command_path = commands_dir.join("tala.md");
-    let command = include_str!("../.opencode/commands/tala.md");
-    tokio::fs::write(&command_path, command).await?;
     println!("Created .opencode/commands/tala.md");
     Ok(())
+}
+
+async fn install_rendered_documents(
+    skill_path: &Path,
+    command_path: &Path,
+    skill_template: &str,
+    command_template: &str,
+    min_version: &str,
+    generated_version: &str,
+) -> anyhow::Result<()> {
+    // Render and validate both documents before changing either destination.
+    let (skill, command) = render_integration_documents(
+        skill_template,
+        command_template,
+        min_version,
+        generated_version,
+    )?;
+
+    if let Some(parent) = skill_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    if let Some(parent) = command_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    write_file_atomically(skill_path, &skill).await?;
+    write_file_atomically(command_path, &command).await?;
+    Ok(())
+}
+
+async fn write_file_atomically(path: &Path, contents: &str) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .context("cannot atomically write a path without a parent directory")?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("cannot atomically write a path without a valid file name")?;
+    let temporary_path = parent.join(format!(".{}.{}.tmp", file_name, uuid::Uuid::new_v4()));
+
+    let result = async {
+        tokio::fs::write(&temporary_path, contents).await?;
+        tokio::fs::rename(&temporary_path, path).await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temporary_path).await;
+    }
+    result
 }
 
 async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> anyhow::Result<()> {
@@ -3210,5 +3461,150 @@ async fn cmd_stop() -> anyhow::Result<()> {
         store::remove_daemon_json().await;
         println!("daemon stopped (stale daemon.json cleaned up)");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_cli_version_output(output: &str) -> anyhow::Result<SemanticVersion> {
+        let mut fields = output.split_whitespace();
+        if fields.next() != Some("tala") {
+            bail!("version output must start with 'tala'");
+        }
+        let version = fields
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("version output is missing a version"))?;
+        if fields.next().is_some() {
+            bail!("version output has unexpected trailing fields");
+        }
+        parse_semantic_version(version)
+    }
+
+    #[test]
+    fn semantic_versions_follow_semver_precedence() {
+        assert!(
+            parse_semantic_version("1.0.0-alpha.1").unwrap()
+                < parse_semantic_version("1.0.0-alpha.beta").unwrap()
+        );
+        assert!(
+            parse_semantic_version("1.0.0-alpha").unwrap()
+                < parse_semantic_version("1.0.0").unwrap()
+        );
+        assert_eq!(
+            parse_semantic_version("1.0.0+build.1").unwrap(),
+            parse_semantic_version("1.0.0+build.2").unwrap()
+        );
+    }
+
+    #[test]
+    fn compatibility_fixtures_cover_each_version_direction() {
+        let minimum = parse_semantic_version("0.27.3").unwrap();
+        let generated = parse_semantic_version("0.28.0").unwrap();
+
+        assert!(parse_semantic_version("0.26.0").unwrap() < minimum);
+        assert!(minimum < generated);
+        assert_eq!(generated, parse_semantic_version("0.28.0").unwrap());
+        assert!(generated < parse_semantic_version("0.29.0").unwrap());
+        assert!(
+            parse_semantic_version("0.28.0-rc.1").unwrap()
+                < parse_semantic_version("0.28.0").unwrap()
+        );
+    }
+
+    #[test]
+    fn semantic_version_rejects_invalid_values() {
+        for value in ["1.0", "01.0.0", "1.0.0-", "1.0.0+"] {
+            assert!(
+                parse_semantic_version(value).is_err(),
+                "{} should be rejected",
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn renderer_replaces_each_version_placeholder() {
+        let rendered = render_integration_document(
+            "min=__TALA_CLI_MIN_VERSION__ generated=__TALA_CLI_GENERATED_VERSION__",
+            "0.27.3",
+            "0.28.0",
+        )
+        .unwrap();
+        assert_eq!(rendered, "min=0.27.3 generated=0.28.0");
+    }
+
+    #[test]
+    fn renderer_rejects_missing_or_duplicate_placeholders() {
+        assert!(render_integration_document("no placeholders", "0.27.3", "0.28.0").is_err());
+        assert!(render_integration_document(
+            "__TALA_CLI_MIN_VERSION__ __TALA_CLI_MIN_VERSION__ __TALA_CLI_GENERATED_VERSION__",
+            "0.27.3",
+            "0.28.0"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn renderer_rejects_invalid_and_inconsistent_versions() {
+        assert!(render_integration_document(
+            "__TALA_CLI_MIN_VERSION__ __TALA_CLI_GENERATED_VERSION__",
+            "not-a-version",
+            "0.28.0"
+        )
+        .is_err());
+        assert!(render_integration_document(
+            "__TALA_CLI_MIN_VERSION__ __TALA_CLI_GENERATED_VERSION__",
+            "0.28.0",
+            "0.27.3"
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn rendering_failure_leaves_existing_documents_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let skill_path = directory.path().join("skills/SKILL.md");
+        let command_path = directory.path().join("commands/tala.md");
+        tokio::fs::create_dir_all(skill_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(command_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&skill_path, "old skill document")
+            .await
+            .unwrap();
+        tokio::fs::write(&command_path, "old command document")
+            .await
+            .unwrap();
+
+        let result = install_rendered_documents(
+            &skill_path,
+            &command_path,
+            "__TALA_CLI_MIN_VERSION__ __TALA_CLI_GENERATED_VERSION__",
+            "missing generated placeholder",
+            "0.27.3",
+            "0.28.0",
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            tokio::fs::read_to_string(&skill_path).await.unwrap(),
+            "old skill document"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&command_path).await.unwrap(),
+            "old command document"
+        );
+    }
+
+    #[test]
+    fn version_output_fixtures_are_parsed_or_rejected() {
+        assert!(parse_cli_version_output("tala 0.28.0").is_ok());
+        assert!(parse_cli_version_output("").is_err());
+        assert!(parse_cli_version_output("tala development").is_err());
+        assert!(parse_cli_version_output("tala 0.28.0 extra").is_err());
     }
 }
