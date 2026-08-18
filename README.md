@@ -65,9 +65,12 @@ command documents with the minimum and generating CLI versions in their
 frontmatter. Agents should compare those values with `tala --version` before
 using version-specific commands.
 
-After upgrading Tala, rerun `tala init` in existing projects to refresh their
-integration documents. Review local edits to those generated files first;
-`tala init` rewrites them.
+Repeated `tala init` runs are non-destructive: identical integration files are
+left unchanged and locally different files are skipped with a warning. Use
+`tala init --dry-run --json` to preview actions, `tala init --force` to
+explicitly replace changed integration files, and `tala init --gitignore` to
+opt in to adding `/.tala/` at the repository root. Existing project identity
+configuration is never replaced by `--force`.
 
 ## Sending Messages
 

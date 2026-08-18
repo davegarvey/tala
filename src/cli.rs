@@ -1,13 +1,14 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
+use serde::Serialize;
 use serde_json::json;
 
 use crate::models::*;
@@ -250,6 +251,14 @@ pub enum Commands {
     Init {
         #[arg(help = "Agent name for this project (defaults to directory name)")]
         name: Option<String>,
+        #[arg(long, help = "Show the initialization plan without writing files")]
+        dry_run: bool,
+        #[arg(long, help = "Overwrite different existing integration files")]
+        force: bool,
+        #[arg(long, help = "Add /.tala/ to the repository-root .gitignore")]
+        gitignore: bool,
+        #[arg(long, short = 'j', help = "Output the initialization report as JSON")]
+        json: bool,
     },
 
     /// Set or show the active session for this project directory
@@ -499,7 +508,13 @@ pub enum SessionCommands {
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let _ = precheck_daemon_compat(&cli.command).await;
     match cli.command {
-        Commands::Init { name } => cmd_init(name).await,
+        Commands::Init {
+            name,
+            dry_run,
+            force,
+            gitignore,
+            json,
+        } => cmd_init(name, dry_run, force, gitignore, json).await,
         Commands::Use {
             session_id,
             clear,
@@ -663,6 +678,7 @@ fn command_json_output(cmd: &Commands) -> bool {
             | SessionCommands::Reopen { json, .. }
             | SessionCommands::Create { json, .. } => *json,
         },
+        Commands::Init { json, .. } => *json,
         _ => false,
     }
 }
@@ -876,77 +892,370 @@ async fn resolve_session_ref(
     )
 }
 
-async fn cmd_init(name: Option<String>) -> anyhow::Result<()> {
-    let tala_dir = std::path::PathBuf::from(".tala");
-    tokio::fs::create_dir_all(&tala_dir).await?;
-
-    let config_path = tala_dir.join("config.json");
-    if config_path.exists() {
-        eprintln!("./.tala/config.json already exists");
-    } else {
-        let project_name = name.unwrap_or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string()))
-                .unwrap_or_else(|| "project".to_string())
-        });
-        let config = json!({ "name": project_name });
-        tokio::fs::write(&config_path, serde_json::to_string_pretty(&config)?).await?;
-        println!("Created ./.tala/config.json with name: {}", project_name);
-    }
-
-    install_opencode_skills().await?;
-    Ok(())
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum InitAction {
+    Created,
+    Unchanged,
+    Skipped,
+    Overwritten,
+    WouldCreate,
+    WouldUnchanged,
+    WouldSkip,
+    WouldOverwrite,
+    NotRequested,
+    Added,
+    Present,
+    WouldAdd,
+    Unavailable,
 }
 
-async fn install_opencode_skills() -> anyhow::Result<()> {
-    let opencode_dir = std::path::PathBuf::from(".opencode");
-    if !opencode_dir.exists() {
-        return Ok(());
+impl InitAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Unchanged => "unchanged",
+            Self::Skipped => "skipped",
+            Self::Overwritten => "overwritten",
+            Self::WouldCreate => "would_create",
+            Self::WouldUnchanged => "would_unchanged",
+            Self::WouldSkip => "would_skip",
+            Self::WouldOverwrite => "would_overwrite",
+            Self::NotRequested => "not_requested",
+            Self::Added => "added",
+            Self::Present => "present",
+            Self::WouldAdd => "would_add",
+            Self::Unavailable => "unavailable",
+        }
     }
-
-    let skill_path = opencode_dir.join("skills").join("tala").join("SKILL.md");
-    let command_path = opencode_dir.join("commands").join("tala.md");
-    install_rendered_documents(
-        &skill_path,
-        &command_path,
-        include_str!("../.opencode/skills/tala/SKILL.md"),
-        include_str!("../.opencode/commands/tala.md"),
-        TALA_SKILL_MIN_VERSION,
-        env!("CARGO_PKG_VERSION"),
-    )
-    .await?;
-
-    println!("Created .opencode/skills/tala/SKILL.md");
-    println!("Created .opencode/commands/tala.md");
-    Ok(())
 }
 
-async fn install_rendered_documents(
-    skill_path: &Path,
-    command_path: &Path,
-    skill_template: &str,
-    command_template: &str,
-    min_version: &str,
-    generated_version: &str,
+#[derive(Debug, Serialize)]
+struct InitPathReport {
+    path: Option<String>,
+    action: InitAction,
+}
+
+#[derive(Debug, Serialize)]
+struct InitReport {
+    config: InitPathReport,
+    files: Vec<InitPathReport>,
+    gitignore: InitPathReport,
+    warnings: Vec<String>,
+    dry_run: bool,
+}
+
+struct PlannedWrite {
+    path: PathBuf,
+    contents: String,
+}
+
+struct InitPlan {
+    report: InitReport,
+    writes: Vec<PlannedWrite>,
+}
+
+async fn cmd_init(
+    name: Option<String>,
+    dry_run: bool,
+    force: bool,
+    gitignore: bool,
+    json_output: bool,
 ) -> anyhow::Result<()> {
-    // Render and validate both documents before changing either destination.
-    let (skill, command) = render_integration_documents(
-        skill_template,
-        command_template,
-        min_version,
-        generated_version,
-    )?;
+    let plan = build_init_plan(name, dry_run, force, gitignore).await?;
+    for warning in &plan.report.warnings {
+        eprintln!("warning: {}", warning);
+    }
 
-    if let Some(parent) = skill_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+    if !dry_run {
+        apply_init_plan(&plan).await?;
     }
-    if let Some(parent) = command_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+
+    if json_output {
+        println!("{}", serde_json::to_string(&plan.report)?);
+    } else {
+        print_init_report(&plan.report);
     }
-    write_file_atomically(skill_path, &skill).await?;
-    write_file_atomically(command_path, &command).await?;
     Ok(())
+}
+
+async fn build_init_plan(
+    name: Option<String>,
+    dry_run: bool,
+    force: bool,
+    gitignore: bool,
+) -> anyhow::Result<InitPlan> {
+    let config_path = PathBuf::from(".tala/config.json");
+    let config_exists = path_exists(&config_path).await?;
+    let mut writes = Vec::new();
+    let mut warnings = Vec::new();
+
+    let config = if config_exists {
+        warnings.push("./.tala/config.json already exists; leaving it unchanged".to_string());
+        InitPathReport {
+            path: Some(config_path.display().to_string()),
+            action: if dry_run {
+                InitAction::WouldUnchanged
+            } else {
+                InitAction::Unchanged
+            },
+        }
+    } else {
+        let project_name = name.unwrap_or_else(default_project_name);
+        let contents = serde_json::to_string_pretty(&json!({ "name": project_name }))?;
+        if !dry_run {
+            writes.push(PlannedWrite {
+                path: config_path.clone(),
+                contents,
+            });
+        }
+        InitPathReport {
+            path: Some(config_path.display().to_string()),
+            action: if dry_run {
+                InitAction::WouldCreate
+            } else {
+                InitAction::Created
+            },
+        }
+    };
+
+    let mut files = Vec::new();
+    let opencode_dir = PathBuf::from(".opencode");
+    if path_exists(&opencode_dir).await? {
+        if !tokio::fs::metadata(&opencode_dir).await?.is_dir() {
+            bail!(".opencode exists but is not a directory");
+        }
+        let (skill, command) = render_integration_documents(
+            include_str!("../.opencode/skills/tala/SKILL.md"),
+            include_str!("../.opencode/commands/tala.md"),
+            TALA_SKILL_MIN_VERSION,
+            env!("CARGO_PKG_VERSION"),
+        )?;
+        for (path, contents) in [
+            (
+                opencode_dir.join("skills").join("tala").join("SKILL.md"),
+                skill,
+            ),
+            (opencode_dir.join("commands").join("tala.md"), command),
+        ] {
+            files.push(
+                plan_integration_file(&path, contents, dry_run, force, &mut warnings, &mut writes)
+                    .await?,
+            );
+        }
+    }
+
+    let gitignore_report = plan_gitignore(gitignore, dry_run, &mut warnings, &mut writes).await?;
+
+    Ok(InitPlan {
+        report: InitReport {
+            config,
+            files,
+            gitignore: gitignore_report,
+            warnings,
+            dry_run,
+        },
+        writes,
+    })
+}
+
+fn default_project_name() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|directory| {
+            directory
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "project".to_string())
+}
+
+async fn path_exists(path: &Path) -> anyhow::Result<bool> {
+    match tokio::fs::metadata(path).await {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn read_optional_file(path: &Path) -> anyhow::Result<Option<String>> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn plan_integration_file(
+    path: &Path,
+    contents: String,
+    dry_run: bool,
+    force: bool,
+    warnings: &mut Vec<String>,
+    writes: &mut Vec<PlannedWrite>,
+) -> anyhow::Result<InitPathReport> {
+    let existing = read_optional_file(path).await?;
+    let (action, should_write) = match existing {
+        None => (
+            if dry_run {
+                InitAction::WouldCreate
+            } else {
+                InitAction::Created
+            },
+            true,
+        ),
+        Some(existing) if existing == contents => (
+            if dry_run {
+                InitAction::WouldUnchanged
+            } else {
+                InitAction::Unchanged
+            },
+            false,
+        ),
+        Some(_) if force => (
+            if dry_run {
+                InitAction::WouldOverwrite
+            } else {
+                InitAction::Overwritten
+            },
+            true,
+        ),
+        Some(_) => (
+            if dry_run {
+                InitAction::WouldSkip
+            } else {
+                InitAction::Skipped
+            },
+            false,
+        ),
+    };
+
+    if matches!(action, InitAction::Skipped | InitAction::WouldSkip) {
+        warnings.push(format!(
+            "skipped {} because it differs; use `tala init --force` to overwrite it",
+            path.display()
+        ));
+    }
+    if should_write && !dry_run {
+        writes.push(PlannedWrite {
+            path: path.to_path_buf(),
+            contents,
+        });
+    }
+    Ok(InitPathReport {
+        path: Some(path.display().to_string()),
+        action,
+    })
+}
+
+async fn plan_gitignore(
+    requested: bool,
+    dry_run: bool,
+    warnings: &mut Vec<String>,
+    writes: &mut Vec<PlannedWrite>,
+) -> anyhow::Result<InitPathReport> {
+    if !requested {
+        return Ok(InitPathReport {
+            path: None,
+            action: InitAction::NotRequested,
+        });
+    }
+
+    let Some(root) = git_repository_root() else {
+        let warning = "--gitignore requested, but no Git repository root was found".to_string();
+        warnings.push(warning);
+        return Ok(InitPathReport {
+            path: None,
+            action: InitAction::Unavailable,
+        });
+    };
+    let path = root.join(".gitignore");
+    let existing = read_optional_file(&path).await?.unwrap_or_default();
+    if has_tala_ignore_rule(&existing) {
+        return Ok(InitPathReport {
+            path: Some(path.display().to_string()),
+            action: InitAction::Present,
+        });
+    }
+
+    let contents = append_tala_ignore_rule(&existing);
+    if !dry_run {
+        writes.push(PlannedWrite {
+            path: path.clone(),
+            contents,
+        });
+    }
+    Ok(InitPathReport {
+        path: Some(path.display().to_string()),
+        action: if dry_run {
+            InitAction::WouldAdd
+        } else {
+            InitAction::Added
+        },
+    })
+}
+
+fn git_repository_root() -> Option<PathBuf> {
+    let output = process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!root.is_empty()).then(|| PathBuf::from(root))
+}
+
+fn has_tala_ignore_rule(contents: &str) -> bool {
+    contents
+        .lines()
+        .map(str::trim)
+        .any(|line| !line.starts_with('#') && matches!(line, "/.tala/" | ".tala/" | "**/.tala/"))
+}
+
+fn append_tala_ignore_rule(contents: &str) -> String {
+    let mut updated = contents.to_string();
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str("/.tala/\n");
+    updated
+}
+
+async fn apply_init_plan(plan: &InitPlan) -> anyhow::Result<()> {
+    for write in &plan.writes {
+        if let Some(parent) = write.path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        write_file_atomically(&write.path, &write.contents).await?;
+    }
+    Ok(())
+}
+
+fn print_init_report(report: &InitReport) {
+    println!(
+        "{}: {}",
+        report.config.path.as_deref().unwrap_or(".tala/config.json"),
+        report.config.action.label()
+    );
+    for file in &report.files {
+        println!(
+            "{}: {}",
+            file.path.as_deref().unwrap_or("<unknown>"),
+            file.action.label()
+        );
+    }
+    if report.gitignore.action != InitAction::NotRequested {
+        println!(
+            "{}: {}",
+            report.gitignore.path.as_deref().unwrap_or(".gitignore"),
+            report.gitignore.action.label()
+        );
+    }
+    if report.dry_run {
+        println!("dry-run: no files changed");
+    }
 }
 
 async fn write_file_atomically(path: &Path, contents: &str) -> anyhow::Result<()> {
@@ -970,6 +1279,32 @@ async fn write_file_atomically(path: &Path, contents: &str) -> anyhow::Result<()
         let _ = tokio::fs::remove_file(&temporary_path).await;
     }
     result
+}
+
+#[cfg(test)]
+async fn install_rendered_documents(
+    skill_path: &Path,
+    command_path: &Path,
+    skill_template: &str,
+    command_template: &str,
+    min_version: &str,
+    generated_version: &str,
+) -> anyhow::Result<()> {
+    let (skill, command) = render_integration_documents(
+        skill_template,
+        command_template,
+        min_version,
+        generated_version,
+    )?;
+    if let Some(parent) = skill_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    if let Some(parent) = command_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    write_file_atomically(skill_path, &skill).await?;
+    write_file_atomically(command_path, &command).await?;
+    Ok(())
 }
 
 async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> anyhow::Result<()> {
