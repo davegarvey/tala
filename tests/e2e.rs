@@ -617,6 +617,201 @@ fn test_docs_reference_only_real_commands() {
     );
 }
 
+fn git_init(directory: &std::path::Path) {
+    let status = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(directory)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git init should succeed");
+}
+
+fn init_json(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    args: &[&str],
+) -> serde_json::Value {
+    let (stdout, stderr, ok) = tala_in(home, Some(project), args);
+    assert!(
+        ok,
+        "tala {} failed\nstdout: {}\nstderr: {}",
+        args.join(" "),
+        stdout,
+        stderr
+    );
+    serde_json::from_str(&stdout).unwrap_or_else(|error| {
+        panic!(
+            "tala {} should emit JSON: {}\nstdout: {}\nstderr: {}",
+            args.join(" "),
+            error,
+            stdout,
+            stderr
+        )
+    })
+}
+
+#[test]
+fn test_init_help_lists_safety_controls_and_rejects_unknown_flags() {
+    let home = tempfile::tempdir().unwrap();
+    let (stdout, stderr, ok) = tala_in(home.path(), None, &["init", "--help"]);
+    assert!(ok, "init help failed: {}", stderr);
+    for flag in ["--dry-run", "--force", "--gitignore", "--json"] {
+        assert!(stdout.contains(flag), "init help should list {}", flag);
+    }
+
+    let project = tempfile::tempdir().unwrap();
+    let (stdout, stderr, ok) = tala_in(
+        home.path(),
+        Some(project.path()),
+        &["init", "--not-an-init-flag"],
+    );
+    assert!(!ok, "unknown init flags must fail");
+    assert!(
+        stdout.contains("unexpected argument") || stderr.contains("unexpected argument"),
+        "unknown init flag should be reported: {} {}",
+        stdout,
+        stderr
+    );
+}
+
+#[test]
+fn test_init_repeat_skips_changed_file_and_force_replaces_it() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join(".opencode")).unwrap();
+    run_init_in(project.path(), home.path(), &["init", "safe-agent"]);
+
+    let config_path = project.path().join(".tala/config.json");
+    let original_config = std::fs::read_to_string(&config_path).unwrap();
+    let skill_path = project.path().join(".opencode/skills/tala/SKILL.md");
+    std::fs::write(&skill_path, "local agent customization\n").unwrap();
+
+    let report = init_json(home.path(), project.path(), &["init", "--json"]);
+    let skill = report["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"].as_str().unwrap().ends_with("SKILL.md"))
+        .unwrap();
+    assert_eq!(skill["action"], "skipped");
+    assert!(report["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning.as_str().unwrap().contains("--force")));
+    assert_eq!(
+        std::fs::read_to_string(&skill_path).unwrap(),
+        "local agent customization\n"
+    );
+
+    let forced = init_json(home.path(), project.path(), &["init", "--force", "--json"]);
+    let forced_skill = forced["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"].as_str().unwrap().ends_with("SKILL.md"))
+        .unwrap();
+    assert_eq!(forced_skill["action"], "overwritten");
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let expected = render_embedded_document(
+        &std::fs::read_to_string(repo.join(".opencode/skills/tala/SKILL.md")).unwrap(),
+    );
+    assert_eq!(std::fs::read_to_string(skill_path).unwrap(), expected);
+    assert_eq!(
+        std::fs::read_to_string(config_path).unwrap(),
+        original_config
+    );
+}
+
+#[test]
+fn test_init_dry_run_reports_without_writing() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join(".opencode")).unwrap();
+    git_init(project.path());
+
+    let report = init_json(
+        home.path(),
+        project.path(),
+        &["init", "--dry-run", "--gitignore", "--json"],
+    );
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["config"]["action"], "would_create");
+    assert!(report["files"].as_array().unwrap().iter().all(|file| {
+        matches!(
+            file["action"].as_str(),
+            Some("would_create") | Some("would_unchanged") | Some("would_skip")
+        )
+    }));
+    assert_eq!(report["gitignore"]["action"], "would_add");
+    assert!(!project.path().join(".tala").exists());
+    assert!(!project.path().join(".gitignore").exists());
+    assert!(!project
+        .path()
+        .join(".opencode/skills/tala/SKILL.md")
+        .exists());
+}
+
+#[test]
+fn test_init_gitignore_is_opt_in_and_idempotent() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    git_init(project.path());
+
+    run_init_in(project.path(), home.path(), &["init"]);
+    assert!(!project.path().join(".gitignore").exists());
+
+    let added = init_json(
+        home.path(),
+        project.path(),
+        &["init", "--gitignore", "--json"],
+    );
+    assert_eq!(added["gitignore"]["action"], "added");
+    assert_eq!(
+        std::fs::read_to_string(project.path().join(".gitignore")).unwrap(),
+        "/.tala/\n"
+    );
+
+    let present = init_json(
+        home.path(),
+        project.path(),
+        &["init", "--gitignore", "--json"],
+    );
+    assert_eq!(present["gitignore"]["action"], "present");
+    assert_eq!(
+        std::fs::read_to_string(project.path().join(".gitignore")).unwrap(),
+        "/.tala/\n"
+    );
+}
+
+#[test]
+fn test_init_gitignore_uses_nested_root_and_warns_outside_git() {
+    let home = tempfile::tempdir().unwrap();
+    let repository = tempfile::tempdir().unwrap();
+    git_init(repository.path());
+    let nested = repository.path().join("nested/project");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    let nested_report = init_json(home.path(), &nested, &["init", "--gitignore", "--json"]);
+    assert_eq!(nested_report["gitignore"]["action"], "added");
+    assert!(repository.path().join(".gitignore").exists());
+    assert!(!nested.join(".gitignore").exists());
+
+    let outside = tempfile::tempdir().unwrap();
+    let outside_report = init_json(
+        home.path(),
+        outside.path(),
+        &["init", "--gitignore", "--json"],
+    );
+    assert_eq!(outside_report["gitignore"]["action"], "unavailable");
+    assert!(!outside.path().join(".gitignore").exists());
+    assert!(outside_report["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning.as_str().unwrap().contains("Git repository")));
+}
+
 #[test]
 fn test_version_compatibility_guidance_handles_legacy_docs() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
