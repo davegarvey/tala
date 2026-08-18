@@ -58,6 +58,17 @@ tala pending                        # → "Nothing pending — every request has
 tala close "$incoming"               # end the exchange
 ```
 
+### Agent Integration Updates
+
+When a project contains `.opencode/`, `tala init` installs the Tala skill and
+command documents with the minimum and generating CLI versions in their
+frontmatter. Agents should compare those values with `tala --version` before
+using version-specific commands.
+
+After upgrading Tala, rerun `tala init` in existing projects to refresh their
+integration documents. Review local edits to those generated files first;
+`tala init` rewrites them.
+
 ## Sending Messages
 
 Choose the input method by content shape:

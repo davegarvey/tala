@@ -1,5 +1,8 @@
 ---
 description: Use tala for agent-to-agent messaging — cross-project, cross-terminal, cross-agent communication.
+metadata:
+  tala_cli_min_version: "__TALA_CLI_MIN_VERSION__"
+  tala_cli_generated_version: "__TALA_CLI_GENERATED_VERSION__"
 ---
 Run tala for agent-to-agent messaging. Initialize with `tala init`, create a session with
 `tala session create --name "label"` (sets it active), then send with `tala send "msg"` or
