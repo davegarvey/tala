@@ -6,4 +6,4 @@
 ## 2. Validate And Prepare Release
 
 - [x] 2.1 Validate the workflow YAML and run repository checks.
-- [ ] 2.2 Commit, open the fix PR, merge it, and confirm the release workflow completes.
+- [x] 2.2 Commit, open the fix PR, merge it, and confirm the release workflow completes.
