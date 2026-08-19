@@ -111,6 +111,12 @@ jobs:
           target: ${{ matrix.target }}
           cache: true
 
+      - name: Set up ARM64 emulation
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Install cross
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
@@ -127,7 +133,11 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: |
           expected="tala ${{ needs.release.outputs.version }}"
-          actual="$(target/${{ matrix.target }}/release/tala --version)"
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            actual="$(docker run --rm --platform linux/arm64 --volume "$GITHUB_WORKSPACE:/work:ro" alpine:3.22 /work/target/${{ matrix.target }}/release/tala --version)"
+          else
+            actual="$(target/${{ matrix.target }}/release/tala --version)"
+          fi
           test "$actual" = "$expected"
 
       - name: Verify binary (Windows)
@@ -162,7 +172,12 @@ jobs:
           extracted="$(mktemp -d)"
           tar -xzf "$archive" -C "$extracted"
           test -x "$extracted/tala"
-          test "$("$extracted/tala" --version)" = "tala ${{ needs.release.outputs.version }}"
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            actual="$(docker run --rm --platform linux/arm64 --volume "$extracted:/work:ro" alpine:3.22 /work/tala --version)"
+          else
+            actual="$("$extracted/tala" --version)"
+          fi
+          test "$actual" = "tala ${{ needs.release.outputs.version }}"
 
       - name: Verify archive (Windows)
         if: matrix.os == 'windows-latest'
