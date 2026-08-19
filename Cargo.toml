@@ -1,6 +1,6 @@
 [package]
 name = "tala-cli"
-version = "0.32.0"
+version = "0.32.1"
 edition = "2021"
 description = "Agent-to-agent messaging for AI coding tools"
 license = "MIT"
