@@ -117,11 +117,26 @@ jobs:
 
       - name: Build (native)
         if: ${{ !matrix.cross }}
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Build (cross)
         if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: Verify binary (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          expected="tala ${{ needs.release.outputs.version }}"
+          actual="$(target/${{ matrix.target }}/release/tala --version)"
+          test "$actual" = "$expected"
+
+      - name: Verify binary (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $expected = "tala ${{ needs.release.outputs.version }}"
+          $actual = (& "target/${{ matrix.target }}/release/tala.exe" --version).Trim()
+          if ($actual -ne $expected) { throw "Expected '$expected', got '$actual'" }
 
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
@@ -137,6 +152,30 @@ jobs:
           cd target/${{ matrix.target }}/release
           7z a ../../../${{ matrix.name }}.zip tala.exe
           cd -
+
+      - name: Verify archive (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          archive="${{ matrix.name }}.tar.gz"
+          grep -Fxq tala <(tar -tzf "$archive")
+          shasum -a 256 -c "${{ matrix.name }}.tar.gz.sha256"
+          extracted="$(mktemp -d)"
+          tar -xzf "$archive" -C "$extracted"
+          test -x "$extracted/tala"
+          test "$("$extracted/tala" --version)" = "tala ${{ needs.release.outputs.version }}"
+
+      - name: Verify archive (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $archive = "${{ matrix.name }}.zip"
+          $listing = 7z l $archive | Out-String
+          if ($listing -notmatch "tala\.exe") { throw "Archive does not contain tala.exe" }
+          $extracted = Join-Path $env:RUNNER_TEMP "tala-archive"
+          7z x $archive "-o$extracted" -y | Out-Null
+          $actual = (& (Join-Path $extracted "tala.exe") --version).Trim()
+          $expected = "tala ${{ needs.release.outputs.version }}"
+          if ($actual -ne $expected) { throw "Expected '$expected', got '$actual'" }
 
       - name: Upload Release Asset (Unix)
         if: matrix.os != 'windows-latest'
@@ -183,6 +222,29 @@ jobs:
         id: auth
 
       - name: Publish
-        run: cargo publish
+        run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  verify-install:
+    name: Verify cargo-binstall installation
+    needs: [release, build, publish]
+    if: needs.release.outputs.did_bump == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: true
+
+      - name: Install cargo-binstall
+        run: cargo install cargo-binstall --locked
+
+      - name: Install released Tala binary
+        run: cargo binstall --no-confirm --force --disable-telemetry --strategies crate-meta-data --target x86_64-unknown-linux-musl tala-cli
+
+      - name: Verify installed version
+        run: test "$(tala --version)" = "tala ${{ needs.release.outputs.version }}"

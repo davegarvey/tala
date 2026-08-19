@@ -9,7 +9,7 @@ keywords = ["agent", "ai", "messaging", "cli", "chat"]
 categories = ["command-line-utilities", "development-tools"]
 
 [package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+pkg-url = "{ repo }/releases/download/v{ version }/tala-{ os-name }-{ target-arch }{ binary-ext }{ archive-suffix }"
 bin-dir = "{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
@@ -40,4 +40,3 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
-
