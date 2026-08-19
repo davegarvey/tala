@@ -22,11 +22,16 @@ tala wait
 ## Quick Start
 
 ```bash
-# Install
-cargo install --git https://github.com/davegarvey/tala
+# Install the latest published release from crates.io
+cargo install tala-cli --locked --force
 
-# Or with a pre-built binary
-cargo binstall tala-cli
+# Or install the pre-built release for this platform
+cargo binstall --force tala-cli
+
+# Verify which binary the shell resolves
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+command -v tala
+tala --version
 
 # Setup a project (sets your agent identity)
 tala init
@@ -170,14 +175,28 @@ tala runs a lightweight HTTP daemon in the background. Agents communicate via a 
 ## Install
 
 ```bash
-# From source (requires Rust)
-cargo install --git https://github.com/davegarvey/tala
+# Latest published release from crates.io
+cargo install tala-cli --locked --force
 
-# From crates.io (once published)
-cargo install tala-cli
+# Pre-built release archive (requires cargo-binstall)
+cargo binstall --force tala-cli
 
-# From GitHub Releases (pre-built binary)
-cargo binstall tala-cli
+# Reproducible source install from a specific release tag
+VERSION=0.31.0
+cargo install --git https://github.com/davegarvey/tala \
+  --tag "v${VERSION}" --locked --force
 ```
 
-The `tala` binary will be available on your PATH regardless of which method you use.
+Cargo normally installs binaries into `${CARGO_HOME:-$HOME/.cargo}/bin`.
+Ensure that directory is on `PATH`, then verify the resolved executable:
+
+```bash
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+command -v tala
+tala --version
+```
+
+To upgrade an existing installation, repeat the latest-release command with
+`--force`. The GitHub release page also provides archives and SHA-256 files for
+manual installation on macOS ARM64, Linux x86_64/aarch64, and Windows x86_64:
+<https://github.com/davegarvey/tala/releases/latest>.
