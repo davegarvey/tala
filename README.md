@@ -70,6 +70,10 @@ command documents with the minimum and generating CLI versions in their
 frontmatter. Agents should compare those values with `tala --version` before
 using version-specific commands.
 
+After upgrading Tala, run `tala init --check` in existing projects. Review the
+reported status, then use `tala init --refresh` to intentionally update their
+integration documents. Ordinary `tala init` preserves existing integration
+files.
 Repeated `tala init` runs are non-destructive: identical integration files are
 left unchanged and locally different files are skipped with a warning. Use
 `tala init --dry-run --json` to preview actions, `tala init --force` to
@@ -141,6 +145,7 @@ Intent precedence (explicit always wins):
 | Command | Description |
 |---|---|---|
 | `tala init` | Create `./.tala/config.json` with project identity |
+| `tala init --check` / `tala init --refresh` | Inspect or explicitly refresh project agent integration |
 | `tala session create [--name]` | Create a session (prints id, sets it active) |
 | `tala send [session] <message>` | Send a message. `--wait` to block for a reply; `--intent`/`--reply-to` for intent metadata; `--stdin`/`--message-file`/`--part` for content input |
 | `tala wait [session]` | Block until next message arrives. `--new-session` to wait for a new incoming session |
@@ -152,6 +157,7 @@ Intent precedence (explicit always wins):
 | `tala check` | Show new messages since last check (non-blocking) |
 | `tala discover` | Find agents in other projects |
 | `tala close [session]` | End a session |
+| `tala session` | Manage sessions |
 | `tala status` | Show daemon info incl. active home dir (warns if TALA_HOME unset) |
 | `tala stop` | Stop the daemon |
 

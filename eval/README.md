@@ -58,16 +58,22 @@ full agent prompts.
 
 ```
 1. SETUP      Create the project dirs and seed files from the scenario doc.
-              Start the daemon:
-                TALA_HOME=$SCRATCH/.tala target/debug/tala daemon &
+               Resolve the binary before starting any agent:
+                 TALA_BIN="${TALA_BIN:-$(command -v tala)}"
+                 "$TALA_BIN" --version
+               Use the installed PATH binary for agent-to-agent messaging.
+               Set TALA_BIN to an explicit checkout binary only when the eval
+               is intentionally testing that checkout, and verify its version.
+               Start the daemon:
+                 TALA_HOME=$SCRATCH/.tala "$TALA_BIN" daemon &
 
 2. LAUNCH     Copy the scenario's agent prompts into parallel sub-agents
-              (one per agent, same TALA_HOME). Each agent works through its
+               (one per agent, same TALA_HOME). Each agent works through its
               task and writes feedback to $SCRATCH/feedback/<agent>.md.
 
 3. COLLECT    While the daemon is still alive, dump the transcript:
-                TALA_HOME=$SCRATCH/.tala target/debug/tala list --json
-                TALA_HOME=$SCRATCH/.tala target/debug/tala history --session <id> --json
+                 TALA_HOME=$SCRATCH/.tala "$TALA_BIN" list --json
+                 TALA_HOME=$SCRATCH/.tala "$TALA_BIN" history --session <id> --json
               Then stop the daemon (sessions are in-memory; the transcript
               dump must happen first).
 

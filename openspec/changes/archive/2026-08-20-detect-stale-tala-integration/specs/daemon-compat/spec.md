@@ -1,0 +1,24 @@
+## MODIFIED Requirements
+
+### Requirement: Compatibility check before use
+
+The CLI SHALL verify that the running daemon's protocol version is compatible before issuing any command. When the CLI spawns a daemon itself, the spawned daemon's version SHALL be compatible by construction and the check SHALL pass. When the CLI connects to a running daemon whose version is incompatible, the CLI SHALL fail before issuing the command, printing an error that names both the daemon's version and the CLI's required version and suggests the remedy (restart or upgrade); the command SHALL exit with a nonzero status, and in `--json` mode the error SHALL be emitted as the standard JSON error document. An incompatible daemon SHALL NOT be issued any command that mutates state.
+
+Read-only inspection commands (`tala status` and `tala discover`) SHALL be exempt from the hard failure: they SHALL report the mismatch as a warning and continue, so users can inspect a stale daemon.
+
+#### Scenario: Fresh spawn is compatible
+
+- **WHEN** a user runs `tala send` and the CLI spawns a new daemon
+- **THEN** the send proceeds without a version error
+
+#### Scenario: Stale daemon blocks commands
+
+- **WHEN** a running daemon reports protocol version 1 and the CLI requires version 2
+- **THEN** `tala send` SHALL fail with an error naming both versions
+- **AND** no message SHALL be stored
+
+#### Scenario: Read-only commands warn instead of failing
+
+- **WHEN** a running daemon's protocol version is incompatible with the CLI
+- **THEN** `tala status` and `tala discover` SHALL print a warning about the mismatch
+- **AND** each SHALL exit with status 0
