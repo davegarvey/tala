@@ -1,7 +1,8 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Duration;
 
@@ -232,11 +233,263 @@ fn render_integration_documents(
     Ok((skill, command))
 }
 
+const TALA_SKILL_PATH: &str = ".opencode/skills/tala/SKILL.md";
+const TALA_COMMAND_PATH: &str = ".opencode/commands/tala.md";
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum IntegrationStatus {
+    Absent,
+    Current,
+    Stale,
+    Incompatible,
+    Unknown,
+}
+
+impl IntegrationStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Current => "current",
+            Self::Stale => "stale",
+            Self::Incompatible => "incompatible",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct IntegrationCheck {
+    root: PathBuf,
+    skill_path: PathBuf,
+    command_path: PathBuf,
+    status: IntegrationStatus,
+    installed_version: String,
+    generated_version: Option<String>,
+    minimum_version: Option<String>,
+    reason: Option<String>,
+}
+
+fn resolve_project_root() -> PathBuf {
+    let current = std::env::current_dir()
+        .ok()
+        .and_then(|path| fs::canonicalize(path).ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    current
+        .ancestors()
+        .find(|candidate| {
+            candidate.join(".tala/config.json").is_file() || candidate.join(".opencode").is_dir()
+        })
+        .map(Path::to_path_buf)
+        .unwrap_or(current)
+}
+
+fn integration_paths(root: &Path) -> (PathBuf, PathBuf) {
+    (root.join(TALA_SKILL_PATH), root.join(TALA_COMMAND_PATH))
+}
+
+fn metadata_field(document: &str, field: &str) -> Option<String> {
+    let prefix = format!("{}:", field);
+    document.lines().find_map(|line| {
+        let value = line.trim().strip_prefix(&prefix)?.trim();
+        if value.is_empty() {
+            return None;
+        }
+        Some(value.trim_matches(['\"', '\'']).to_string())
+    })
+}
+
+fn document_versions(
+    path: &Path,
+) -> Result<(String, SemanticVersion, String, SemanticVersion), String> {
+    let document = fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {}", path.display(), error))?;
+    let generated = metadata_field(&document, "tala_cli_generated_version")
+        .ok_or_else(|| format!("{} is missing tala_cli_generated_version", path.display()))?;
+    let minimum = metadata_field(&document, "tala_cli_min_version")
+        .ok_or_else(|| format!("{} is missing tala_cli_min_version", path.display()))?;
+    let generated_version = parse_semantic_version(&generated).map_err(|error| {
+        format!(
+            "{} has invalid generated version: {}",
+            path.display(),
+            error
+        )
+    })?;
+    let minimum_version = parse_semantic_version(&minimum)
+        .map_err(|error| format!("{} has invalid minimum version: {}", path.display(), error))?;
+    if minimum_version > generated_version {
+        return Err(format!(
+            "{} declares minimum {} newer than generated {}",
+            path.display(),
+            minimum,
+            generated
+        ));
+    }
+    Ok((generated, generated_version, minimum, minimum_version))
+}
+
+fn inspect_project_integration(root: &Path) -> IntegrationCheck {
+    let (skill_path, command_path) = integration_paths(root);
+    let skill_exists = skill_path.is_file();
+    let command_exists = command_path.is_file();
+    let installed_version = env!("CARGO_PKG_VERSION").to_string();
+
+    if !skill_exists && !command_exists {
+        return IntegrationCheck {
+            root: root.to_path_buf(),
+            skill_path,
+            command_path,
+            status: IntegrationStatus::Absent,
+            installed_version,
+            generated_version: None,
+            minimum_version: None,
+            reason: None,
+        };
+    }
+
+    if !skill_exists || !command_exists {
+        return IntegrationCheck {
+            root: root.to_path_buf(),
+            skill_path,
+            command_path,
+            status: IntegrationStatus::Unknown,
+            installed_version,
+            generated_version: None,
+            minimum_version: None,
+            reason: Some("one of the two integration documents is missing".to_string()),
+        };
+    }
+
+    let skill = document_versions(&skill_path);
+    let command = document_versions(&command_path);
+    let (skill_generated, skill_generated_version, skill_minimum, skill_minimum_version) =
+        match skill {
+            Ok(versions) => versions,
+            Err(reason) => {
+                return IntegrationCheck {
+                    root: root.to_path_buf(),
+                    skill_path,
+                    command_path,
+                    status: IntegrationStatus::Unknown,
+                    installed_version,
+                    generated_version: None,
+                    minimum_version: None,
+                    reason: Some(reason),
+                }
+            }
+        };
+    let (command_generated, command_generated_version, command_minimum, command_minimum_version) =
+        match command {
+            Ok(versions) => versions,
+            Err(reason) => {
+                return IntegrationCheck {
+                    root: root.to_path_buf(),
+                    skill_path,
+                    command_path,
+                    status: IntegrationStatus::Unknown,
+                    installed_version,
+                    generated_version: None,
+                    minimum_version: None,
+                    reason: Some(reason),
+                }
+            }
+        };
+
+    if skill_generated_version != command_generated_version
+        || skill_minimum_version != command_minimum_version
+    {
+        return IntegrationCheck {
+            root: root.to_path_buf(),
+            skill_path,
+            command_path,
+            status: IntegrationStatus::Unknown,
+            installed_version,
+            generated_version: Some(format!(
+                "skill {}, command {}",
+                skill_generated, command_generated
+            )),
+            minimum_version: Some(format!(
+                "skill {}, command {}",
+                skill_minimum, command_minimum
+            )),
+            reason: Some("the integration documents declare different versions".to_string()),
+        };
+    }
+
+    let installed = match parse_semantic_version(&installed_version) {
+        Ok(version) => version,
+        Err(error) => {
+            return IntegrationCheck {
+                root: root.to_path_buf(),
+                skill_path,
+                command_path,
+                status: IntegrationStatus::Unknown,
+                installed_version,
+                generated_version: Some(skill_generated),
+                minimum_version: Some(skill_minimum),
+                reason: Some(format!("installed CLI version is invalid: {}", error)),
+            }
+        }
+    };
+
+    let status = if installed < skill_minimum_version || installed < skill_generated_version {
+        IntegrationStatus::Incompatible
+    } else if installed > skill_generated_version {
+        IntegrationStatus::Stale
+    } else {
+        IntegrationStatus::Current
+    };
+    let reason = match status {
+        IntegrationStatus::Incompatible if installed < skill_minimum_version => Some(format!(
+            "installed CLI {} is below the documented minimum {}",
+            installed_version, skill_minimum
+        )),
+        IntegrationStatus::Incompatible => Some(format!(
+            "documents were generated by newer CLI {}",
+            skill_generated
+        )),
+        IntegrationStatus::Stale => Some(format!(
+            "documents were generated by older CLI {}",
+            skill_generated
+        )),
+        _ => None,
+    };
+
+    IntegrationCheck {
+        root: root.to_path_buf(),
+        skill_path,
+        command_path,
+        status,
+        installed_version,
+        generated_version: Some(skill_generated),
+        minimum_version: Some(skill_minimum),
+        reason,
+    }
+}
+
+fn integration_warning(check: &IntegrationCheck) -> Option<String> {
+    let detail = check
+        .reason
+        .as_deref()
+        .unwrap_or("compatibility is unknown");
+    match check.status {
+        IntegrationStatus::Absent | IntegrationStatus::Current => None,
+        IntegrationStatus::Stale | IntegrationStatus::Incompatible | IntegrationStatus::Unknown => {
+            Some(format!(
+                "warning: Tala integration at {} is {} ({}; installed CLI {}). Run `tala init --check`, then `tala init --refresh`; use `tala --help` as the command-surface authority.",
+                check.root.display(),
+                check.status.as_str(),
+                detail,
+                check.installed_version
+            ))
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "tala",
     about = "Agent-to-agent messaging for AI coding tools",
-    long_about = "tala is a lightweight messaging tool for AI agents working across projects.\n\nSend messages with `tala send`, wait for replies with `tala wait`, stream a session with `tala stream`,\nor listen to all sessions with `tala listen`.\n\nUse `tala wait --new-session` to wait for a session with an unread incoming message from another agent (new sessions first, then sessions you have participated in).\n\nEvery command supports --json for structured output.",
+    long_about = "tala is a lightweight messaging tool for AI agents working across projects.\n\nSend messages with `tala send`, wait for replies with `tala wait`, or listen to all sessions with `tala listen`.\n\nUse `tala wait --new-session` to wait for a session with an unread incoming message from another agent (new sessions first, then sessions you have participated in).\n\nData-producing commands support --json for structured output.",
     version
 )]
 pub struct Cli {
@@ -248,8 +501,25 @@ pub struct Cli {
 pub enum Commands {
     /// Initialize tala config for this project directory (sets agent name used when sending messages)
     Init {
-        #[arg(help = "Agent name for this project (defaults to directory name)")]
+        #[arg(
+            help = "Agent name for this project (defaults to directory name)",
+            conflicts_with_all = ["check", "refresh"]
+        )]
         name: Option<String>,
+        #[arg(
+            long,
+            conflicts_with_all = ["name", "refresh"],
+            help = "Check the repository-local Tala integration without modifying files"
+        )]
+        check: bool,
+        #[arg(
+            long,
+            conflicts_with_all = ["name", "check"],
+            help = "Refresh the repository-local Tala integration explicitly"
+        )]
+        refresh: bool,
+        #[arg(long, short = 'j', help = "Output check/refresh status in JSON format")]
+        json: bool,
     },
 
     /// Set or show the active session for this project directory
@@ -316,10 +586,10 @@ pub enum Commands {
         expect_reply: bool,
     },
     /// Wait for new messages in a session (blocking poll — sends an HTTP request every few seconds).
-    /// Use `tala stream` for real-time SSE on a single session, or `tala listen` to observe all sessions.
+    /// Use `tala listen` to observe all sessions.
     /// Use `tala wait --new-session` to wait for a session with an unread incoming message from another agent (new sessions first, then sessions you have participated in).
     #[command(
-        after_help = "USAGE:\n  tala wait <session>          Blocking poll — sends periodic HTTP requests\n  tala wait --new-session     Wait for a session with an incoming message from another agent\n\nCOMPARISON:\n  tala stream   Real-time SSE — stays connected, pushes messages immediately (single session)\n  tala listen   Real-time SSE — observe all sessions at once\n  tala check    Non-blocking — show new messages and return immediately\n\nEXIT CODES: 0 = messages received (or new session found); 3 = benign timeout; 2 = usage error; 1 = error\n\nSee also: tala history (transcript), tala session (manage sessions)"
+        after_help = "USAGE:\n  tala wait <session>          Blocking poll — sends periodic HTTP requests\n  tala wait --new-session     Wait for a session with an incoming message from another agent\n\nCOMPARISON:\n  tala listen   Real-time SSE — observe all sessions at once\n  tala check    Non-blocking — show new messages and return immediately\n\nEXIT CODES: 0 = messages received (or new session found); 3 = benign timeout; 2 = usage error; 1 = error\n\nSee also: tala history (transcript), tala session (manage sessions)"
     )]
     Wait {
         #[arg(help = "Session ID (uses active session if set)")]
@@ -348,37 +618,8 @@ pub enum Commands {
         )]
         r#new: bool,
     },
-    /// Stream new messages as they arrive for a single session (real-time SSE — stays connected and pushes messages).
-    /// Use `tala wait` for a blocking poll (request/response), or `tala listen` to observe all sessions.
-    #[command(
-        name = "stream",
-        after_help = "USAGE:\n  tala stream <session>   Real-time SSE — stays connected, pushes messages immediately (single session)\n\nCOMPARISON:\n  tala wait     Blocking poll — sends periodic HTTP requests, good for scripts and CI\n  tala listen   Real-time SSE — observe all sessions at once\n  tala check    Non-blocking — show new messages and return immediately\n\nSee also: tala history (transcript)"
-    )]
-    Stream {
-        #[arg(help = "Session ID (uses active session if set)")]
-        session: Option<String>,
-        #[arg(
-            long = "session",
-            short,
-            alias = "session-id",
-            conflicts_with = "session",
-            help = "Session ID"
-        )]
-        session_arg: Option<String>,
-        #[arg(long, help = "Only stream messages with ID greater than this")]
-        since: Option<u64>,
-        #[arg(long, help = "Maximum number of messages to stream (0 = unlimited)")]
-        limit: Option<usize>,
-        #[arg(long, short = 'j', help = "Output in JSON format")]
-        json: bool,
-        #[arg(long, help = "Seconds to stay connected before disconnecting")]
-        timeout: Option<u64>,
-    },
-
     /// View conversation transcript
-    #[command(
-        after_help = "See also: tala wait (blocking poll), tala listen (all sessions), tala stream (real-time SSE)"
-    )]
+    #[command(after_help = "See also: tala wait (blocking poll), tala listen (all sessions)")]
     History {
         #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
@@ -400,9 +641,9 @@ pub enum Commands {
         json: bool,
     },
     /// Observe all sessions for new messages (real-time SSE across all sessions).
-    /// Use `tala stream` for a single session, or `tala wait` for a blocking poll.
+    /// Use `tala wait` for a blocking poll.
     #[command(
-        after_help = "USAGE:\n  tala listen                Real-time SSE — observe all sessions at once\n  tala listen --since <n>   Skip history replay (only messages with ID > n)\n  tala listen --from <name> Filter messages from a specific sender\n  tala listen --match <text> Filter messages containing text\n  tala listen --name <name> Filter by session name\n\nCOMPARISON:\n  tala stream   Real-time SSE — single session\n  tala wait     Blocking poll — sends periodic HTTP requests, good for scripts and CI\n  tala check    Non-blocking -- show new messages and return immediately\n\nSee also: tala history (transcript)"
+        after_help = "USAGE:\n  tala listen                Real-time SSE — observe all sessions at once\n  tala listen --since <n>   Skip history replay (only messages with ID > n)\n  tala listen --from <name> Filter messages from a specific sender\n  tala listen --match <text> Filter messages containing text\n  tala listen --name <name> Filter by session name\n\nCOMPARISON:\n  tala wait     Blocking poll — sends periodic HTTP requests, good for scripts and CI\n  tala check    Non-blocking -- show new messages and return immediately\n\nSee also: tala history (transcript)"
     )]
     Listen {
         #[arg(long, help = "Only show messages with ID greater than this")]
@@ -424,7 +665,7 @@ pub enum Commands {
 
     /// Show new messages since last check (non-blocking)
     #[command(
-        after_help = "See also: tala wait (blocking poll), tala listen (all sessions), tala stream (real-time SSE), tala history (transcript)"
+        after_help = "See also: tala wait (blocking poll), tala listen (all sessions), tala history (transcript)"
     )]
     Check {
         #[arg(long, short = 'j', help = "Output in JSON format")]
@@ -440,12 +681,6 @@ pub enum Commands {
         after_help = "Scans up to 3 parent directories and their siblings for .tala/config.json files"
     )]
     Discover {
-        #[arg(long, short = 'j', help = "Output in JSON format")]
-        json: bool,
-    },
-    /// List all active agents (unique senders across open sessions)
-    #[command(after_help = "See also: tala discover (cross-project agent discovery)")]
-    Agents {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
@@ -468,7 +703,7 @@ pub enum Commands {
     },
     /// List requests awaiting a reply (who owes whom)
     #[command(
-        after_help = "Shows open obligations across your sessions: unanswered [REQ] messages and\nmessages sent with --expect-reply. Use `tala send --reply-to <id>` to answer one.\n\nSee also: tala list (sessions), tala check (new messages)"
+        after_help = "Shows open obligations across your sessions: unanswered [REQ] messages and\nmessages sent with --expect-reply. Use `tala send --session <id> --reply-to <id>` to answer one.\n\nSee also: tala list (sessions), tala check (new messages)"
     )]
     Pending {
         #[arg(long, short = 'j', help = "Output in JSON format")]
@@ -545,9 +780,21 @@ pub enum SessionCommands {
 }
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
+    let integration_warning = project_integration_warning(&cli.command);
+    let json_output = command_json_output(&cli.command);
+    if !json_output {
+        if let Some(warning) = &integration_warning {
+            eprintln!("{}", warning);
+        }
+    }
     let _ = precheck_daemon_compat(&cli.command).await;
-    match cli.command {
-        Commands::Init { name } => cmd_init(name).await,
+    let result = match cli.command {
+        Commands::Init {
+            name,
+            check,
+            refresh,
+            json,
+        } => cmd_init(name, check, refresh, json).await,
         Commands::Use {
             session_id,
             clear,
@@ -624,14 +871,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 cmd_wait(session.or(session_arg), timeout, since, limit, from, json).await
             }
         }
-        Commands::Stream {
-            session,
-            session_arg,
-            since,
-            limit,
-            json,
-            timeout,
-        } => cmd_watch(session.or(session_arg), since, limit, json, timeout).await,
         Commands::History {
             session,
             session_arg,
@@ -651,7 +890,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::List { json } => cmd_list(json).await,
         Commands::Pending { json } => cmd_pending(json).await,
         Commands::Discover { json } => cmd_discover(json).await,
-        Commands::Agents { json } => cmd_agents(json).await,
         Commands::Close {
             session,
             session_arg,
@@ -679,7 +917,24 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             SessionCommands::Create { name, json } => cmd_session_create(name, json).await,
         },
+    };
+    if json_output && result.is_ok() {
+        if let Some(warning) = integration_warning {
+            eprintln!("{}", warning);
+        }
     }
+    result
+}
+
+fn project_integration_warning(command: &Commands) -> Option<String> {
+    if matches!(command, Commands::Init { .. }) {
+        return None;
+    }
+    integration_warning(&inspect_project_integration(&resolve_project_root()))
+}
+
+pub fn unknown_command_integration_hint() -> Option<String> {
+    integration_warning(&inspect_project_integration(&resolve_project_root()))
 }
 
 fn daemon_home_display() -> String {
@@ -698,7 +953,6 @@ fn command_is_read_only(cmd: &Commands) -> bool {
         cmd,
         Commands::Status { .. }
             | Commands::Discover { .. }
-            | Commands::Agents { .. }
             | Commands::Stop
             | Commands::Init { .. }
             | Commands::Use { .. }
@@ -708,16 +962,15 @@ fn command_is_read_only(cmd: &Commands) -> bool {
 
 fn command_json_output(cmd: &Commands) -> bool {
     match cmd {
-        Commands::Use { json, .. }
+        Commands::Init { json, .. }
+        | Commands::Use { json, .. }
         | Commands::Send { json, .. }
         | Commands::Wait { json, .. }
-        | Commands::Stream { json, .. }
         | Commands::History { json, .. }
         | Commands::Listen { json, .. }
         | Commands::List { json }
         | Commands::Pending { json }
         | Commands::Discover { json }
-        | Commands::Agents { json }
         | Commands::Close { json, .. }
         | Commands::Check { json }
         | Commands::Status { json } => *json,
@@ -942,37 +1195,148 @@ async fn resolve_session_ref(
     )
 }
 
-async fn cmd_init(name: Option<String>) -> anyhow::Result<()> {
-    let tala_dir = std::path::PathBuf::from(".tala");
-    tokio::fs::create_dir_all(&tala_dir).await?;
-
-    let config_path = tala_dir.join("config.json");
-    if config_path.exists() {
-        eprintln!("./.tala/config.json already exists");
-    } else {
-        let project_name = name.unwrap_or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .and_then(|d| d.file_name().map(|n| n.to_string_lossy().to_string()))
-                .unwrap_or_else(|| "project".to_string())
-        });
-        let config = json!({ "name": project_name });
-        tokio::fs::write(&config_path, serde_json::to_string_pretty(&config)?).await?;
-        println!("Created ./.tala/config.json with name: {}", project_name);
+async fn cmd_init(
+    name: Option<String>,
+    check: bool,
+    refresh: bool,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    let root = resolve_project_root();
+    if check {
+        let status = inspect_project_integration(&root);
+        print_integration_status(&status, json_output, &[]);
+        return Ok(());
     }
-
-    install_opencode_skills().await?;
-    Ok(())
-}
-
-async fn install_opencode_skills() -> anyhow::Result<()> {
-    let opencode_dir = std::path::PathBuf::from(".opencode");
-    if !opencode_dir.exists() {
+    if refresh {
+        let refreshed = refresh_opencode_skills(&root).await?;
+        let status = inspect_project_integration(&root);
+        print_integration_status(&status, json_output, &refreshed);
         return Ok(());
     }
 
-    let skill_path = opencode_dir.join("skills").join("tala").join("SKILL.md");
-    let command_path = opencode_dir.join("commands").join("tala.md");
+    let tala_dir = root.join(".tala");
+    tokio::fs::create_dir_all(&tala_dir).await?;
+
+    let config_path = tala_dir.join("config.json");
+    let mut config_created = false;
+    let mut project_name = None;
+    if config_path.exists() {
+        if !json_output {
+            eprintln!("{} already exists", config_path.display());
+        }
+    } else {
+        let name = name.unwrap_or_else(|| {
+            root.file_name()
+                .map(|directory| directory.to_string_lossy().to_string())
+                .unwrap_or_else(|| "project".to_string())
+        });
+        let config = json!({ "name": name });
+        tokio::fs::write(&config_path, serde_json::to_string_pretty(&config)?).await?;
+        config_created = true;
+        project_name = Some(name);
+    }
+
+    let created = install_opencode_skills(&root).await?;
+    if json_output {
+        let status = inspect_project_integration(&root);
+        println!(
+            "{}",
+            serde_json::json!({
+                "project_root": root,
+                "config_created": config_created,
+                "project_name": project_name,
+                "integration": integration_status_json(&status, &created),
+            })
+        );
+    } else {
+        if config_created {
+            println!("Created {}", config_path.display());
+        }
+        if created.is_empty() {
+            let (skill_path, command_path) = integration_paths(&root);
+            if skill_path.exists() && command_path.exists() {
+                println!(
+                    "Tala integration already exists; run `tala init --refresh` to update it."
+                );
+            }
+        } else {
+            for path in created {
+                println!("Created {}", path.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn integration_status_json(check: &IntegrationCheck, refreshed: &[PathBuf]) -> serde_json::Value {
+    serde_json::json!({
+        "project_root": check.root,
+        "status": check.status.as_str(),
+        "installed_version": check.installed_version,
+        "generated_version": check.generated_version,
+        "minimum_version": check.minimum_version,
+        "skill_path": check.skill_path,
+        "command_path": check.command_path,
+        "reason": check.reason,
+        "refreshed": refreshed,
+    })
+}
+
+fn print_integration_status(check: &IntegrationCheck, json_output: bool, refreshed: &[PathBuf]) {
+    if json_output {
+        println!("{}", integration_status_json(check, refreshed));
+        return;
+    }
+
+    println!(
+        "Tala integration: {} ({})",
+        check.status.as_str(),
+        check.root.display()
+    );
+    println!("Installed CLI: {}", check.installed_version);
+    if let Some(reason) = &check.reason {
+        println!("Details: {}", reason);
+    }
+    for path in refreshed {
+        println!("Refreshed {}", path.display());
+    }
+}
+
+async fn install_opencode_skills(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    if !root.join(".opencode").is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let (skill_path, command_path) = integration_paths(root);
+    let (skill, command) = render_integration_documents(
+        include_str!("../.opencode/skills/tala/SKILL.md"),
+        include_str!("../.opencode/commands/tala.md"),
+        TALA_SKILL_MIN_VERSION,
+        env!("CARGO_PKG_VERSION"),
+    )?;
+    let mut created = Vec::new();
+    if !skill_path.exists() && !command_path.exists() {
+        write_documents_atomically(&skill_path, &skill, &command_path, &command).await?;
+        created.extend([skill_path, command_path]);
+    } else {
+        if !skill_path.exists() {
+            write_file_atomically(&skill_path, &skill).await?;
+            created.push(skill_path);
+        }
+        if !command_path.exists() {
+            write_file_atomically(&command_path, &command).await?;
+            created.push(command_path);
+        }
+    }
+    Ok(created)
+}
+
+async fn refresh_opencode_skills(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    if !root.join(".opencode").is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let (skill_path, command_path) = integration_paths(root);
     install_rendered_documents(
         &skill_path,
         &command_path,
@@ -982,10 +1346,7 @@ async fn install_opencode_skills() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION"),
     )
     .await?;
-
-    println!("Created .opencode/skills/tala/SKILL.md");
-    println!("Created .opencode/commands/tala.md");
-    Ok(())
+    Ok(vec![skill_path, command_path])
 }
 
 async fn install_rendered_documents(
@@ -1004,15 +1365,104 @@ async fn install_rendered_documents(
         generated_version,
     )?;
 
+    write_documents_atomically(skill_path, &skill, command_path, &command).await
+}
+
+async fn write_documents_atomically(
+    skill_path: &Path,
+    skill: &str,
+    command_path: &Path,
+    command: &str,
+) -> anyhow::Result<()> {
+    write_documents_atomically_impl(skill_path, skill, command_path, command, false).await
+}
+
+async fn write_documents_atomically_impl(
+    skill_path: &Path,
+    skill: &str,
+    command_path: &Path,
+    command: &str,
+    fail_after_skill_replace: bool,
+) -> anyhow::Result<()> {
     if let Some(parent) = skill_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     if let Some(parent) = command_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    write_file_atomically(skill_path, &skill).await?;
-    write_file_atomically(command_path, &command).await?;
+
+    let skill_temp = temporary_path(skill_path);
+    let command_temp = temporary_path(command_path);
+    tokio::fs::write(&skill_temp, skill).await?;
+    if let Err(error) = tokio::fs::write(&command_temp, command).await {
+        let _ = tokio::fs::remove_file(&skill_temp).await;
+        return Err(error.into());
+    }
+
+    let skill_backup = backup_path(skill_path);
+    let command_backup = backup_path(command_path);
+    let result = async {
+        backup_existing_file(skill_path, &skill_backup).await?;
+        if let Err(error) = backup_existing_file(command_path, &command_backup).await {
+            restore_backup(skill_path, &skill_backup).await;
+            return Err(error);
+        }
+
+        if let Err(error) = tokio::fs::rename(&skill_temp, skill_path).await {
+            restore_backup(skill_path, &skill_backup).await;
+            restore_backup(command_path, &command_backup).await;
+            return Err(error.into());
+        }
+        if fail_after_skill_replace {
+            let _ = tokio::fs::remove_file(skill_path).await;
+            restore_backup(skill_path, &skill_backup).await;
+            restore_backup(command_path, &command_backup).await;
+            return Err(anyhow::anyhow!("injected document replacement failure"));
+        }
+        if let Err(error) = tokio::fs::rename(&command_temp, command_path).await {
+            let _ = tokio::fs::remove_file(skill_path).await;
+            restore_backup(skill_path, &skill_backup).await;
+            restore_backup(command_path, &command_backup).await;
+            return Err(error.into());
+        }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    let _ = tokio::fs::remove_file(&skill_temp).await;
+    let _ = tokio::fs::remove_file(&command_temp).await;
+    let _ = tokio::fs::remove_file(&skill_backup).await;
+    let _ = tokio::fs::remove_file(&command_backup).await;
+    result
+}
+
+fn temporary_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("integration"));
+    path.with_file_name(format!(".{}.{}.tmp", file_name, uuid::Uuid::new_v4()))
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("integration"));
+    path.with_file_name(format!(".{}.{}.bak", file_name, uuid::Uuid::new_v4()))
+}
+
+async fn backup_existing_file(path: &Path, backup: &Path) -> anyhow::Result<()> {
+    if path.exists() {
+        tokio::fs::rename(path, backup).await?;
+    }
     Ok(())
+}
+
+async fn restore_backup(path: &Path, backup: &Path) {
+    if backup.exists() {
+        let _ = tokio::fs::rename(backup, path).await;
+    }
 }
 
 async fn write_file_atomically(path: &Path, contents: &str) -> anyhow::Result<()> {
@@ -1711,7 +2161,7 @@ async fn send_content(
         process::exit(EXIT_TIMEOUT);
     } else {
         for m in &result.messages {
-            println!("{}: {}", m.sender, m.render());
+            println!("{}", render_received_message(m));
         }
     }
     Ok(())
@@ -2066,132 +2516,6 @@ async fn cmd_wait(
     Ok(())
 }
 
-async fn cmd_watch(
-    session_arg: Option<String>,
-    since: Option<u64>,
-    limit: Option<usize>,
-    json_output: bool,
-    timeout: Option<u64>,
-) -> anyhow::Result<()> {
-    let (host, port) = ensure_daemon_running().await?;
-    let session_id =
-        resolve_session_id_or_fail(&host, port, session_arg.as_deref(), "stream", json_output)
-            .await;
-
-    let since_id = since.unwrap_or(0);
-    let mut path = format!("/api/sessions/{}/events?since={}", session_id, since_id);
-    if let Some(l) = limit.filter(|&l| l > 0) {
-        path = format!("{}&limit={}", path, l);
-    }
-    let url = daemon_url(&host, port, &path);
-
-    let client = reqwest::Client::new();
-    let resp = client.get(&url).send().await?;
-
-    if !resp.status().is_success() {
-        let err: ErrorResponse = resp.json().await?;
-        fail(json_output, &err.error, "SESSION_NOT_FOUND");
-    }
-
-    // B007: visible connection status (text → stdout, --json → stderr).
-    if json_output {
-        eprintln!(
-            "[stream] connected to tala daemon at {}:{} (session {}, since id {})",
-            host, port, session_id, since_id
-        );
-    } else {
-        println!(
-            "Streaming session {} from tala daemon at {}:{} (since id {})...",
-            session_id, host, port, since_id
-        );
-    }
-
-    let timeout_dur = timeout.filter(|&t| t > 0).map(Duration::from_secs);
-
-    let mut buffer = String::new();
-    let mut stream = resp.bytes_stream();
-    let mut message_count: u64 = 0;
-
-    loop {
-        let chunk = if let Some(dur) = timeout_dur {
-            match tokio::time::timeout(dur, stream.next()).await {
-                Ok(Some(chunk)) => chunk,
-                Ok(None) => break,
-                Err(_) => break,
-            }
-        } else {
-            match stream.next().await {
-                Some(chunk) => chunk,
-                None => break,
-            }
-        };
-        let chunk = chunk?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        while let Some(pos) = buffer.find("\n\n") {
-            let event_block = buffer[..pos].to_string();
-            buffer = buffer[pos + 2..].to_string();
-
-            let event_type = event_block
-                .lines()
-                .find_map(|line| line.strip_prefix("event: "))
-                .unwrap_or("message");
-            let mut data = String::new();
-
-            for line in event_block.lines() {
-                if let Some(val) = line.strip_prefix("data: ") {
-                    data = val.to_string();
-                }
-            }
-
-            match event_type {
-                "closed" => {
-                    if json_output {
-                        println!("{}", json!({"event": "closed"}));
-                    } else {
-                        println!("[session closed]");
-                    }
-                    return Ok(());
-                }
-                "message" => {
-                    message_count += 1;
-                    if json_output {
-                        if let Ok(msg) = serde_json::from_str::<Message>(&data) {
-                            let mut obj: serde_json::Value =
-                                serde_json::from_str(&data).unwrap_or_default();
-                            obj["cursor"] = serde_json::json!(msg.id);
-                            println!("{}", serde_json::to_string(&obj).unwrap());
-                        } else {
-                            println!("{}", data);
-                        }
-                    } else if let Ok(msg) = serde_json::from_str::<Message>(&data) {
-                        println!(
-                            "[{}] {} {} ({}):{}",
-                            msg.id,
-                            intent_badge(&msg),
-                            msg.sender,
-                            msg.timestamp.format("%H:%M:%S"),
-                            render_deadline(&msg)
-                        );
-                        println!("    {}", msg.render());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    if message_count == 0 {
-        if json_output {
-            println!("[]");
-        } else {
-            println!("[no messages received]");
-        }
-    }
-
-    Ok(())
-}
-
 async fn cmd_listen(
     since: Option<u64>,
     match_str: Option<String>,
@@ -2254,6 +2578,7 @@ async fn cmd_listen(
     let mut stream = resp.bytes_stream();
     let mut message_count: u64 = 0;
     let mut max_by_session: HashMap<String, u64> = HashMap::new();
+    let mut messages_by_session: HashMap<String, Vec<Message>> = HashMap::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -2285,6 +2610,10 @@ async fn cmd_listen(
                     "message" => {
                         if let Some(msg) = evt.message {
                             let sid = evt.session_id.clone();
+                            let session_messages =
+                                messages_by_session.entry(sid.clone()).or_default();
+                            session_messages.push(msg.clone());
+                            let settled = settled_message_ids(session_messages);
                             let entry = max_by_session.entry(sid).or_insert(0);
                             if msg.id > *entry {
                                 *entry = msg.id;
@@ -2296,7 +2625,7 @@ async fn cmd_listen(
                                 intent_badge(&msg),
                                 msg.sender,
                                 msg.timestamp.format("%H:%M:%S"),
-                                render_deadline(&msg)
+                                render_deadline(&msg, settled.contains(&msg.id))
                             );
                             println!("    {}", msg.render());
                         }
@@ -2392,6 +2721,14 @@ async fn cmd_recap(
     }
 
     let recap: RecapResponse = resp.json().await?;
+    let settled = if json_output {
+        HashSet::new()
+    } else {
+        let all_messages = fetch_all_session_messages(&host, port, &session_id)
+            .await
+            .unwrap_or_else(|| recap.messages.clone());
+        settled_message_ids(&all_messages)
+    };
 
     if json_output {
         println!("{}", serde_json::to_string(&recap).unwrap());
@@ -2416,7 +2753,7 @@ async fn cmd_recap(
                     intent_badge(msg),
                     msg.sender,
                     msg.timestamp.format("%H:%M:%S"),
-                    render_deadline(msg)
+                    render_deadline(msg, settled.contains(&msg.id))
                 );
                 println!("    {}\n", msg.render());
             }
@@ -2468,13 +2805,14 @@ async fn cmd_pending(json_output: bool) -> anyhow::Result<()> {
             let mins = o.elapsed_seconds / 60;
             let secs = o.elapsed_seconds % 60;
             println!(
-                "      unanswered for {}{} — answer with `tala send --reply-to {}`",
+                "      unanswered for {}{} — answer with `tala send --session {} --reply-to {}`",
                 if mins > 0 {
                     format!("{}m ", mins)
                 } else {
                     String::new()
                 },
                 secs,
+                o.session_id,
                 o.message_id
             );
         }
@@ -2793,31 +3131,6 @@ async fn cmd_discover(json_output: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_agents(json_output: bool) -> anyhow::Result<()> {
-    let (host, port) = ensure_daemon_running().await?;
-
-    let client = reqwest::Client::new();
-    let url = daemon_url(&host, port, "/api/agents");
-    let resp = client.get(&url).send().await?;
-    let agents: Vec<AgentSummary> = resp.json().await?;
-
-    if json_output {
-        println!("{}", serde_json::to_string(&agents).unwrap());
-    } else if agents.is_empty() {
-        println!("No active agents found. Start a session with `tala send`, or try `tala discover` to find agents in other projects.");
-    } else {
-        for a in &agents {
-            println!(
-                "{}  last: {}  {} msgs",
-                a.sender,
-                a.last_seen.format("%Y-%m-%d %H:%M:%S UTC"),
-                a.message_count
-            );
-        }
-    }
-    Ok(())
-}
-
 async fn cmd_close(
     session_arg: Option<String>,
     json_output: bool,
@@ -3099,8 +3412,40 @@ fn intent_badge(msg: &Message) -> String {
     }
 }
 
+fn render_received_message(msg: &Message) -> String {
+    format!(
+        "[{}] {} {}: {}",
+        msg.id,
+        intent_badge(msg),
+        msg.sender,
+        msg.render()
+    )
+}
+
+fn settled_message_ids(messages: &[Message]) -> HashSet<u64> {
+    let (answered, closed) = store::Store::derive_answered(messages);
+    answered.into_iter().chain(closed).collect()
+}
+
+async fn fetch_all_session_messages(
+    host: &str,
+    port: u16,
+    session_id: &str,
+) -> Option<Vec<Message>> {
+    let url = daemon_url(
+        host,
+        port,
+        &format!("/api/sessions/{}/messages?since=0", session_id),
+    );
+    reqwest::get(url).await.ok()?.json().await.ok()
+}
+
 /// Renders the waiting_until deadline relative to now, e.g. " (waiting, 83s left)".
-fn render_deadline(msg: &Message) -> String {
+fn render_deadline(msg: &Message, settled: bool) -> String {
+    if settled {
+        return String::new();
+    }
+
     match msg.waiting_until {
         Some(until) => {
             let now = chrono::Utc::now();
@@ -3387,6 +3732,8 @@ async fn cmd_whatsup(json_output: bool) -> anyhow::Result<()> {
                 .and_then(|s| s.name.clone())
                 .unwrap_or_else(|| sid.clone());
             println!("[{}] ({} new message(s))", session_name, msgs.len());
+            let session_messages: Vec<Message> = msgs.iter().map(|msg| (*msg).clone()).collect();
+            let settled = settled_message_ids(&session_messages);
             for msg in msgs {
                 println!(
                     "  [{}] {}{} ({}):{}",
@@ -3394,7 +3741,7 @@ async fn cmd_whatsup(json_output: bool) -> anyhow::Result<()> {
                     intent_badge(msg),
                     msg.sender,
                     msg.timestamp.format("%H:%M:%S"),
-                    render_deadline(msg)
+                    render_deadline(msg, settled.contains(&msg.id))
                 );
                 println!("    {}", msg.render());
             }
@@ -3467,6 +3814,29 @@ async fn cmd_stop() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_message(
+        id: u64,
+        sender: &str,
+        intent: Intent,
+        reply_to: Option<u64>,
+        waiting_until: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Message {
+        Message {
+            id,
+            session_id: "sess_test".into(),
+            sender: sender.into(),
+            parts: vec![Part::Text {
+                content: format!("message {}", id),
+            }],
+            timestamp: chrono::Utc::now(),
+            intent,
+            reply_to,
+            expect_reply: false,
+            waiting_until,
+            idempotency_key: None,
+        }
+    }
 
     fn parse_cli_version_output(output: &str) -> anyhow::Result<SemanticVersion> {
         let mut fields = output.split_whitespace();
@@ -3600,11 +3970,206 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn replacement_failure_restores_both_existing_documents() {
+        let directory = tempfile::tempdir().unwrap();
+        let skill_path = directory.path().join("skills/SKILL.md");
+        let command_path = directory.path().join("commands/tala.md");
+        tokio::fs::create_dir_all(skill_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(command_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&skill_path, "old skill document")
+            .await
+            .unwrap();
+        tokio::fs::write(&command_path, "old command document")
+            .await
+            .unwrap();
+
+        let result = write_documents_atomically_impl(
+            &skill_path,
+            "new skill document",
+            &command_path,
+            "new command document",
+            true,
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            tokio::fs::read_to_string(&skill_path).await.unwrap(),
+            "old skill document"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&command_path).await.unwrap(),
+            "old command document"
+        );
+    }
+
     #[test]
     fn version_output_fixtures_are_parsed_or_rejected() {
         assert!(parse_cli_version_output("tala 0.28.0").is_ok());
         assert!(parse_cli_version_output("").is_err());
         assert!(parse_cli_version_output("tala development").is_err());
         assert!(parse_cli_version_output("tala 0.28.0 extra").is_err());
+    }
+
+    fn write_integration_pair(
+        root: &std::path::Path,
+        skill_generated: &str,
+        command_generated: &str,
+        skill_minimum: &str,
+        command_minimum: &str,
+    ) {
+        let (skill_path, command_path) = integration_paths(root);
+        std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(command_path.parent().unwrap()).unwrap();
+        let document = |generated: &str, minimum: &str| {
+            format!(
+                "---\ntala_cli_generated_version: \"{}\"\ntala_cli_min_version: \"{}\"\n---\n",
+                generated, minimum
+            )
+        };
+        std::fs::write(skill_path, document(skill_generated, skill_minimum)).unwrap();
+        std::fs::write(command_path, document(command_generated, command_minimum)).unwrap();
+    }
+
+    #[test]
+    fn integration_status_classifies_current_stale_and_incompatible_documents() {
+        let current = tempfile::tempdir().unwrap();
+        write_integration_pair(current.path(), "0.28.0", "0.28.0", "0.27.3", "0.27.3");
+        assert_eq!(
+            inspect_project_integration(current.path()).status,
+            IntegrationStatus::Current
+        );
+
+        let stale = tempfile::tempdir().unwrap();
+        write_integration_pair(stale.path(), "0.27.3", "0.27.3", "0.27.3", "0.27.3");
+        assert_eq!(
+            inspect_project_integration(stale.path()).status,
+            IntegrationStatus::Stale
+        );
+
+        let incompatible = tempfile::tempdir().unwrap();
+        write_integration_pair(incompatible.path(), "0.29.0", "0.29.0", "0.27.3", "0.27.3");
+        assert_eq!(
+            inspect_project_integration(incompatible.path()).status,
+            IntegrationStatus::Incompatible
+        );
+
+        let below_minimum = tempfile::tempdir().unwrap();
+        write_integration_pair(below_minimum.path(), "0.30.0", "0.30.0", "0.29.0", "0.29.0");
+        let below_minimum_check = inspect_project_integration(below_minimum.path());
+        assert_eq!(below_minimum_check.status, IntegrationStatus::Incompatible);
+        assert!(below_minimum_check
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("minimum"));
+    }
+
+    #[test]
+    fn integration_status_classifies_partial_invalid_and_mixed_documents_as_unknown() {
+        let partial = tempfile::tempdir().unwrap();
+        let (skill_path, _) = integration_paths(partial.path());
+        std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+        std::fs::write(skill_path, "tala_cli_generated_version: \"0.28.0\"").unwrap();
+        assert_eq!(
+            inspect_project_integration(partial.path()).status,
+            IntegrationStatus::Unknown
+        );
+
+        let invalid = tempfile::tempdir().unwrap();
+        write_integration_pair(
+            invalid.path(),
+            "not-a-version",
+            "not-a-version",
+            "0.27.3",
+            "0.27.3",
+        );
+        assert_eq!(
+            inspect_project_integration(invalid.path()).status,
+            IntegrationStatus::Unknown
+        );
+
+        let mixed = tempfile::tempdir().unwrap();
+        write_integration_pair(mixed.path(), "0.28.0", "0.27.3", "0.27.3", "0.27.3");
+        assert_eq!(
+            inspect_project_integration(mixed.path()).status,
+            IntegrationStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn absent_integration_is_silent_and_stale_integration_has_one_warning() {
+        let absent = tempfile::tempdir().unwrap();
+        let absent_check = inspect_project_integration(absent.path());
+        assert_eq!(absent_check.status, IntegrationStatus::Absent);
+        assert!(integration_warning(&absent_check).is_none());
+
+        let stale = tempfile::tempdir().unwrap();
+        write_integration_pair(stale.path(), "0.27.3", "0.27.3", "0.27.3", "0.27.3");
+        let warning = integration_warning(&inspect_project_integration(stale.path())).unwrap();
+        assert!(warning.starts_with("warning: Tala integration"));
+        assert_eq!(warning.matches("warning:").count(), 1);
+    }
+
+    #[test]
+    fn answered_request_does_not_render_an_active_deadline() {
+        let messages = vec![
+            test_message(
+                1,
+                "alpha",
+                Intent::Req,
+                None,
+                Some(chrono::Utc::now() + chrono::Duration::seconds(60)),
+            ),
+            test_message(2, "beta", Intent::Reply, Some(1), None),
+        ];
+        let settled = settled_message_ids(&messages);
+
+        assert!(settled.contains(&1));
+        assert_eq!(render_deadline(&messages[0], true), "");
+    }
+
+    #[test]
+    fn expired_answered_request_does_not_render_as_expired() {
+        let messages = vec![
+            test_message(
+                1,
+                "alpha",
+                Intent::Req,
+                None,
+                Some(chrono::Utc::now() - chrono::Duration::seconds(60)),
+            ),
+            test_message(2, "beta", Intent::Reply, Some(1), None),
+        ];
+        let settled = settled_message_ids(&messages);
+
+        assert!(settled.contains(&1));
+        assert_eq!(render_deadline(&messages[0], true), "");
+    }
+
+    #[test]
+    fn expired_unanswered_request_still_renders_as_expired() {
+        let message = test_message(
+            1,
+            "alpha",
+            Intent::Req,
+            None,
+            Some(chrono::Utc::now() - chrono::Duration::seconds(60)),
+        );
+
+        assert!(render_deadline(&message, false).contains("wait expired"));
+    }
+
+    #[test]
+    fn received_message_rendering_identifies_each_message_and_correlation() {
+        let reply = test_message(2, "beta", Intent::Reply, Some(1), None);
+        let fyi = test_message(3, "beta", Intent::Fyi, None, None);
+
+        assert!(render_received_message(&reply).contains("[2] [REPLY→1] beta"));
+        assert!(render_received_message(&fyi).contains("[3] [FYI] beta"));
     }
 }

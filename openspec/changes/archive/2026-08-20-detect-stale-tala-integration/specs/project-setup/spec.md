@@ -1,69 +1,14 @@
-## Purpose
-
-Project setup in tala: `tala init` creates the project's `.tala/` config with a sender identity, and that identity is used on every message sent from the project.
-
-## Requirements
-
-### Requirement: Project initialization
-
-The system SHALL initialize a project for use with tala by creating a `./.tala/` directory and a `./.tala/config.json` holding the project's agent name.
-
-#### Scenario: Init creates .tala directory with config
-
-- **WHEN** user runs `tala init` in a project directory
-- **THEN** a `./.tala/` directory SHALL be created
-- **THEN** a `./.tala/config.json` SHALL be created with the project's basename as the default name
-
-#### Scenario: Init does not overwrite existing config
-
-- **WHEN** user runs `tala init` and `./.tala/config.json` already exists
-- **THEN** the CLI SHALL print a notice that the config already exists and SHALL leave it untouched
-
-#### Scenario: Init with custom name
-
-- **WHEN** user runs `tala init my-agent`
-- **THEN** `./.tala/config.json` SHALL use "my-agent" as the default sender name
-
-### Requirement: Project identity in messaging
-
-The system SHALL use the project name from `./.tala/config.json` as the default sender identity for messages sent from that project.
-
-#### Scenario: Send uses project name
-
-- **WHEN** user runs `tala send <session> "message"` from a project with `./.tala/config.json`
-- **THEN** the message SHALL be attributed to the project name from config
-
-#### Scenario: Send without .tala/config.json
-
-- **WHEN** user runs `tala send <session> "message"` from a project without `./.tala/config.json`
-- **THEN** the message SHALL be attributed to the current directory's basename
+## MODIFIED Requirements
 
 ### Requirement: Opencode skill installation
 
-`tala init` SHALL install the tala opencode skill and command files into the
-project's `.opencode/` directory when one exists, so the project's agent knows
-how to use tala. Each installed Tala integration document SHALL include the
-current CLI generation version and the minimum Tala CLI version required by
-the documented commands. The integration documents SHALL preserve a separate
-skill-content version for tracking instruction changes. `tala init` SHALL not
-overwrite existing integration documents unless the user explicitly requests
-a refresh. `tala init --check` SHALL inspect integration state without writing,
-and `tala init --refresh` SHALL explicitly replace the integration pair. Both
-forms SHALL accept `--json`. A successful check SHALL return zero after
-reporting any inspectable status; only an inability to inspect the selected
-project SHALL be an error. A successful refresh SHALL return zero, while a
-render or replacement failure SHALL return nonzero. Integration checks SHALL
-classify the document pair as `absent`, `current`, `stale`, `incompatible`, or
-`unknown`; a partial pair or invalid/inconsistent metadata SHALL be `unknown`.
-The project root SHALL be the nearest ancestor of the current directory
-containing `.tala/config.json` or `.opencode/`, falling back to the current
-directory when no such ancestor exists.
+`tala init` SHALL install the tala opencode skill and command files into the project's `.opencode/` directory when one exists, so the project's agent knows how to use tala. Each installed Tala integration document SHALL include the current CLI generation version and the minimum Tala CLI version required by the documented commands. The integration documents SHALL preserve a separate skill-content version for tracking instruction changes. `tala init` SHALL not overwrite existing integration documents unless the user explicitly requests a refresh. `tala init --check` SHALL inspect integration state without writing, and `tala init --refresh` SHALL explicitly replace the integration pair. Both forms SHALL accept `--json`. A successful check SHALL return zero after reporting any inspectable status; only an inability to inspect the selected project SHALL be an error. A successful refresh SHALL return zero, while a render or replacement failure SHALL return nonzero. Integration checks SHALL classify the document pair as `absent`, `current`, `stale`, `incompatible`, or `unknown`; a partial pair or invalid/inconsistent metadata SHALL be `unknown`. The project root SHALL be the nearest ancestor of the current directory containing `.tala/config.json` or `.opencode/`, falling back to the current directory when no such ancestor exists.
 
 #### Scenario: Init installs skill and command
 
 - **WHEN** user runs `tala init` and a `.opencode/` directory exists in the project without one or both Tala integration files
-- **THEN** a skill file SHALL be created at `.opencode/skills/tala/SKILL.md` instructing the agent on using tala commands
-- **AND** a command file SHALL be created at `.opencode/commands/tala.md`
+- **THEN** the missing skill file SHALL be created at `.opencode/skills/tala/SKILL.md`
+- **AND** the missing command file SHALL be created at `.opencode/commands/tala.md`
 - **AND** both files SHALL identify the CLI version that generated them
 - **AND** both files SHALL identify the minimum CLI version required by their documented commands
 - **AND** the skill file SHALL identify its skill-content version separately
@@ -76,7 +21,7 @@ directory when no such ancestor exists.
 
 #### Scenario: Explicit refresh updates integration documents
 
-- **WHEN** user runs `tala init --refresh` and a `.opencode/` directory exists
+- **WHEN** user runs the documented explicit refresh form of `tala init` and a `.opencode/` directory exists
 - **THEN** the Tala skill and command documents SHALL be rendered from the current CLI's embedded templates
 - **AND** the documents SHALL contain current compatibility metadata
 - **AND** `./.tala/config.json` SHALL remain unchanged
@@ -84,14 +29,14 @@ directory when no such ancestor exists.
 
 #### Scenario: Init checks integration without modifying files
 
-- **WHEN** user runs `tala init --check`
+- **WHEN** user runs the documented check form of `tala init`
 - **THEN** the CLI SHALL report the project's integration status as `absent`, `current`, `stale`, `incompatible`, or `unknown`
 - **AND** the report SHALL identify the project root and the installed CLI version
 - **AND** the check SHALL not modify `.tala/config.json` or either integration document
 
 #### Scenario: Check output is machine-readable
 
-- **WHEN** user runs `tala init --check --json`
+- **WHEN** user runs the documented check form of `tala init` with `--json`
 - **THEN** stdout SHALL contain one JSON object with the project root, status, installed CLI version, and integration file paths
 - **AND** the command SHALL not write human-readable diagnostics to stdout
 
@@ -103,13 +48,13 @@ directory when no such ancestor exists.
 
 #### Scenario: Check accepts no identity name
 
-- **WHEN** user combines `tala init --check` with a positional project identity name
+- **WHEN** user combines the documented check form of `tala init` with a positional project identity name
 - **THEN** the CLI SHALL reject the arguments as conflicting
 - **AND** the command SHALL not modify `.tala/config.json` or integration documents
 
 #### Scenario: Refresh accepts no identity name
 
-- **WHEN** user combines `tala init --refresh` with a positional project identity name
+- **WHEN** user combines the documented refresh form of `tala init` with a positional project identity name
 - **THEN** the CLI SHALL reject the arguments as conflicting
 - **AND** the command SHALL not modify `.tala/config.json` or integration documents
 

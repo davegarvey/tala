@@ -56,3 +56,16 @@ E2E evaluation scenarios live in `eval/scenarios/` (see `eval/README.md` for
 orchestration). They are manually orchestrated — no autonomous loop, no
 commits or PRs from evals. Findings feed OpenSpec change proposals that a
 human reviews.
+
+### Tala binary selection
+
+When communicating with other agents, use the installed `tala` resolved from
+`PATH`, and verify it first with `command -v tala` and `tala --version`. Other
+agents normally use that same user-facing binary; do not default to
+`target/debug/tala`, which may be built from an older feature branch.
+
+For repository development and tests, use `cargo build`, `cargo test`, and the
+explicitly built `target/debug/tala` when testing the checkout itself. Set an
+explicit `TALA_BIN`, verify its version, and use an isolated `TALA_HOME` when
+mixing built and installed binaries so their daemon and session state cannot be
+confused.

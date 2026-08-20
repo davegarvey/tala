@@ -7,4 +7,4 @@
 /eval/.harness-state.env.tmp
 /eval/.harness.pid
 /eval/.config.env
-
+**/.DS_Store

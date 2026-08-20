@@ -40,6 +40,18 @@ fn tala_ok(home: &std::path::Path, args: &[&str]) -> String {
     stdout
 }
 
+fn tala_ok_in(home: &std::path::Path, dir: &std::path::Path, args: &[&str]) -> String {
+    let (stdout, stderr, ok) = tala_in(home, Some(dir), args);
+    assert!(
+        ok,
+        "tala {} failed\nstdout: {}\nstderr: {}",
+        args.join(" "),
+        stdout,
+        stderr
+    );
+    stdout
+}
+
 fn tala_start(home: &std::path::Path) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -95,6 +107,19 @@ fn assert_versioned_document(document: &str, includes_skill_version: bool) {
             "skill should retain its independent content version"
         );
     }
+}
+
+fn write_project_integration(project: &std::path::Path, generated: &str, minimum: &str) {
+    let skill = project.join(".opencode/skills/tala/SKILL.md");
+    let command = project.join(".opencode/commands/tala.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(command.parent().unwrap()).unwrap();
+    let document = format!(
+        "---\nname: tala\ntala_cli_generated_version: \"{}\"\ntala_cli_min_version: \"{}\"\n---\n",
+        generated, minimum
+    );
+    std::fs::write(skill, &document).unwrap();
+    std::fs::write(command, document).unwrap();
 }
 
 fn assert_versioned_template(template: &str, includes_skill_version: bool) {
@@ -439,6 +464,126 @@ fn test_init_detects_opencode_harness() {
     );
     let command = std::fs::read_to_string(&command_path).unwrap();
     assert_versioned_document(&command, false);
+}
+
+#[test]
+fn test_init_check_and_refresh_preserve_identity_and_existing_documents() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join(".opencode")).unwrap();
+
+    run_init_in(project.path(), home.path(), &["init"]);
+    let config_path = project.path().join(".tala/config.json");
+    let config_before = std::fs::read_to_string(&config_path).unwrap();
+    let skill_path = project.path().join(".opencode/skills/tala/SKILL.md");
+    let command_path = project.path().join(".opencode/commands/tala.md");
+    let skill_before = std::fs::read_to_string(&skill_path).unwrap();
+    let command_before = std::fs::read_to_string(&command_path).unwrap();
+
+    let (stdout, _stderr, ok) = tala_in(home.path(), Some(project.path()), &["init"]);
+    assert!(ok, "ordinary init should preserve integration: {}", stdout);
+    assert_eq!(std::fs::read_to_string(&skill_path).unwrap(), skill_before);
+    assert_eq!(
+        std::fs::read_to_string(&command_path).unwrap(),
+        command_before
+    );
+
+    write_project_integration(project.path(), "0.27.3", "0.27.3");
+    let check = tala_ok_in(home.path(), project.path(), &["init", "--check", "--json"]);
+    let check_json: serde_json::Value = serde_json::from_str(&check).unwrap();
+    let project_root = std::fs::canonicalize(project.path()).unwrap();
+    assert_eq!(check_json["status"], "stale");
+    assert_eq!(
+        check_json["project_root"],
+        project_root.to_string_lossy().to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        config_before
+    );
+
+    let refreshed = tala_ok_in(
+        home.path(),
+        project.path(),
+        &["init", "--refresh", "--json"],
+    );
+    let refreshed_json: serde_json::Value = serde_json::from_str(&refreshed).unwrap();
+    assert_eq!(refreshed_json["status"], "current");
+    assert_eq!(refreshed_json["refreshed"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        config_before
+    );
+}
+
+#[test]
+fn test_init_check_from_nested_directory_uses_project_root() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let nested = project.path().join("src/nested");
+    std::fs::create_dir_all(project.path().join(".opencode")).unwrap();
+    std::fs::create_dir_all(&nested).unwrap();
+    run_init_in(project.path(), home.path(), &["init"]);
+
+    let check = tala_ok_in(home.path(), &nested, &["init", "--check", "--json"]);
+    let check_json: serde_json::Value = serde_json::from_str(&check).unwrap();
+    let project_root = std::fs::canonicalize(project.path()).unwrap();
+    assert_eq!(
+        check_json["project_root"],
+        project_root.to_string_lossy().to_string()
+    );
+    assert_eq!(check_json["status"], "current");
+}
+
+#[test]
+fn test_stale_integration_warning_stays_on_stderr_and_json_stdout() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_project_integration(project.path(), "0.27.3", "0.27.3");
+
+    let (stdout, stderr, ok) = tala_in(home.path(), Some(project.path()), &["list", "--json"]);
+    assert!(
+        ok,
+        "list should continue with stale integration: {}",
+        stderr
+    );
+    serde_json::from_str::<serde_json::Value>(&stdout).expect("stdout should remain JSON");
+    assert!(stderr.contains("integration") && stderr.contains("stale"));
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_unknown_retired_commands_hint_when_integration_is_stale() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    write_project_integration(project.path(), "0.27.3", "0.27.3");
+
+    for command in ["agents", "stream"] {
+        let (_stdout, stderr, ok) = tala_in(home.path(), Some(project.path()), &[command]);
+        assert!(!ok, "retired command should fail: {}", command);
+        assert!(stderr.contains("unrecognized subcommand"));
+        assert!(stderr.contains("tala init --refresh"));
+    }
+
+    let no_integration = tempfile::tempdir().unwrap();
+    let (_stdout, stderr, ok) = tala_in(home.path(), Some(no_integration.path()), &["agents"]);
+    assert!(!ok, "unknown command should fail without integration too");
+    assert!(!stderr.contains("project Tala integration"));
+}
+
+#[test]
+fn test_help_omits_retired_commands() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let help = tala_ok_in(home.path(), project.path(), &["--help"]);
+    assert!(help.contains("listen"));
+    assert!(!help.lines().any(|line| {
+        matches!(
+            line.split_whitespace().next(),
+            Some("agents") | Some("stream")
+        )
+    }));
 }
 
 #[test]
@@ -1691,32 +1836,6 @@ fn test_wait_after_close_returns_messages_and_closed_true() {
 }
 
 #[test]
-fn test_watch_after_close() {
-    let home = tempfile::tempdir().unwrap();
-    let sess = tala_start(home.path());
-
-    tala_ok(home.path(), &["close", &sess]);
-
-    let (stdout, _stderr, ok) = tala(
-        home.path(),
-        &[
-            "stream",
-            "--session",
-            &sess,
-            "--since",
-            "0",
-            "--timeout",
-            "3",
-            "--json",
-        ],
-    );
-    assert!(ok, "stream after close should succeed");
-    assert!(stdout.contains("closed"), "should emit closed event");
-
-    tala_stop(home.path());
-}
-
-#[test]
 fn test_empty_message_rejected() {
     let home = tempfile::tempdir().unwrap();
     let sess = tala_start(home.path());
@@ -2474,38 +2593,6 @@ fn test_listen_banner_json_pure_stdout() {
 }
 
 #[test]
-fn test_stream_banner() {
-    let home = tempfile::tempdir().unwrap();
-    let sess = tala_start(home.path());
-
-    let output = std::process::Command::new(tala_bin())
-        .env("HOME", home.path())
-        .args([
-            "stream",
-            "--session",
-            &sess,
-            "--since",
-            "0",
-            "--timeout",
-            "3",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(output.status.success(), "stream should exit 0: {}", stdout);
-    assert!(
-        stdout.contains("Streaming session") && stdout.contains(&sess),
-        "stream should print a connection banner with the session id: {}",
-        stdout
-    );
-
-    tala_stop(home.path());
-}
-
-#[test]
 fn test_listen_streams_all_sessions() {
     let home = tempfile::tempdir().unwrap();
     let alpha_proj = init_project(home.path(), "alpha");
@@ -2734,121 +2821,6 @@ fn test_send_stdin() {
         recap.contains("piped stdin message"),
         "stdin message should be in recap"
     );
-
-    tala_stop(home.path());
-}
-
-#[test]
-fn test_stream_streams_messages() {
-    let home = tempfile::tempdir().unwrap();
-    let streamer_proj = init_project(home.path(), "streamer");
-    let sess = tala_start(home.path());
-
-    let mut child = Command::new(tala_bin())
-        .env("HOME", home.path())
-        .args(["stream", "--session", &sess, "--since", "0", "--json"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("failed to start stream");
-
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    let (sout, serr, ok) = tala_in(
-        home.path(),
-        Some(streamer_proj.path()),
-        &["send", "--session", &sess, "live-msg"],
-    );
-    assert!(ok, "streamer send failed: {sout} {serr}");
-
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    let _ = child.kill();
-    let output = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        stdout.contains("live-msg"),
-        "stream should stream msg: {}",
-        stdout
-    );
-    assert!(stdout.contains("streamer"), "stream should show sender");
-
-    tala_stop(home.path());
-}
-
-#[test]
-fn test_stream_limit_caps_messages() {
-    let home = tempfile::tempdir().unwrap();
-    let sess = tala_start(home.path());
-
-    let mut child = Command::new(tala_bin())
-        .env("HOME", home.path())
-        .args([
-            "stream",
-            "--session",
-            &sess,
-            "--since",
-            "0",
-            "--limit",
-            "1",
-            "--json",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("failed to start stream");
-
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    tala_ok(home.path(), &["send", "--session", &sess, "limit-1-a"]);
-    tala_ok(home.path(), &["send", "--session", &sess, "limit-1-b"]);
-
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    let _ = child.kill();
-    let output = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let count = stdout.matches("\"parts\"").count();
-    assert_eq!(count, 1, "stream --limit 1 should cap at 1: {}", stdout);
-
-    tala_stop(home.path());
-}
-
-#[test]
-fn test_stream_limit_zero_is_unlimited() {
-    let home = tempfile::tempdir().unwrap();
-    let sess = tala_start(home.path());
-
-    let mut child = Command::new(tala_bin())
-        .env("HOME", home.path())
-        .args([
-            "stream",
-            "--session",
-            &sess,
-            "--since",
-            "0",
-            "--limit",
-            "0",
-            "--json",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("failed to start stream");
-
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    tala_ok(home.path(), &["send", "--session", &sess, "unlim-a"]);
-    tala_ok(home.path(), &["send", "--session", &sess, "unlim-b"]);
-
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    let _ = child.kill();
-    let output = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("unlim-a"), "limit 0 should show unlim-a");
-    assert!(stdout.contains("unlim-b"), "limit 0 should show unlim-b");
 
     tala_stop(home.path());
 }
@@ -3084,51 +3056,6 @@ fn test_use_on_closed_session_shows_reopen_hint() {
         stderr.contains("closed") && stderr.contains("reopen"),
         "error should mention closed and reopen: {}",
         stderr
-    );
-
-    tala_stop(home.path());
-}
-
-#[test]
-fn test_stream_alias_works() {
-    let home = tempfile::tempdir().unwrap();
-    let sess = tala_start(home.path());
-
-    use std::process::{Command, Stdio};
-
-    let mut child = Command::new(tala_bin())
-        .env("HOME", home.path())
-        .args([
-            "stream",
-            "--session",
-            &sess,
-            "--since",
-            "0",
-            "--timeout",
-            "3",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to start stream");
-
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    tala_ok(
-        home.path(),
-        &["send", "--session", &sess, "stream-alias-test"],
-    );
-
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    let _ = child.kill();
-    let output = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert!(
-        stdout.contains("stream-alias-test"),
-        "stream alias should show messages: {}",
-        stdout
     );
 
     tala_stop(home.path());
@@ -4275,10 +4202,15 @@ fn test_pending_lists_and_clears() {
         stdout
     );
     assert!(
-        stdout.contains("--reply-to 1"),
+        stdout.contains(&format!("--session {} --reply-to 1", sess)),
         "pending suggests the answer command: {}",
         stdout
     );
+    let (json, _stderr, ok) = tala_in(home.path(), Some(&project_a), &["pending", "--json"]);
+    assert!(ok, "pending --json should succeed");
+    let obligations: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(obligations[0]["session_id"], sess);
+    assert_eq!(obligations[0]["message_id"], 1);
 
     tala_in(
         home.path(),
@@ -4515,10 +4447,133 @@ fn test_send_wait_strict_reply_matching() {
         stdout
     );
     assert!(
+        stdout.contains("[4] [REPLY→2]"),
+        "wait identifies the received message and correlation: {}",
+        stdout
+    );
+    assert!(
         !stdout.contains("unrelated-chatter"),
         "wait must not return the unrelated fyi: {}",
         stdout
     );
+
+    let history = tala_ok(home.path(), &["history", &sess]);
+    assert!(
+        !history.contains("waiting,") && !history.contains("wait expired"),
+        "answered request should not retain an active deadline: {}",
+        history
+    );
+    let filtered_history = tala_ok(home.path(), &["history", &sess, "--from", "proj-a"]);
+    assert!(
+        !filtered_history.contains("waiting,") && !filtered_history.contains("wait expired"),
+        "filtered history should use the full transcript for answer state: {}",
+        filtered_history
+    );
+    let (_stdout, _stderr, ok) = tala_in(
+        home.path(),
+        Some(&other_project),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--intent",
+            "reply",
+            "--reply-to",
+            "1",
+            "first answer",
+        ],
+    );
+    assert!(ok, "the first request should also be answerable");
+    let _ = tala_ok(home.path(), &["history", &sess]);
+    let pending = tala_ok(home.path(), &["pending"]);
+    assert!(
+        pending.contains("Nothing pending"),
+        "answered exchange should have no pending obligations: {}",
+        pending
+    );
+    let status: serde_json::Value =
+        serde_json::from_str(&tala_ok(home.path(), &["status", "--json"])).unwrap();
+    assert_eq!(status["total_unread"], 0);
+    assert!(
+        status["active_waits"]
+            .as_array()
+            .map(|waits| waits.is_empty())
+            .unwrap_or(false),
+        "answered exchange should have no active waits: {}",
+        status
+    );
+    let sessions: serde_json::Value =
+        serde_json::from_str(&tala_ok(home.path(), &["list", "--json"])).unwrap();
+    let session = sessions
+        .as_array()
+        .and_then(|entries| entries.iter().find(|entry| entry["session_id"] == sess))
+        .expect("session should be listed");
+    assert_eq!(session["pending_count"], 0);
+    assert_eq!(session["waiting"], 0);
+
+    tala_stop(home.path());
+}
+
+#[test]
+fn test_send_wait_json_reply_preserves_correlation() {
+    let home = tempfile::tempdir().unwrap();
+    let (sess, project_a) = tala_start_in(home.path(), "proj-a");
+    let project_b = tempfile::tempdir().unwrap();
+
+    let child = std::process::Command::new(tala_bin())
+        .env("HOME", home.path())
+        .current_dir(&project_a)
+        .args([
+            "send",
+            "--session",
+            &sess,
+            "--wait",
+            "--timeout",
+            "10",
+            "json question",
+            "--json",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let (_stdout, _stderr, ok) = tala_in(
+        home.path(),
+        Some(project_b.path()),
+        &[
+            "send",
+            "--session",
+            &sess,
+            "--intent",
+            "reply",
+            "--reply-to",
+            "1",
+            "json answer",
+        ],
+    );
+    assert!(ok, "reply should succeed");
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "json send --wait should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let wait_response: serde_json::Value = stdout
+        .lines()
+        .last()
+        .and_then(|line| serde_json::from_str(line).ok())
+        .expect("last send --wait --json line should be JSON");
+    let reply = wait_response["messages"]
+        .as_array()
+        .and_then(|messages| messages.first())
+        .expect("wait response should contain the reply");
+    assert_eq!(reply["id"], 2);
+    assert_eq!(reply["reply_to"], 1);
+    assert_eq!(reply["content"], "json answer");
 
     tala_stop(home.path());
 }
@@ -5365,20 +5420,12 @@ fn test_stale_daemon_read_only_commands_warn() {
     let val: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(val["protocol_version"], 0);
 
-    // discover and agents: warn, exit 0.
+    // discover: warn, exit 0.
     let (stdout, stderr, ok) = tala(home.path(), &["discover", "--json"]);
     assert!(ok, "discover must not fail: {}", stdout);
     assert!(
         stderr.contains("incompatible"),
         "discover should warn: {}",
-        stderr
-    );
-
-    let (stdout, stderr, ok) = tala(home.path(), &["agents", "--json"]);
-    assert!(ok, "agents must not fail: {}", stdout);
-    assert!(
-        stderr.contains("incompatible"),
-        "agents should warn: {}",
         stderr
     );
 }

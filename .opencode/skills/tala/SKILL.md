@@ -19,7 +19,7 @@ You have access to `tala`, a CLI tool for communicating with agents in other ses
 # Initialize this project (agent name defaults to directory name)
 tala init
 
-# Create a session and send the first message (session create sets it active)
+# Create a named session, then send its first message
 tala session create --name "collab"
 tala send "starting work on the API endpoint"
 
@@ -38,8 +38,9 @@ sess=$(tala wait --new-session --timeout 600)
 | Command | What it does |
 |---|---|
 | `tala init [name]` | Initialize tala config for this project (writes `.tala/config.json`). |
+| `tala init --check` / `--refresh` | Inspect or explicitly refresh repository-local agent integration files. |
 | `tala session create [--name <label>]` | Create a new session; prints its ID and sets it active. |
-| `tala session rename <id> <name>` / `show <id>` / `reopen <id>` / `close <id>` / `list` | Manage sessions. |
+| `tala session create` / `rename` / `reopen` | Session lifecycle (create with `--name`, rename, reopen). |
 | `tala send [<session>] "<msg>"` | Send a message (active session if omitted). |
 | `tala send --wait "<msg>"` | Send and block for a reply (spinner; `--timeout` secs, default 60). |
 | `tala send --intent <req|fyi|reply|out> "<msg>"` | Declare message intent (default: `fyi`; `--wait` implies `req`; `--reply-to` implies `reply`). |
@@ -49,19 +50,18 @@ sess=$(tala wait --new-session --timeout 600)
 | `tala wait --new-session` | Block until a session with an incoming message from another agent that you haven't read is ready — new sessions first, then sessions you've participated in; ignores your own scratch sessions. |
 | `tala pending` | List requests awaiting a reply (unanswered `req` + `--expect-reply` messages). |
 | `tala history [<session>]` | Full transcript. `--since <id>`, `--from <sender>`, `--limit <n>`. |
-| `tala stream [<session>]` | Real-time SSE for one session (push). |
 | `tala listen` | Real-time SSE across all sessions. Filters: `--from`, `--match`, `--name`, `--since`. |
 | `tala check` | Non-blocking: new messages since last check. |
-| `tala list` / `tala status` / `tala agents` / `tala discover` | Sessions / daemon / active agents / cross-project agents. |
+| `tala list` / `tala status` / `tala discover` | Sessions / daemon info / cross-project agents. |
 | `tala use [<id-or-name>]` | Set/show the active session. `--clear` to unset. |
 | `tala close [<session>]` | Close a session. |
 | `tala stop` | Stop the background daemon. |
 
 ## Key Behaviors
 
-- **No auto-create on send**: `tala send "msg"` with no active session errors and lists
-  candidate sessions with `tala use <id>` — it does NOT create a session. Use
-  `tala session create` (optionally `--name`) first.
+- **Auto-create on send**: `tala send "msg"` with no active session creates a
+  new unnamed session and sends there. Use `tala session create --name <label>`
+  when a named session is needed.
 - **`tala use` matches by name, then ID prefix, then full ID.** Ambiguous input prints
   `Multiple sessions match '...'` and lists candidates. Session names need not be unique.
 - **`session create` and `session reopen` set the active session** for this project
@@ -74,11 +74,20 @@ sess=$(tala wait --new-session --timeout 600)
   then sessions the waiter has participated in (sent or read) with unread incoming.
   Sessions the waiter created and never engaged with never satisfy the wait — the
   timeout hint points at their unread messages instead.
-- **`stream`/`listen` stay connected** (SSE). `--timeout` (listen default 60, 0 = forever).
+- **`listen` stays connected** (SSE). `--timeout` (default 60, 0 = forever).
 - The daemon auto-starts on any command and writes its PID/port to
   `$TALA_HOME/daemon.json` (`~/.tala/daemon.json` by default). `TALA_HOME` overrides the
   location for isolated daemon instances. `tala stop` stops it.
 - Sessions are ephemeral (in-memory daemon). Message IDs are per-session.
+
+## CLI Compatibility
+
+The installed binary is authoritative. Run `tala --version` and compare it with
+the `tala_cli_min_version` and `tala_cli_generated_version` fields above using
+Semantic Versioning 2.0.0 rules. If Tala prints a stale or unversioned project
+integration warning, inspect `tala --help` before relying on a documented
+command, then run `tala init --check` and `tala init --refresh` when the files
+should be updated. Newer binaries may intentionally remove commands.
 
 ## Intent Protocol
 
@@ -93,32 +102,15 @@ When you use `send --wait --timeout N`, the message carries a live countdown
 time, never a stale duration. An expired deadline does NOT cancel the
 obligation: the `req` stays pending until answered or closed with `[OUT]`.
 
+Intent precedence (explicit always wins): `--intent` flag, then `--reply-to`
+implies `reply`, then `--wait` implies `req`, else `fyi`. `--reply-to` +
+`--wait` together = a reply that also expects a reply. Re-asking a peer:
+use `--reply-to <orig> --intent req` so the follow-up stays correlated to
+the original question.
+
 Track who owes whom: `tala pending` lists unanswered requests. Answer one
 with `tala send --reply-to <id>`. Sending `--intent out` closes your own
 open requests.
-
-## CLI Compatibility
-
-Before using a documented command or flag, run `tala --version`. The expected
-output is `tala <version>`. Compare that version semantically with the
-frontmatter fields `tala_cli_min_version` and `tala_cli_generated_version`
-using Semantic Versioning 2.0.0 rules. Prerelease identifiers sort below their
-corresponding release, and build metadata does not affect precedence.
-
-- Below `tala_cli_min_version`: the CLI is incompatible. Warn the user and do
-  not rely on version-specific commands or flags.
-- At or above the minimum but older than `tala_cli_generated_version`: the
-  skill may require commands the binary does not have. Recommend upgrading or
-  verify every required command with `tala --help` before proceeding.
-- Newer than `tala_cli_generated_version`: the skill is stale. Recommend
-  refreshing the project integration with `tala init`, then verify every
-  documented command and flag with `tala --help` because newer releases may
-  remove or rename commands.
-- Equal to `tala_cli_generated_version` and at or above the minimum: the
-  documented command surface is compatible.
-- Missing or invalid skill metadata, or a failed/malformed `tala --version`
-  result: treat the skill as unversioned and compatibility as unknown, warn the
-  user, and verify commands with `tala --help` before using them.
 
 ## Waiting Visibility
 
@@ -143,7 +135,7 @@ you on every `wait`.
 | Watch all sessions | `tala listen` |
 | Filtered watch | `tala listen --from "alpha" --match "urgent"` |
 | Non-blocking check | `tala check` |
-| Cross-project discovery | `tala discover` / `tala agents` |
+| Cross-project discovery | `tala discover` |
 
 ## Guidelines
 

@@ -42,9 +42,10 @@ command documents with the minimum and generating CLI versions in their
 frontmatter. Agents should compare those values with `tala --version` before
 using version-specific commands.
 
-After upgrading Tala, rerun `tala init` in existing projects to refresh their
-integration documents. Review local edits to those generated files first;
-`tala init` rewrites them.
+After upgrading Tala, run `tala init --check` in existing projects. Review the
+reported status, then use `tala init --refresh` to intentionally update their
+integration documents. Ordinary `tala init` preserves existing integration
+files.
 
 ## Sending Messages
 
@@ -77,17 +78,19 @@ Quoted heredoc (`<<'EOF'`) protects backticks, `$variables`, and quotes from she
 
 | Command | Description |
 |---|---|---|
-| `tala init` | Create `./.tala/config.json` with project identity |
+ | `tala init` | Create `./.tala/config.json` with project identity |
+| `tala init --check` / `tala init --refresh` | Inspect or explicitly refresh project agent integration |
 | `tala send [session] <message>` | Send a message (`--wait` to block for reply). Use `tala session create` for session creation |
 | `tala wait [session]` | Block until next message arrives. `--new-session` to wait for new session |
 | `tala history [session]` | Full conversation transcript |
 | `tala list` | List sessions |
 | `tala listen [--from] [--match]` | Watch all sessions via SSE |
-| `tala stream [session]` | Stream messages live via SSE for a single session |
 | `tala check` | Show new messages since last check (non-blocking) |
-| `tala agents` | List active participants across sessions |
 | `tala discover` | Find agents in other projects |
 | `tala close [session]` | End a session |
+| `tala pending` | List requests awaiting replies |
+| `tala use [session]` | Set or show the active session |
+| `tala session` | Manage sessions |
 | `tala status` | Show daemon info incl. active home dir (warns if TALA_HOME unset) |
 | `tala stop` | Stop the daemon |
 

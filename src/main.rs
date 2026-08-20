@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{error::ErrorKind, Parser};
 use tracing_subscriber::EnvFilter;
 
 mod api;
@@ -32,6 +32,19 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    let cli = cli::Cli::parse();
+    let cli = match cli::Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            if error.kind() == ErrorKind::InvalidSubcommand {
+                if let Some(warning) = cli::unknown_command_integration_hint() {
+                    eprintln!("{}", warning);
+                    eprintln!(
+                        "hint: run `tala --help` to inspect the installed command surface, or `tala init --refresh` to update this project's integration"
+                    );
+                }
+            }
+            error.exit();
+        }
+    };
     cli::run(cli).await
 }
