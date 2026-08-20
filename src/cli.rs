@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
+use serde::Serialize;
 use serde_json::json;
 
 use crate::models::*;
@@ -508,23 +509,29 @@ pub enum Commands {
         name: Option<String>,
         #[arg(
             long,
-            conflicts_with_all = ["name", "refresh"],
+            conflicts_with_all = ["name", "refresh", "dry_run", "force", "gitignore"],
             help = "Check the repository-local Tala integration without modifying files"
         )]
         check: bool,
         #[arg(
             long,
-            conflicts_with_all = ["name", "check"],
+            conflicts_with_all = ["name", "check", "dry_run", "force", "gitignore"],
             help = "Refresh the repository-local Tala integration explicitly"
         )]
         refresh: bool,
-        #[arg(long, short = 'j', help = "Output check/refresh status in JSON format")]
+        #[arg(long, conflicts_with_all = ["check", "refresh"], help = "Show the initialization plan without writing files")]
+        dry_run: bool,
+        #[arg(long, conflicts_with_all = ["check", "refresh"], help = "Overwrite different existing integration files")]
+        force: bool,
+        #[arg(long, conflicts_with_all = ["check", "refresh"], help = "Add /.tala/ to the repository-root .gitignore")]
+        gitignore: bool,
+        #[arg(long, short = 'j', help = "Output the initialization report as JSON")]
         json: bool,
     },
 
     /// Set or show the active session for this project directory
     #[command(
-        after_help = "See also: tala session (show, rename, reopen) for advanced session management"
+        after_help = "See also: tala session (create, rename, reopen) for advanced session management"
     )]
     Use {
         #[arg(help = "Session ID to set as active (omit to show current)")]
@@ -536,7 +543,7 @@ pub enum Commands {
     },
     /// Send a message to a session. Use `tala session create` to create a session without a message.
     #[command(
-        after_help = "Use --wait / -w to block until a reply arrives.\nUse `tala session create --name` to create a named session.\nUse --stdin or pipe content for messages with special characters (backticks, quotes, leading dashes).\nUse `--` to separate options from message content, e.g. `tala send -- --my-flags`.\n\nINTENT:\n  --intent <req|fyi|reply|out>  Declare what you expect (default: fyi; --wait implies req; --reply-to implies reply)\n  --reply-to <id>               Correlate this message as a reply to message <id> (same session)\n  --expect-reply                This message also expects a reply (modifier for reply/fyi)\n  With --wait --timeout N, recipients see the live countdown via the stamped waiting_until.\n\nEXIT CODES: 0 = sent (or reply received with --wait); 3 = --wait timed out; 1 = error"
+        after_help = "Use --wait / -w to block until a reply arrives.\nUse `tala send --name <label>` to create a named session in one command, or `tala session create --name` for an empty one.\nUse --stdin or pipe content for messages with special characters (backticks, quotes, leading dashes).\nUse `--` to separate options from message content, e.g. `tala send -- --my-flags`.\n\nINTENT PRECEDENCE: explicit --intent wins; --reply-to implies reply; --wait implies req; default fyi. With --wait --timeout N, recipients see the live countdown via the stamped waiting_until.\n\nEXIT CODES: 0 = sent (or reply received with --wait); 3 = --wait timed out; 2 = usage error; 1 = error"
     )]
     Send {
         #[arg(help = "Session ID (positional, or use --session/-s)")]
@@ -545,6 +552,11 @@ pub enum Commands {
         session_arg: Option<String>,
         #[arg(help = "Message content (omit to read from piped stdin)")]
         message: Option<String>,
+        #[arg(
+            long,
+            help = "Create a new named session, send there, and set it active (one-command named start)"
+        )]
+        name: Option<String>,
         #[arg(
             long = "message-file",
             help = "Read message content from a file (use - for filename to use piped stdin)"
@@ -586,7 +598,7 @@ pub enum Commands {
         expect_reply: bool,
     },
     /// Wait for new messages in a session (blocking poll — sends an HTTP request every few seconds).
-    /// Use `tala listen` to observe all sessions.
+    /// Use `tala listen` to observe all sessions, or `tala wait` for a blocking poll.
     /// Use `tala wait --new-session` to wait for a session with an unread incoming message from another agent (new sessions first, then sessions you have participated in).
     #[command(
         after_help = "USAGE:\n  tala wait <session>          Blocking poll — sends periodic HTTP requests\n  tala wait --new-session     Wait for a session with an incoming message from another agent\n\nCOMPARISON:\n  tala listen   Real-time SSE — observe all sessions at once\n  tala check    Non-blocking — show new messages and return immediately\n\nEXIT CODES: 0 = messages received (or new session found); 3 = benign timeout; 2 = usage error; 1 = error\n\nSee also: tala history (transcript), tala session (manage sessions)"
@@ -602,7 +614,10 @@ pub enum Commands {
             help = "Session ID"
         )]
         session_arg: Option<String>,
-        #[arg(long, help = "Seconds to wait before timing out (default: 60)")]
+        #[arg(
+            long,
+            help = "Seconds to wait before timing out (default: 60, 0 = no timeout)"
+        )]
         timeout: Option<u64>,
         #[arg(long, help = "Only return messages with ID greater than this")]
         since: Option<u64>,
@@ -614,7 +629,7 @@ pub enum Commands {
         json: bool,
         #[arg(
             long = "new-session",
-            help = "Wait for a new session to be created (ignores other args)"
+            help = "Wait for a session with an unread incoming message from another agent — new sessions first, then sessions you have participated in (ignores other args)"
         )]
         r#new: bool,
     },
@@ -643,7 +658,7 @@ pub enum Commands {
     /// Observe all sessions for new messages (real-time SSE across all sessions).
     /// Use `tala wait` for a blocking poll.
     #[command(
-        after_help = "USAGE:\n  tala listen                Real-time SSE — observe all sessions at once\n  tala listen --since <n>   Skip history replay (only messages with ID > n)\n  tala listen --from <name> Filter messages from a specific sender\n  tala listen --match <text> Filter messages containing text\n  tala listen --name <name> Filter by session name\n\nCOMPARISON:\n  tala wait     Blocking poll — sends periodic HTTP requests, good for scripts and CI\n  tala check    Non-blocking -- show new messages and return immediately\n\nSee also: tala history (transcript)"
+        after_help = "USAGE:\n  tala listen                Real-time SSE — observe all sessions at once\n  tala listen --since <n>   Skip history replay (only messages with ID > n)\n  tala listen --from <name> Filter messages from a specific sender\n  tala listen --match <text> Filter messages containing text\n  tala listen --name <name> Filter by session name\n\nCOMPARISON:\n  tala wait     Blocking poll — sends periodic HTTP requests, good for scripts and CI\n  tala check    Non-blocking -- show new messages and return immediately\n\nEXIT CODES: 0 = received messages; 3 = timed out with no messages; 1 = error\n\nSee also: tala history (transcript)"
     )]
     Listen {
         #[arg(long, help = "Only show messages with ID greater than this")]
@@ -684,7 +699,7 @@ pub enum Commands {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
-    /// Close a session
+    /// Close a session (clears the active marker if it was active)
     Close {
         #[arg(help = "Session ID (uses active session if set)")]
         session: Option<String>,
@@ -727,27 +742,6 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum SessionCommands {
-    /// List all sessions
-    #[command(after_help = "Alias: tala list")]
-    List {
-        #[arg(long, short = 'j', help = "Output in JSON format")]
-        json: bool,
-    },
-    /// Close a session by ID
-    #[command(after_help = "Alias: tala close")]
-    Close {
-        #[arg(help = "Session ID to close")]
-        session_id: String,
-        #[arg(long, short = 'j', help = "Output in JSON format")]
-        json: bool,
-    },
-    /// Show session details
-    Show {
-        #[arg(help = "Session ID to show")]
-        session_id: String,
-        #[arg(long, short = 'j', help = "Output in JSON format")]
-        json: bool,
-    },
     /// Rename a session
     Rename {
         #[arg(help = "Session ID to rename")]
@@ -766,7 +760,7 @@ pub enum SessionCommands {
         #[arg(long, short = 'j', help = "Output in JSON format")]
         json: bool,
     },
-    /// Create a new empty session
+    /// Create a new empty session (sets it active for this project)
     Create {
         #[arg(
             long,
@@ -793,8 +787,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             name,
             check,
             refresh,
+            dry_run,
+            force,
+            gitignore,
             json,
-        } => cmd_init(name, check, refresh, json).await,
+        } => cmd_init(name, check, refresh, dry_run, force, gitignore, json).await,
         Commands::Use {
             session_id,
             clear,
@@ -803,6 +800,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Send {
             session,
             session_arg,
+            name,
             message,
             message_file,
             stdin,
@@ -852,6 +850,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 intent.as_deref(),
                 reply_to,
                 expect_reply,
+                name,
             )
             .await
         }
@@ -901,11 +900,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Stop => cmd_stop().await,
         Commands::Daemon => crate::daemon::run_daemon().await,
         Commands::Session { command } => match command {
-            SessionCommands::List { json } => cmd_list(json).await,
-            SessionCommands::Close { session_id, json } => {
-                cmd_close(Some(session_id), json, false).await
-            }
-            SessionCommands::Show { session_id, json } => cmd_session_show(session_id, json).await,
             SessionCommands::Rename {
                 session_id,
                 name,
@@ -975,10 +969,7 @@ fn command_json_output(cmd: &Commands) -> bool {
         | Commands::Check { json }
         | Commands::Status { json } => *json,
         Commands::Session { command } => match command {
-            SessionCommands::List { json }
-            | SessionCommands::Close { json, .. }
-            | SessionCommands::Show { json, .. }
-            | SessionCommands::Rename { json, .. }
+            SessionCommands::Rename { json, .. }
             | SessionCommands::Reopen { json, .. }
             | SessionCommands::Create { json, .. } => *json,
         },
@@ -1199,6 +1190,9 @@ async fn cmd_init(
     name: Option<String>,
     check: bool,
     refresh: bool,
+    dry_run: bool,
+    force: bool,
+    gitignore: bool,
     json_output: bool,
 ) -> anyhow::Result<()> {
     let root = resolve_project_root();
@@ -1214,56 +1208,17 @@ async fn cmd_init(
         return Ok(());
     }
 
-    let tala_dir = root.join(".tala");
-    tokio::fs::create_dir_all(&tala_dir).await?;
-
-    let config_path = tala_dir.join("config.json");
-    let mut config_created = false;
-    let mut project_name = None;
-    if config_path.exists() {
-        if !json_output {
-            eprintln!("{} already exists", config_path.display());
-        }
-    } else {
-        let name = name.unwrap_or_else(|| {
-            root.file_name()
-                .map(|directory| directory.to_string_lossy().to_string())
-                .unwrap_or_else(|| "project".to_string())
-        });
-        let config = json!({ "name": name });
-        tokio::fs::write(&config_path, serde_json::to_string_pretty(&config)?).await?;
-        config_created = true;
-        project_name = Some(name);
+    let plan = build_init_plan(&root, name, dry_run, force, gitignore).await?;
+    for warning in &plan.report.warnings {
+        eprintln!("warning: {}", warning);
     }
-
-    let created = install_opencode_skills(&root).await?;
+    if !dry_run {
+        apply_init_plan(&plan).await?;
+    }
     if json_output {
-        let status = inspect_project_integration(&root);
-        println!(
-            "{}",
-            serde_json::json!({
-                "project_root": root,
-                "config_created": config_created,
-                "project_name": project_name,
-                "integration": integration_status_json(&status, &created),
-            })
-        );
+        println!("{}", serde_json::to_string(&plan.report)?);
     } else {
-        if config_created {
-            println!("Created {}", config_path.display());
-        }
-        if created.is_empty() {
-            let (skill_path, command_path) = integration_paths(&root);
-            if skill_path.exists() && command_path.exists() {
-                println!(
-                    "Tala integration already exists; run `tala init --refresh` to update it."
-                );
-            }
-        } else {
-            for path in created {
-                println!("Created {}", path.display());
-            }
-        }
+        print_init_report(&plan.report);
     }
     Ok(())
 }
@@ -1302,35 +1257,6 @@ fn print_integration_status(check: &IntegrationCheck, json_output: bool, refresh
     }
 }
 
-async fn install_opencode_skills(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    if !root.join(".opencode").is_dir() {
-        return Ok(Vec::new());
-    }
-
-    let (skill_path, command_path) = integration_paths(root);
-    let (skill, command) = render_integration_documents(
-        include_str!("../.opencode/skills/tala/SKILL.md"),
-        include_str!("../.opencode/commands/tala.md"),
-        TALA_SKILL_MIN_VERSION,
-        env!("CARGO_PKG_VERSION"),
-    )?;
-    let mut created = Vec::new();
-    if !skill_path.exists() && !command_path.exists() {
-        write_documents_atomically(&skill_path, &skill, &command_path, &command).await?;
-        created.extend([skill_path, command_path]);
-    } else {
-        if !skill_path.exists() {
-            write_file_atomically(&skill_path, &skill).await?;
-            created.push(skill_path);
-        }
-        if !command_path.exists() {
-            write_file_atomically(&command_path, &command).await?;
-            created.push(command_path);
-        }
-    }
-    Ok(created)
-}
-
 async fn refresh_opencode_skills(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     if !root.join(".opencode").is_dir() {
         return Ok(Vec::new());
@@ -1349,23 +1275,374 @@ async fn refresh_opencode_skills(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(vec![skill_path, command_path])
 }
 
-async fn install_rendered_documents(
-    skill_path: &Path,
-    command_path: &Path,
-    skill_template: &str,
-    command_template: &str,
-    min_version: &str,
-    generated_version: &str,
-) -> anyhow::Result<()> {
-    // Render and validate both documents before changing either destination.
-    let (skill, command) = render_integration_documents(
-        skill_template,
-        command_template,
-        min_version,
-        generated_version,
-    )?;
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum InitAction {
+    Created,
+    Unchanged,
+    Skipped,
+    Overwritten,
+    WouldCreate,
+    WouldUnchanged,
+    WouldSkip,
+    WouldOverwrite,
+    NotRequested,
+    Added,
+    Present,
+    WouldAdd,
+    Unavailable,
+}
 
-    write_documents_atomically(skill_path, &skill, command_path, &command).await
+impl InitAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Unchanged => "unchanged",
+            Self::Skipped => "skipped",
+            Self::Overwritten => "overwritten",
+            Self::WouldCreate => "would_create",
+            Self::WouldUnchanged => "would_unchanged",
+            Self::WouldSkip => "would_skip",
+            Self::WouldOverwrite => "would_overwrite",
+            Self::NotRequested => "not_requested",
+            Self::Added => "added",
+            Self::Present => "present",
+            Self::WouldAdd => "would_add",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct InitPathReport {
+    path: Option<String>,
+    action: InitAction,
+}
+
+#[derive(Debug, Serialize)]
+struct InitReport {
+    config: InitPathReport,
+    files: Vec<InitPathReport>,
+    gitignore: InitPathReport,
+    warnings: Vec<String>,
+    dry_run: bool,
+}
+
+struct PlannedWrite {
+    path: PathBuf,
+    contents: String,
+}
+
+struct InitPlan {
+    report: InitReport,
+    writes: Vec<PlannedWrite>,
+}
+
+fn temporary_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("integration"));
+    path.with_file_name(format!(".{}.{}.tmp", file_name, uuid::Uuid::new_v4()))
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("integration"));
+    path.with_file_name(format!(".{}.{}.bak", file_name, uuid::Uuid::new_v4()))
+}
+
+async fn backup_existing_file(path: &Path, backup: &Path) -> anyhow::Result<()> {
+    if path.exists() {
+        tokio::fs::rename(path, backup).await?;
+    }
+    Ok(())
+}
+
+async fn restore_backup(path: &Path, backup: &Path) {
+    if backup.exists() {
+        let _ = tokio::fs::rename(backup, path).await;
+    }
+}
+
+async fn build_init_plan(
+    root: &Path,
+    name: Option<String>,
+    dry_run: bool,
+    force: bool,
+    gitignore: bool,
+) -> anyhow::Result<InitPlan> {
+    let config_path = root.join(".tala/config.json");
+    let config_exists = path_exists(&config_path).await?;
+    let mut writes = Vec::new();
+    let mut warnings = Vec::new();
+
+    let config = if config_exists {
+        warnings.push(format!(
+            "{} already exists; leaving it unchanged",
+            config_path.display()
+        ));
+        InitPathReport {
+            path: Some(config_path.display().to_string()),
+            action: if dry_run {
+                InitAction::WouldUnchanged
+            } else {
+                InitAction::Unchanged
+            },
+        }
+    } else {
+        let project_name = name.unwrap_or_else(|| default_project_name(root));
+        let contents = serde_json::to_string_pretty(&json!({ "name": project_name }))?;
+        if !dry_run {
+            writes.push(PlannedWrite {
+                path: config_path.clone(),
+                contents,
+            });
+        }
+        InitPathReport {
+            path: Some(config_path.display().to_string()),
+            action: if dry_run {
+                InitAction::WouldCreate
+            } else {
+                InitAction::Created
+            },
+        }
+    };
+
+    let mut files = Vec::new();
+    let opencode_dir = root.join(".opencode");
+    if path_exists(&opencode_dir).await? {
+        if !tokio::fs::metadata(&opencode_dir).await?.is_dir() {
+            bail!(".opencode exists but is not a directory");
+        }
+        let (skill, command) = render_integration_documents(
+            include_str!("../.opencode/skills/tala/SKILL.md"),
+            include_str!("../.opencode/commands/tala.md"),
+            TALA_SKILL_MIN_VERSION,
+            env!("CARGO_PKG_VERSION"),
+        )?;
+        for (path, contents) in [
+            (
+                opencode_dir.join("skills").join("tala").join("SKILL.md"),
+                skill,
+            ),
+            (opencode_dir.join("commands").join("tala.md"), command),
+        ] {
+            files.push(
+                plan_integration_file(&path, contents, dry_run, force, &mut warnings, &mut writes)
+                    .await?,
+            );
+        }
+    }
+
+    let gitignore_report = plan_gitignore(gitignore, dry_run, &mut warnings, &mut writes).await?;
+
+    Ok(InitPlan {
+        report: InitReport {
+            config,
+            files,
+            gitignore: gitignore_report,
+            warnings,
+            dry_run,
+        },
+        writes,
+    })
+}
+
+fn default_project_name(root: &Path) -> String {
+    root.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".to_string())
+}
+
+async fn path_exists(path: &Path) -> anyhow::Result<bool> {
+    match tokio::fs::metadata(path).await {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn read_optional_file(path: &Path) -> anyhow::Result<Option<String>> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn plan_integration_file(
+    path: &Path,
+    contents: String,
+    dry_run: bool,
+    force: bool,
+    warnings: &mut Vec<String>,
+    writes: &mut Vec<PlannedWrite>,
+) -> anyhow::Result<InitPathReport> {
+    let existing = read_optional_file(path).await?;
+    let (action, should_write) = match existing {
+        None => (
+            if dry_run {
+                InitAction::WouldCreate
+            } else {
+                InitAction::Created
+            },
+            true,
+        ),
+        Some(existing) if existing == contents => (
+            if dry_run {
+                InitAction::WouldUnchanged
+            } else {
+                InitAction::Unchanged
+            },
+            false,
+        ),
+        Some(_) if force => (
+            if dry_run {
+                InitAction::WouldOverwrite
+            } else {
+                InitAction::Overwritten
+            },
+            true,
+        ),
+        Some(_) => (
+            if dry_run {
+                InitAction::WouldSkip
+            } else {
+                InitAction::Skipped
+            },
+            false,
+        ),
+    };
+
+    if matches!(action, InitAction::Skipped | InitAction::WouldSkip) {
+        warnings.push(format!(
+            "skipped {} because it differs; use `tala init --force` to overwrite it",
+            path.display()
+        ));
+    }
+    if should_write && !dry_run {
+        writes.push(PlannedWrite {
+            path: path.to_path_buf(),
+            contents,
+        });
+    }
+    Ok(InitPathReport {
+        path: Some(path.display().to_string()),
+        action,
+    })
+}
+
+async fn plan_gitignore(
+    requested: bool,
+    dry_run: bool,
+    warnings: &mut Vec<String>,
+    writes: &mut Vec<PlannedWrite>,
+) -> anyhow::Result<InitPathReport> {
+    if !requested {
+        return Ok(InitPathReport {
+            path: None,
+            action: InitAction::NotRequested,
+        });
+    }
+
+    let Some(root) = git_repository_root() else {
+        let warning = "--gitignore requested, but no Git repository root was found".to_string();
+        warnings.push(warning);
+        return Ok(InitPathReport {
+            path: None,
+            action: InitAction::Unavailable,
+        });
+    };
+    let path = root.join(".gitignore");
+    let existing = read_optional_file(&path).await?.unwrap_or_default();
+    if has_tala_ignore_rule(&existing) {
+        return Ok(InitPathReport {
+            path: Some(path.display().to_string()),
+            action: InitAction::Present,
+        });
+    }
+
+    let contents = append_tala_ignore_rule(&existing);
+    if !dry_run {
+        writes.push(PlannedWrite {
+            path: path.clone(),
+            contents,
+        });
+    }
+    Ok(InitPathReport {
+        path: Some(path.display().to_string()),
+        action: if dry_run {
+            InitAction::WouldAdd
+        } else {
+            InitAction::Added
+        },
+    })
+}
+
+fn git_repository_root() -> Option<PathBuf> {
+    let output = process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!root.is_empty()).then(|| PathBuf::from(root))
+}
+
+fn has_tala_ignore_rule(contents: &str) -> bool {
+    contents
+        .lines()
+        .map(str::trim)
+        .any(|line| !line.starts_with('#') && matches!(line, "/.tala/" | ".tala/" | "**/.tala/"))
+}
+
+fn append_tala_ignore_rule(contents: &str) -> String {
+    let mut updated = contents.to_string();
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str("/.tala/\n");
+    updated
+}
+
+async fn apply_init_plan(plan: &InitPlan) -> anyhow::Result<()> {
+    for write in &plan.writes {
+        if let Some(parent) = write.path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        write_file_atomically(&write.path, &write.contents).await?;
+    }
+    Ok(())
+}
+
+fn print_init_report(report: &InitReport) {
+    println!(
+        "{}: {}",
+        report.config.path.as_deref().unwrap_or(".tala/config.json"),
+        report.config.action.label()
+    );
+    for file in &report.files {
+        println!(
+            "{}: {}",
+            file.path.as_deref().unwrap_or("<unknown>"),
+            file.action.label()
+        );
+    }
+    if report.gitignore.action != InitAction::NotRequested {
+        println!(
+            "{}: {}",
+            report.gitignore.path.as_deref().unwrap_or(".gitignore"),
+            report.gitignore.action.label()
+        );
+    }
+    if report.dry_run {
+        println!("dry-run: no files changed");
+    }
 }
 
 async fn write_documents_atomically(
@@ -1436,35 +1713,6 @@ async fn write_documents_atomically_impl(
     result
 }
 
-fn temporary_path(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .map(|name| name.to_string_lossy())
-        .unwrap_or_else(|| std::borrow::Cow::Borrowed("integration"));
-    path.with_file_name(format!(".{}.{}.tmp", file_name, uuid::Uuid::new_v4()))
-}
-
-fn backup_path(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .map(|name| name.to_string_lossy())
-        .unwrap_or_else(|| std::borrow::Cow::Borrowed("integration"));
-    path.with_file_name(format!(".{}.{}.bak", file_name, uuid::Uuid::new_v4()))
-}
-
-async fn backup_existing_file(path: &Path, backup: &Path) -> anyhow::Result<()> {
-    if path.exists() {
-        tokio::fs::rename(path, backup).await?;
-    }
-    Ok(())
-}
-
-async fn restore_backup(path: &Path, backup: &Path) {
-    if backup.exists() {
-        let _ = tokio::fs::rename(backup, path).await;
-    }
-}
-
 async fn write_file_atomically(path: &Path, contents: &str) -> anyhow::Result<()> {
     let parent = path
         .parent()
@@ -1486,6 +1734,23 @@ async fn write_file_atomically(path: &Path, contents: &str) -> anyhow::Result<()
         let _ = tokio::fs::remove_file(&temporary_path).await;
     }
     result
+}
+
+async fn install_rendered_documents(
+    skill_path: &Path,
+    command_path: &Path,
+    skill_template: &str,
+    command_template: &str,
+    min_version: &str,
+    generated_version: &str,
+) -> anyhow::Result<()> {
+    let (skill, command) = render_integration_documents(
+        skill_template,
+        command_template,
+        min_version,
+        generated_version,
+    )?;
+    write_documents_atomically(skill_path, &skill, command_path, &command).await
 }
 
 async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> anyhow::Result<()> {
@@ -1648,6 +1913,17 @@ async fn cmd_use(session_id: Option<String>, clear: bool, json_output: bool) -> 
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Counts open (not-closed) sessions — used by the cycle-19 ambiguity guard.
+async fn session_count_open(host: &str, port: u16) -> usize {
+    let url = daemon_url(host, port, "/api/sessions");
+    if let Ok(resp) = reqwest::get(&url).await {
+        if let Ok(sessions) = resp.json::<Vec<SessionSummary>>().await {
+            return sessions.iter().filter(|s| !s.closed).count();
+        }
+    }
+    1
+}
+
 async fn auto_create_session(
     host: &str,
     port: u16,
@@ -1725,6 +2001,7 @@ async fn cmd_send(
     intent_arg: Option<&str>,
     reply_to: Option<u64>,
     expect_reply: bool,
+    session_name: Option<String>,
 ) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
 
@@ -1819,14 +2096,26 @@ async fn cmd_send(
         vec![Part::Text { content }]
     };
 
-    // Resolve session: explicit (id or name, B035), active, stale-replace, or auto-create
+    // Resolve session: explicit (id or name, B035), --name (new named
+    // session), active, stale-replace, or auto-create
     let session_id = if let Some(id) = session_arg.clone() {
+        if session_name.is_some() {
+            fail(
+                json_output,
+                "--name creates a new session; it cannot be combined with an explicit session target",
+                "INVALID_SESSION_NAME",
+            );
+        }
         // Explicit ref: resolve name/prefix to an id; error loudly if it does
         // not match anything (never silently fall back to the active session).
         match resolve_session_ref(&host, port, &id, "send").await {
             Ok(sid) => sid,
             Err(e) => fail(json_output, e.to_string(), "SESSION_NOT_FOUND"),
         }
+    } else if let Some(name) = session_name {
+        // Golden path (cycle-19): one-command named start — create the
+        // session with the given name, send there, set it active.
+        auto_create_session(&host, port, sender_override, quiet, json_output, Some(name)).await?
     } else if let Some(id) = store::read_active_session().await {
         // Validate active session still exists and is open
         let check_url = daemon_url(&host, port, &format!("/api/sessions/{}", id));
@@ -1841,6 +2130,17 @@ async fn cmd_send(
                         id, id
                     );
                     fail(json_output, &msg, "SESSION_CLOSED");
+                }
+                // Cycle-19 guard: warn when the active session is an ambiguous
+                // choice (multiple open sessions, no explicit target).
+                if !quiet {
+                    let warn = session_count_open(&host, port).await;
+                    if warn > 1 {
+                        eprintln!(
+                            "warning: targeting active session {} ({} open sessions) — use -s <id> or `tala use` to be explicit",
+                            id, warn
+                        );
+                    }
                 }
                 id
             }
@@ -2003,11 +2303,17 @@ async fn send_content(
     } else {
         Intent::Fyi
     };
+    // B040: a reply that is not correlated to anything defeats the intent model.
+    if intent == Intent::Reply && reply_to.is_none() {
+        eprintln!(
+            "warning: --intent reply without --reply-to — this reply is not correlated to a message"
+        );
+    }
     let expect_reply = expect_reply || (reply_to.is_some() && should_wait && intent_arg.is_none());
     if expect_reply && matches!(intent, Intent::Req | Intent::Out) {
         fail(
             json_output,
-            "--expect-reply is only valid with intent reply or fyi",
+            "--expect-reply is only valid with intent reply or fyi; `--intent req` (or `--wait`) already expects a reply",
             "INVALID_INTENT",
         );
     }
@@ -2278,6 +2584,11 @@ async fn cmd_wait(
     let config = store::read_user_config().await;
     let default_timeout = config["default_timeout"].as_u64().unwrap_or(60);
     let wait_timeout = timeout_secs.unwrap_or(default_timeout);
+    let timeout_label = if wait_timeout == 0 {
+        "no timeout".to_string()
+    } else {
+        format!("{}s", wait_timeout)
+    };
 
     // B021: identify the reader so the daemon records read receipts.
     let sender_param = format!(
@@ -2298,20 +2609,58 @@ async fn cmd_wait(
         None => None,
     };
 
+    // Cycle-19 guard: warn once when a bare wait targets the active session
+    // while several sessions are open (ambiguous without -s).
+    if session_arg.is_none() && store::read_active_session().await.is_some() && !json_output {
+        let open = session_count_open(&host, port).await;
+        if open > 1 {
+            eprintln!(
+                "warning: waiting on active session ({} open sessions) — use -s <id> to target a specific session",
+                open
+            );
+        }
+    }
+
+    // Plateau: a stale active session must not produce a bare SESSION_NOT_FOUND
+    // (beta, plateau eval). Validate once; on missing/closed, clear it and fall
+    // through to the no-active path, which waits for a new session.
+    if session_arg.is_none() {
+        if let Some(id) = store::read_active_session().await {
+            let check_url = daemon_url(&host, port, &format!("/api/sessions/{}", id));
+            let valid = match client.get(&check_url).send().await {
+                Ok(r) if r.status().is_success() => r
+                    .json::<Session>()
+                    .await
+                    .map(|s| !s.closed)
+                    .unwrap_or(false),
+                _ => false,
+            };
+            if !valid {
+                store::clear_active_session().await?;
+                if !json_output {
+                    eprintln!(
+                        "Active session {} is gone or closed — cleared. Use `tala use --clear` or target explicitly with -s <id>.",
+                        id
+                    );
+                }
+            }
+        }
+    }
+
     loop {
         let sid = if let Some(id) = session_arg.clone() {
             if !json_output {
                 eprintln!(
-                    "Waiting for messages in session {} (timeout: {}s)...",
-                    id, wait_timeout
+                    "Waiting for messages in session {} (timeout: {})...",
+                    id, timeout_label
                 );
             }
             id
         } else if let Some(id) = store::read_active_session().await {
             if !json_output {
                 eprintln!(
-                    "Waiting for messages in session {} (timeout: {}s)...",
-                    id, wait_timeout
+                    "Waiting for messages in session {} (timeout: {})...",
+                    id, timeout_label
                 );
             }
             id
@@ -2325,8 +2674,8 @@ async fn cmd_wait(
                 0 => {
                     if !json_output {
                         eprintln!(
-                            "No active sessions. Waiting for a new session (timeout: {}s)...",
-                            wait_timeout
+                            "No active sessions. Waiting for a new session (timeout: {})...",
+                            timeout_label
                         );
                     }
                     let sender = store::read_project_config()
@@ -2376,8 +2725,8 @@ async fn cmd_wait(
                     let sid_val = active[0].id.clone();
                     if !json_output {
                         eprintln!(
-                            "Waiting for new messages in session {} (timeout: {}s)...",
-                            sid_val, wait_timeout
+                            "Waiting for new messages in session {} (timeout: {})...",
+                            sid_val, timeout_label
                         );
                     }
                     sid_val
@@ -2544,8 +2893,9 @@ async fn cmd_listen(
     if let Some(ref n) = name {
         path = format!("{}&channel={}", path, n);
     }
-    // Default timeout to 60s if not specified, unless explicitly set to 0
-    let timeout_secs = timeout.filter(|&t| t != 0).or(Some(60u64));
+    // Default timeout to 60s if not specified; --timeout 0 = indefinite
+    // (B046: the old filter turned Some(0) into 60 — 0 must pass through).
+    let timeout_secs = timeout.or(Some(60u64));
     if let Some(t) = timeout_secs {
         path = format!("{}&timeout_secs={}", path, t);
     }
@@ -2561,16 +2911,22 @@ async fn cmd_listen(
 
     // B007: visible connection status. Text banner goes to stdout (matches the
     // "Waiting for a new session…" convention in wait); in --json mode it goes
-    // to stderr so stdout stays a pure JSON event stream.
+    // to stderr so stdout stays a pure JSON event stream. B046b: the since
+    // label must be truthful — cursor mode replays from last-read, not id 0.
+    let since_label = if since.is_none() {
+        "from last-read cursors".to_string()
+    } else {
+        format!("since id {}", since_id)
+    };
     if json_output {
         eprintln!(
-            "[listen] connected to tala daemon at {}:{} (since id {})",
-            host, port, since_id
+            "[listen] connected to tala daemon at {}:{} ({})",
+            host, port, since_label
         );
     } else {
         println!(
-            "Listening on tala daemon at {}:{} (all sessions, since id {})...",
-            host, port, since_id
+            "Listening on tala daemon at {}:{} (all sessions, {})...",
+            host, port, since_label
         );
     }
 
@@ -2579,6 +2935,7 @@ async fn cmd_listen(
     let mut message_count: u64 = 0;
     let mut max_by_session: HashMap<String, u64> = HashMap::new();
     let mut messages_by_session: HashMap<String, Vec<Message>> = HashMap::new();
+    let mut timed_out = false;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -2600,6 +2957,44 @@ async fn cmd_listen(
             if let Ok(ref evt) = evt {
                 if evt.r#type == "message" {
                     message_count += 1;
+                }
+            }
+
+            // B046: advance the per-session cursor as messages are delivered
+            // (both modes), so check agrees and a killed/reconnected listener
+            // never replays. Explicit --since is replay mode — leave cursors
+            // untouched there.
+            if let Ok(ref evt) = evt {
+                if evt.r#type == "message" {
+                    if let Some(msg) = &evt.message {
+                        if since.is_none() {
+                            let _ = store::write_cursor(&evt.session_id, msg.id).await;
+                        }
+                    }
+                }
+            }
+
+            // B046: a lagged broadcast warns instead of dropping silently.
+            if data.contains("\"overload\"") {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
+                    let skipped = v["skipped"].as_u64().unwrap_or(0);
+                    eprintln!(
+                        "warning: missed {} message(s) (daemon overload) — run `tala check` to catch up",
+                        skipped
+                    );
+                }
+                continue;
+            }
+
+            // Plateau: benign timeout is exit 3, matching the wait family
+            // (the daemon emits a terminal timeout event before closing).
+            if data.contains("\"timeout\"") {
+                timed_out = true;
+                if !json_output {
+                    eprintln!(
+                        "[listen] timed out after {}s — no new messages",
+                        timeout_secs.unwrap_or(60)
+                    );
                 }
             }
 
@@ -2653,6 +3048,12 @@ async fn cmd_listen(
         if *mid > store::read_cursor(sid).await {
             let _ = store::write_cursor(sid, *mid).await;
         }
+    }
+
+    // Plateau: benign timeout exits 3 ONLY when nothing was received
+    // (family contract: 0 = messages received; 3 = timed out empty).
+    if timed_out && message_count == 0 {
+        process::exit(EXIT_TIMEOUT);
     }
 
     Ok(())
@@ -2804,16 +3205,25 @@ async fn cmd_pending(json_output: bool) -> anyhow::Result<()> {
             );
             let mins = o.elapsed_seconds / 60;
             let secs = o.elapsed_seconds % 60;
+            // The actionable hint depends on who owes whom: my own unanswered
+            // request is owed BY the recipient; someone else's is owed BY me.
+            let hint = if o.sender == store::get_sender_name(None) {
+                format!("awaiting reply from {}", o.sender)
+            } else {
+                format!(
+                    "answer with `tala send --session {} --reply-to {}`",
+                    o.session_id, o.message_id
+                )
+            };
             println!(
-                "      unanswered for {}{} — answer with `tala send --session {} --reply-to {}`",
+                "      unanswered for {}{} — {}",
                 if mins > 0 {
                     format!("{}m ", mins)
                 } else {
                     String::new()
                 },
                 secs,
-                o.session_id,
-                o.message_id
+                hint
             );
         }
     }
@@ -3179,46 +3589,6 @@ async fn cmd_close(
     Ok(())
 }
 
-async fn cmd_session_show(session_id: String, json_output: bool) -> anyhow::Result<()> {
-    let (host, port) = ensure_daemon_running().await?;
-    let session_id = resolve_session_ref(&host, port, &session_id, "show")
-        .await
-        .unwrap_or_else(|e| fail(json_output, e.to_string(), "SESSION_NOT_FOUND"));
-
-    let client = reqwest::Client::new();
-    let url = daemon_url(&host, port, &format!("/api/sessions/{}", session_id));
-    let resp = client.get(&url).send().await?;
-
-    if !resp.status().is_success() {
-        let err: ErrorResponse = resp.json().await?;
-        fail(json_output, &err.error, "SESSION_NOT_FOUND");
-    }
-
-    let session: Session = resp.json().await?;
-
-    if json_output {
-        println!("{}", serde_json::to_string(&session).unwrap());
-    } else {
-        println!("Session: {}", session.id);
-        if let Some(ref n) = session.name {
-            println!("  Name: {}", n);
-        }
-        println!(
-            "  Created: {}",
-            session.created_at.format("%Y-%m-%d %H:%M:%S")
-        );
-        println!(
-            "  Last activity: {}",
-            session.last_activity.format("%Y-%m-%d %H:%M:%S")
-        );
-        println!(
-            "  Status: {}",
-            if session.closed { "closed" } else { "open" }
-        );
-    }
-    Ok(())
-}
-
 async fn cmd_session_rename(
     session_id: String,
     name: String,
@@ -3290,15 +3660,25 @@ async fn cmd_session_reopen(session_id: String, json_output: bool) -> anyhow::Re
 
 async fn cmd_session_create(session_name: Option<String>, json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
-    auto_create_session(&host, port, None, false, json_output, session_name).await?;
+    // B039: --json success must emit a typed document, never silence.
+    let id = auto_create_session(&host, port, None, false, json_output, session_name).await?;
+    if json_output {
+        println!("{}", serde_json::json!({"session_id": id}));
+    }
     Ok(())
 }
 
 async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::Result<()> {
     let (host, port) = ensure_daemon_running().await?;
+    // B048: --timeout 0 = wait indefinitely (same semantics as listen).
     let timeout = timeout_secs.unwrap_or(60);
+    let label = if timeout == 0 {
+        "no timeout".to_string()
+    } else {
+        format!("{}s", timeout)
+    };
     if !json_output {
-        eprintln!("Waiting for a new session (timeout: {}s)...", timeout);
+        eprintln!("Waiting for a new session (timeout: {})...", label);
     }
     let _ = print_unread_hint(&host, port).await;
     // B003: identify ourselves so the daemon only delivers sessions with an
@@ -3329,7 +3709,14 @@ async fn cmd_wait_new(timeout_secs: Option<u64>, json_output: bool) -> anyhow::R
     if json_output {
         println!("{}", serde_json::to_string(&result).unwrap());
     } else if let Some(sid) = result.get("session_id").and_then(|v| v.as_str()) {
+        // B041: stdout stays the bare id (agents capture it via $(tala wait --new-session));
+        // the session name is context, so it goes to stderr.
         println!("{}", sid);
+        if let Some(name) = result.get("name").and_then(|v| v.as_str()) {
+            if !name.is_empty() {
+                eprintln!("session: {}", name);
+            }
+        }
     } else if result.get("timeout") == Some(&serde_json::json!(true)) {
         eprintln!(
             "timeout after {}s, no new session",
@@ -4038,7 +4425,14 @@ mod tests {
     #[test]
     fn integration_status_classifies_current_stale_and_incompatible_documents() {
         let current = tempfile::tempdir().unwrap();
-        write_integration_pair(current.path(), "0.28.0", "0.28.0", "0.27.3", "0.27.3");
+        let current_version = env!("CARGO_PKG_VERSION");
+        write_integration_pair(
+            current.path(),
+            current_version,
+            current_version,
+            "0.27.3",
+            "0.27.3",
+        );
         assert_eq!(
             inspect_project_integration(current.path()).status,
             IntegrationStatus::Current
@@ -4052,14 +4446,26 @@ mod tests {
         );
 
         let incompatible = tempfile::tempdir().unwrap();
-        write_integration_pair(incompatible.path(), "0.29.0", "0.29.0", "0.27.3", "0.27.3");
+        write_integration_pair(
+            incompatible.path(),
+            "999.0.0",
+            "999.0.0",
+            "0.27.3",
+            "0.27.3",
+        );
         assert_eq!(
             inspect_project_integration(incompatible.path()).status,
             IntegrationStatus::Incompatible
         );
 
         let below_minimum = tempfile::tempdir().unwrap();
-        write_integration_pair(below_minimum.path(), "0.30.0", "0.30.0", "0.29.0", "0.29.0");
+        write_integration_pair(
+            below_minimum.path(),
+            "999.0.0",
+            "999.0.0",
+            "999.0.0",
+            "999.0.0",
+        );
         let below_minimum_check = inspect_project_integration(below_minimum.path());
         assert_eq!(below_minimum_check.status, IntegrationStatus::Incompatible);
         assert!(below_minimum_check

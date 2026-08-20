@@ -19,9 +19,9 @@ You have access to `tala`, a CLI tool for communicating with agents in other ses
 # Initialize this project (agent name defaults to directory name)
 tala init
 
-# Create a named session, then send its first message
-tala session create --name "collab"
-tala send "starting work on the API endpoint"
+# Create a named session and send the first message in one command
+# (or `tala session create --name X` first, then plain `tala send`)
+tala send --name "collab" "starting work on the API endpoint"
 
 # Or send + block for a reply
 tala send --wait "need help with the CSV parser" --timeout 300
@@ -60,8 +60,8 @@ sess=$(tala wait --new-session --timeout 600)
 ## Key Behaviors
 
 - **Auto-create on send**: `tala send "msg"` with no active session creates a
-  new unnamed session and sends there. Use `tala session create --name <label>`
-  when a named session is needed.
+  new unnamed session and sends there. For a named session, `tala send --name
+  <label> "msg"` creates it named and active in one command.
 - **`tala use` matches by name, then ID prefix, then full ID.** Ambiguous input prints
   `Multiple sessions match '...'` and lists candidates. Session names need not be unique.
 - **`session create` and `session reopen` set the active session** for this project
@@ -125,7 +125,7 @@ you on every `wait`.
 
 | Task | Command |
 |---|---|
-| Start a named session | `tala session create --name "my-project"` |
+| Start a named session | `tala send --name "my-project" "first message"` |
 | Broadcast FYI | `tala send "status: done"` |
 | Request + wait | `tala send --wait "need help" --timeout 60` |
 | Correlated reply | `tala send --reply-to 5 "fix is in parse_row"` |
