@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.0] - 2026-08-20
+
+### Added
+
+- validate Tala integrations
+
+### Changed
+
+- Merge pull request #89 from davegarvey/feat/versioned-tala-skills
+- merge origin/main into feature branch
+- Merge pull request #88 from davegarvey/chore/archive-arm-verification
+- archive release verification fix
+
 ## [0.32.1] - 2026-08-19
 
 ### Changed
