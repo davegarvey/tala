@@ -38,10 +38,11 @@ project/CWD. Inbox consumption acknowledges receipt; history and board do not.
 All feature work follows the OpenSpec change workflow in `openspec/` (see
 `.opencode/skills/openspec-*` and `.opencode/commands/opsx-*`):
 
-1. **Create** a change (`openspec-new-change`): proposal → delta specs → design → tasks.
-2. **Implement** the change, checking off tasks as they land.
+1. **Propose** a change (`openspec-propose` / `/opsx-propose`): proposal → delta specs → design → tasks.
+2. **Implement** the change (`openspec-apply-change` / `/opsx-apply`), checking off tasks as they land.
+   Use `openspec-update-change` / `/opsx-update` to revise existing planning artifacts.
 3. **Sync** the change's delta specs into main specs (`openspec-sync-specs`), then
-   **archive** it (`openspec-archive-change` / `openspec-bulk-archive-change`) to
+   **archive** it (`openspec-archive-change` / `/opsx-archive`) to
    `openspec/changes/archive/YYYY-MM-DD-<name>/`. Never archive without syncing first,
    unless the change is superseded (document why).
 4. Do the sync and archive on the feature branch, in the same PR as the implementation,
