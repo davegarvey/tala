@@ -1,12 +1,4 @@
 ---
-description: Run a tala evaluation scenario with real agents to gather feedback and improve the product.
+description: Evaluate Tala's agent-facing CLI with manually coordinated agents.
 ---
-Run a tala eval scenario. Read `eval/README.md` for the orchestration steps and guardrails, and `eval/scenarios/<name>.md` for the specific scenario (setup commands, seed files, agent prompts, metrics, baseline).
-
-Choose the scenario by what you want to evaluate:
-
-- `cross-project` — general two-agent collaboration (send/wait/history/intents)
-- `intent-protocol` — intent metadata: `--intent`, `--reply-to`, `pending`
-- `wait-deadlock` — waiting visibility and deadlock prevention
-
-Important: this is a manually orchestrated eval — no autonomous loop, no commits, no PRs. Run the scenario in a scratch dir, collect feedback and transcripts, triage findings, then fold accepted findings into an OpenSpec change proposal for human review.
+Read eval/README.md and docs/agent-guide.md. Choose same-project, cross-project, or delivery-handoff from eval/scenarios/, or design a focused scenario around the behavior under review. Use an explicit verified binary, isolated TALA_HOME, and distinct agent IDs even in one checkout. Keep communication CLI-only; record commands, messages, latency, help lookups, errors and storage bypasses. Collect feedback and inspect transcripts before stopping the daemon. No autonomous loop, commits, PRs or merges from the evaluation. Review findings and reflect accepted changes in OpenSpec.

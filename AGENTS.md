@@ -27,10 +27,11 @@ the version from them, and non-conventional messages silently skip releases.
 ## Wire protocol
 
 The CLI↔daemon wire protocol has a `PROTOCOL_VERSION` (`src/models.rs`). Bump
-it on any incompatible wire change (new required request fields, changed
-message shapes); the CLI refuses commands against a mismatched daemon and
-read-only commands warn. `--json` output keeps the legacy `content` field on
-messages alongside `parts` for older clients.
+it on incompatible wire changes. Protocol 2 uses addressed agents, global message
+IDs, typed parts and transactional SQLite storage; it has no legacy `content`
+field or session aliases. Never silently import legacy identities or transcripts.
+Agents select identity explicitly with TALA_AGENT or --agent, independently of
+project/CWD. Inbox consumption acknowledges receipt; history and board do not.
 
 ## OpenSpec workflow
 

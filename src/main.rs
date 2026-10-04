@@ -1,50 +1,77 @@
-use clap::{error::ErrorKind, Parser};
-use tracing_subscriber::EnvFilter;
-
+use clap::Parser;
+use models::{Envelope, Failure};
 mod api;
 mod cli;
+mod client;
 mod daemon;
+mod integration;
 mod models;
 mod store;
-
-/// Rust ignores SIGPIPE by default, so printing to a closed pipe panics with
-/// "failed printing to stdout: Broken pipe" (B038). For an agent CLI that is
-/// routinely piped into `head`/`grep -m1`, restore the Unix default: die
-/// quietly on SIGPIPE like every other command-line tool.
-#[cfg(unix)]
-fn reset_sigpipe() {
+#[tokio::main]
+async fn main() {
+    #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-}
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    #[cfg(unix)]
-    reset_sigpipe();
-
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::builder()
-                .with_default_directive("tala=info".parse().unwrap())
-                .from_env_lossy(),
-        )
-        .with_target(false)
-        .init();
-
+    let json = std::env::args()
+        .take_while(|a| a != "--")
+        .any(|a| a == "--json" || a == "-j");
     let cli = match cli::Cli::try_parse() {
-        Ok(cli) => cli,
-        Err(error) => {
-            if error.kind() == ErrorKind::InvalidSubcommand {
-                if let Some(warning) = cli::unknown_command_integration_hint() {
-                    eprintln!("{}", warning);
-                    eprintln!(
-                        "hint: run `tala --help` to inspect the installed command surface, or `tala init --refresh` to update this project's integration"
-                    );
-                }
+        Ok(c) => c,
+        Err(e) => {
+            if matches!(
+                e.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
+                let _ = e.print();
+                return;
             }
-            error.exit();
+            if json {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&Envelope::failure(Failure::new(
+                        "USAGE_ERROR",
+                        e.to_string(),
+                        "Run tala <command> --help."
+                    )))
+                    .expect("error serializes")
+                );
+            } else {
+                let _ = e.print();
+            }
+            std::process::exit(2);
         }
     };
-    cli::run(cli).await
+    let json = cli.json;
+    let is_daemon = matches!(cli.command, cli::Commands::Daemon);
+    match cli::run(cli).await {
+        Ok(result) => {
+            if !is_daemon {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&Envelope::success(result.data))
+                            .expect("output serializes")
+                    );
+                } else {
+                    cli::render(&result.data);
+                }
+            }
+            if result.code != 0 {
+                std::process::exit(result.code);
+            }
+        }
+        Err(error) => {
+            let code = if error.code == "USAGE_ERROR" { 2 } else { 1 };
+            if json {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&Envelope::failure(error)).expect("error serializes")
+                );
+            } else {
+                eprintln!("Error: {}\n{}", error.message, error.hint);
+            }
+            std::process::exit(code);
+        }
+    }
 }
