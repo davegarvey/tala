@@ -7,3 +7,5 @@ Real-agent usability: see eval/reports/2026-10-04-agent-interface.md. Two runtim
 Sync: five replacement capabilities added; every requirement in the eighteen superseded session-oriented capabilities explicitly removed through delta specs. Empty superseded capability directories removed. Installation contract preserved. Main specs validated before archive.
 
 Upgrade: breaking protocol 2 and SQLite schema 1; old JSON and project identity/cursor files are left intact with no guessed import. Stop an old daemon with its matching binary first. This feature branch is for review; no production install or merge is part of verification.
+
+Windows CI initially hung when captured CLI output stayed open in the daemon. Daemon startup now clears inheritance on the CLI standard handles and starts a detached Windows process. CI jobs have a ten-minute bound; the normal parallel test run remains enabled.

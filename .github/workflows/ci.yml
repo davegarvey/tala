@@ -36,27 +36,8 @@ jobs:
     - name: Run clippy
       run: cargo clippy --all-targets -- -D warnings
 
-    - name: Diagnose Windows daemon startup
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        cargo build
-        $env:TALA_HOME = Join-Path $env:RUNNER_TEMP "tala-smoke"
-        $p = Start-Process target/debug/tala.exe -ArgumentList '--json register --name=smoke --tool=ci' -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP/tala-out.txt" -RedirectStandardError "$env:RUNNER_TEMP/tala-err.txt"
-        if (-not $p.WaitForExit(15000)) {
-          Get-Content "$env:RUNNER_TEMP/tala-out.txt", "$env:RUNNER_TEMP/tala-err.txt" -ErrorAction SilentlyContinue
-          Get-Content "$env:TALA_HOME/daemon.log" -ErrorAction SilentlyContinue
-          Get-CimInstance Win32_Process -Filter "name = 'tala.exe'" | Select-Object ProcessId, ParentProcessId, CommandLine | Format-List
-          Stop-Process -Id $p.Id -Force
-          throw 'Registration hung'
-        }
-        Get-Content "$env:RUNNER_TEMP/tala-out.txt", "$env:RUNNER_TEMP/tala-err.txt"
-        if ($p.ExitCode -ne 0) { throw 'Registration failed' }
-        target/debug/tala.exe stop
-        Remove-Item Env:TALA_HOME
-
     - name: Run tests
-      run: cargo test --verbose -- --test-threads=1 --nocapture
+      run: cargo test --verbose
 
     - name: Build
       run: cargo build --release
