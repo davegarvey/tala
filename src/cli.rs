@@ -286,8 +286,12 @@ pub fn context(path: Option<&Path>) -> Result<Context> {
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .map(|s| s.trim().into())
     };
-    let project =
-        git(&["rev-parse", "--show-toplevel"]).unwrap_or_else(|| dir.display().to_string());
+    let project = match git(&["rev-parse", "--show-toplevel"]) {
+        Some(root) => std::fs::canonicalize(root)?,
+        None => dir.clone(),
+    }
+    .display()
+    .to_string();
     Ok(Context {
         project,
         branch: git(&["symbolic-ref", "--short", "HEAD"]),
