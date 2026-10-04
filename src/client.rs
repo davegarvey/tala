@@ -60,7 +60,17 @@ pub async fn ensure() -> Result<DaemonInfo> {
         options.mode(0o600);
     }
     let log = options.open(store::home().join("daemon.log"))?;
-    Command::new(std::env::current_exe()?)
+    // Windows inherits every inheritable handle, including the CLI's capture
+    // pipes. A long-lived daemon must not keep those pipes open after CLI exit.
+    #[cfg(windows)]
+    clear_standard_handle_inheritance()?;
+    let mut command = Command::new(std::env::current_exe()?);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x00000008 | 0x00000200); // Detached, new process group.
+    }
+    command
         .arg("daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -176,4 +186,27 @@ pub async fn existing(op: Operation) -> Result<Option<Value>> {
         return Err(response.error.unwrap_or_else(|| network("Missing error")));
     }
     Ok(response.data)
+}
+
+#[cfg(windows)]
+fn clear_standard_handle_inheritance() -> std::io::Result<()> {
+    use std::{ffi::c_void, os::windows::io::AsRawHandle};
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetHandleInformation(handle: *mut c_void, mask: u32, flags: u32) -> i32;
+    }
+    for handle in [
+        std::io::stdin().as_raw_handle(),
+        std::io::stdout().as_raw_handle(),
+        std::io::stderr().as_raw_handle(),
+    ] {
+        if !handle.is_null() && handle as isize != -1 {
+            // These are borrowed process handles; clearing inheritance does not
+            // close them or interfere with the CLI's own input/output.
+            if unsafe { SetHandleInformation(handle, 1, 0) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
 }
