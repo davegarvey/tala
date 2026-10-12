@@ -352,7 +352,16 @@ async fn identity_context(credential: &Credential) -> Result<Context> {
     let identity = client::call(Operation::Whoami, Some(credential.clone())).await?;
     let registered: Agent =
         serde_json::from_value(identity["agent"].clone()).map_err(|e| usage(e.to_string()))?;
-    context(Some(Path::new(&registered.context.project)))
+    // Rebuild from the registered worktree, not the project root: in a linked
+    // worktree the project is the main checkout, but messages must record the
+    // sender's own worktree, branch and revision.
+    let dir = registered
+        .context
+        .worktree
+        .as_deref()
+        .filter(|w| Path::new(w).is_dir())
+        .unwrap_or(&registered.context.project);
+    context(Some(Path::new(dir)))
 }
 /// Fills an empty send key with one derived from sender, routing and
 /// content, so an identical resend is recognised as a duplicate.
