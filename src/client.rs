@@ -57,12 +57,18 @@ fn classify(error: &reqwest::Error) -> Liveness {
     }
 }
 pub async fn probe(info: &DaemonInfo) -> Liveness {
-    // Windows retries a SYN to a closed port for about two seconds before
-    // reporting refusal, so connecting gets longer than reading: a refused
-    // port must classify as stale, a silent or paused daemon as unreachable.
+    // Classify the connection first. Windows retries a SYN to a closed port
+    // for about two seconds before reporting refusal, so connecting gets its
+    // own, longer limit: refusal means stale, anything else unreachable.
+    let connect = tokio::net::TcpStream::connect(("127.0.0.1", info.port));
+    match tokio::time::timeout(Duration::from_secs(5), connect).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => return Liveness::Stale,
+        Ok(Err(e)) => return Liveness::Unreachable(e.kind().to_string()),
+        Err(_) => return Liveness::Unreachable("connect timed out".into()),
+    }
     let client = match reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .read_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(2))
         .build()
     {
         Ok(c) => c,

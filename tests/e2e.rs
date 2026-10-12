@@ -684,9 +684,15 @@ fn incompatible_live_legacy_daemon_blocks_registration_without_new_storage() {
     )
     .unwrap();
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0; 2048];
-        let _ = stream.read(&mut request).unwrap();
+        // The CLI first opens a bare connection to classify the port; answer
+        // the first connection that sends a request.
+        let mut stream = loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 2048];
+            if stream.read(&mut request).unwrap_or(0) > 0 {
+                break stream;
+            }
+        };
         let body = "{\"pid\":42,\"protocol_version\":1}";
         write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
     });
@@ -713,9 +719,15 @@ fn status_reports_an_incompatible_daemon_instead_of_failing() {
     )
     .unwrap();
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0; 2048];
-        let _ = stream.read(&mut request).unwrap();
+        // The CLI first opens a bare connection to classify the port; answer
+        // the first connection that sends a request.
+        let mut stream = loop {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 2048];
+            if stream.read(&mut request).unwrap_or(0) > 0 {
+                break stream;
+            }
+        };
         let body = "{\"instance\":\"old\",\"protocol_version\":2}";
         write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
     });
