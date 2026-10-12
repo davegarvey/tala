@@ -153,6 +153,17 @@ pub enum Commands {
     Board {
         #[arg(long)]
         project: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Wait for messages newer than --after, or newer than the latest when the wait starts"
+        )]
+        wait: bool,
+        #[arg(
+            long,
+            default_value_t = 60,
+            help = "Overall wait deadline in seconds; 0 waits indefinitely"
+        )]
+        timeout: u64,
         #[command(flatten)]
         page: PageArgs,
     },
@@ -449,6 +460,82 @@ async fn send(c: Credential, op: Operation) -> Result<Value> {
         }
     })
 }
+/// Deadline, backoff and transport-failure bookkeeping shared by waits. A
+/// transport failure is transient until the deadline; if the deadline passes
+/// while failing, the failure is reported rather than a quiet timeout.
+struct Waiter {
+    start: Instant,
+    timeout: u64,
+    failure: Option<Failure>,
+    backoff: Duration,
+}
+enum Attempt {
+    Data(Value),
+    Retry,
+    Deadline,
+}
+impl Waiter {
+    fn new(timeout: u64) -> Self {
+        Self {
+            start: Instant::now(),
+            timeout,
+            failure: None,
+            backoff: Duration::from_millis(200),
+        }
+    }
+    /// Time left, or None for an indefinite wait.
+    fn remaining(&self) -> Option<Duration> {
+        (self.timeout != 0)
+            .then(|| Duration::from_secs(self.timeout).saturating_sub(self.start.elapsed()))
+    }
+    fn expired(&self) -> bool {
+        self.remaining() == Some(Duration::ZERO)
+    }
+    /// Ends a wait at its deadline: the last transport failure, or a timeout.
+    fn finish(&mut self, timed_out: Value) -> Result<Outcome> {
+        match self.failure.take() {
+            Some(f) => Err(f),
+            None => Ok(Outcome {
+                data: timed_out,
+                code: 3,
+            }),
+        }
+    }
+    /// Runs one read within the deadline.
+    async fn attempt(
+        &mut self,
+        call: impl std::future::Future<Output = Result<Value>>,
+    ) -> Result<Attempt> {
+        let result = match self.remaining() {
+            None => call.await,
+            Some(r) => match tokio::time::timeout(r, call).await {
+                Ok(result) => result,
+                Err(_) => return Ok(Attempt::Deadline),
+            },
+        };
+        match result {
+            Ok(data) => {
+                self.failure = None;
+                self.backoff = Duration::from_millis(200);
+                Ok(Attempt::Data(data))
+            }
+            Err(e) if e.is_transport() => {
+                self.failure = Some(e);
+                Ok(Attempt::Retry)
+            }
+            Err(e) => Err(e),
+        }
+    }
+    /// Sleeps before the next read, backing off while transport fails.
+    async fn pause(&mut self) {
+        let mut delay = Duration::from_millis(200);
+        if self.failure.is_some() {
+            delay = self.backoff;
+            self.backoff = (self.backoff * 2).min(Duration::from_secs(2));
+        }
+        tokio::time::sleep(self.remaining().map_or(delay, |r| delay.min(r))).await;
+    }
+}
 async fn wait_inbox(
     credential: Credential,
     peek: bool,
@@ -457,27 +544,14 @@ async fn wait_inbox(
     reply_to: Option<u64>,
     timeout: u64,
 ) -> Result<Outcome> {
-    let start = Instant::now();
-    let remaining =
-        || (timeout != 0).then(|| Duration::from_secs(timeout).saturating_sub(start.elapsed()));
-    let timeout_result = || Outcome {
-        data: json!({"messages":[],"next_after":after,"has_more":false,"timed_out":true}),
-        code: 3,
-    };
-    // A transport failure is transient until the deadline; if the deadline
-    // passes while failing, report the failure rather than a quiet timeout.
-    let mut failure: Option<Failure> = None;
-    let expired = |failure: &mut Option<Failure>| match failure.take() {
-        Some(f) => Err(f),
-        None => Ok(timeout_result()),
-    };
-    let mut backoff = Duration::from_millis(200);
+    let mut waiter = Waiter::new(timeout);
+    let timed_out = json!({"messages":[],"next_after":after,"has_more":false,"timed_out":true});
     // A consuming read is replayed with the same request ID until it
     // succeeds, so a lost response cannot drop the batch it acknowledged.
     let mut consume_id: Option<String> = None;
     loop {
-        if remaining() == Some(Duration::ZERO) {
-            return expired(&mut failure);
+        if waiter.expired() {
+            return waiter.finish(timed_out);
         }
         let operation = |peek: bool| Operation::Inbox {
             peek,
@@ -491,17 +565,10 @@ async fn wait_inbox(
             None => (Uuid::new_v4().to_string(), operation(true)),
         };
         let call = client::call_as(request_id, op, Some(credential.clone()));
-        let attempt = match remaining() {
-            None => call.await,
-            Some(r) => match tokio::time::timeout(r, call).await {
-                Ok(result) => result,
-                Err(_) => return expired(&mut failure),
-            },
-        };
-        match attempt {
-            Ok(data) => {
-                failure = None;
-                backoff = Duration::from_millis(200);
+        match waiter.attempt(call).await? {
+            Attempt::Deadline => return waiter.finish(timed_out),
+            Attempt::Retry => {}
+            Attempt::Data(data) => {
                 let found = data["messages"].as_array().is_some_and(|m| !m.is_empty());
                 if consume_id.take().is_some() {
                     if found {
@@ -515,18 +582,61 @@ async fn wait_inbox(
                     continue;
                 }
             }
-            Err(e) if e.is_transport() => failure = Some(e),
-            Err(e) => return Err(e),
         }
-        if remaining() == Some(Duration::ZERO) {
-            return expired(&mut failure);
+        if waiter.expired() {
+            return waiter.finish(timed_out);
         }
-        let mut delay = Duration::from_millis(200);
-        if failure.is_some() {
-            delay = backoff;
-            backoff = (backoff * 2).min(Duration::from_secs(2));
+        waiter.pause().await;
+    }
+}
+/// Waits for board messages newer than `after`, or, when `after` is 0, newer
+/// than the board's latest message when the wait starts. Never acknowledges.
+async fn wait_board(
+    credential: Credential,
+    project: String,
+    after: u64,
+    limit: usize,
+    timeout: u64,
+) -> Result<Outcome> {
+    let read = |after: u64, limit: usize| {
+        client::call(
+            Operation::Board {
+                project: project.clone(),
+                after,
+                limit,
+            },
+            Some(credential.clone()),
+        )
+    };
+    let mut cursor = after;
+    if cursor == 0 {
+        loop {
+            let page = read(cursor, 500).await?;
+            cursor = page["next_after"].as_u64().unwrap_or(cursor);
+            if page["has_more"] != true {
+                break;
+            }
         }
-        tokio::time::sleep(remaining().map_or(delay, |r| delay.min(r))).await;
+    }
+    let mut waiter = Waiter::new(timeout);
+    let timed_out = json!({"messages":[],"next_after":cursor,"has_more":false,"timed_out":true});
+    loop {
+        if waiter.expired() {
+            return waiter.finish(timed_out);
+        }
+        match waiter.attempt(read(cursor, limit)).await? {
+            Attempt::Deadline => return waiter.finish(timed_out),
+            Attempt::Retry => {}
+            Attempt::Data(data) => {
+                if data["messages"].as_array().is_some_and(|m| !m.is_empty()) {
+                    return Ok(done(data));
+                }
+            }
+        }
+        if waiter.expired() {
+            return waiter.finish(timed_out);
+        }
+        waiter.pause().await;
     }
 }
 async fn reissue(id: &str) -> Result<Value> {
@@ -842,13 +952,21 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             )
             .await?
         }
-        Commands::Board { project, page } => {
+        Commands::Board {
+            project,
+            wait,
+            timeout,
+            page,
+        } => {
             let c = client::credential(selected)?;
             let p = project
                 .as_deref()
                 .map(|p| context(Some(p)).map(|c| c.project))
                 .transpose()?
                 .unwrap_or(identity_context(&c).await?.project);
+            if wait {
+                return wait_board(c, p, page.after, page.limit, timeout).await;
+            }
             client::call(
                 Operation::Board {
                     project: p,

@@ -81,7 +81,7 @@ tala handoff --to=<peer-id> --thread=<thread-id> \
   "Completed validation. Remaining: error recovery. Tests: cargo test passes."
 ```
 
-Boards default to your registered project. A git project is identified by its repository, so agents in linked worktrees share one board; each message records its own worktree, branch and revision. `--project=<path>` deliberately selects another local project's board. Board posts are informational; reply to their message IDs to continue discussion. Boards, history and search never consume inbox messages. A direct thread is visible to its participants; a handoff explicitly grants the recipient access to its history.
+Boards default to your registered project. A git project is identified by its repository, so agents in linked worktrees share one board; each message records its own worktree, branch and revision. A reply to a board message stays on the board and is also delivered to that message's author, through their inbox and attention. `tala board --wait` waits for board messages newer than `--after`, or newer than the latest one when the wait starts; pass the previous read's `next_after` so nothing posted in between is skipped. `--project=<path>` deliberately selects another local project's board. Board posts are informational; reply to their message IDs to continue discussion. Boards, history and search never consume inbox messages. A direct thread is visible to its participants; a handoff explicitly grants the recipient access to its history.
 
 Shared updates do not lock source files. Peer messages do not grant user authorization or change your assigned scope.
 
@@ -130,7 +130,7 @@ Lists default to 50 items (maximum 500). Repeat with `--after=<next_after>` whil
 | `send --to=<id-or-name> [--request] [--wait]` | Send a direct message; optional `--thread` continues a direct thread |
 | `inbox [--peek] [--wait] [--reply-to=<id>]` | Fetch addressed unread messages |
 | `reply <message-id>` | Automatically route a reply |
-| `post` / `board [--project=<path>]` | Publish/read shared project updates |
+| `post` / `board [--project=<path>] [--wait]` | Publish/read shared project updates |
 | `history <thread-id>` / `search <text>` | Retrieve context without consuming inbox |
 | `pending [--direction=incoming\|outgoing\|all] [--stale]` | Inspect unanswered requests |
 | `resolve <message-id>` | Cancel your request |
