@@ -57,8 +57,12 @@ fn classify(error: &reqwest::Error) -> Liveness {
     }
 }
 pub async fn probe(info: &DaemonInfo) -> Liveness {
+    // Windows retries a SYN to a closed port for about two seconds before
+    // reporting refusal, so connecting gets longer than reading: a refused
+    // port must classify as stale, a silent or paused daemon as unreachable.
     let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+        .connect_timeout(Duration::from_secs(5))
+        .read_timeout(Duration::from_secs(2))
         .build()
     {
         Ok(c) => c,
