@@ -102,6 +102,8 @@ CREATE INDEX IF NOT EXISTS incoming_requests ON messages(recipient,expects_reply
 CREATE INDEX IF NOT EXISTS outgoing_requests ON messages(sender,expects_reply,answered_by);
 CREATE TABLE IF NOT EXISTS rpc_results(request_id TEXT PRIMARY KEY, canonical TEXT NOT NULL, response TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS participants(thread TEXT NOT NULL, agent TEXT NOT NULL REFERENCES agents(id), PRIMARY KEY(thread,agent));
+CREATE TABLE IF NOT EXISTS board_deliveries(message INTEGER NOT NULL REFERENCES messages(id), agent TEXT NOT NULL REFERENCES agents(id), received_at INTEGER, PRIMARY KEY(message,agent));
+CREATE INDEX IF NOT EXISTS unread_deliveries ON board_deliveries(agent,received_at);
 PRAGMA user_version=1; COMMIT;")?;
         let check: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
         if check != "ok" {
@@ -248,17 +250,26 @@ PRAGMA user_version=1; COMMIT;")?;
                 )?;
                 let mut page = page(
                     &tx,
-                    "recipient=? AND received_at IS NULL AND (? IS NULL OR reply_to=?)",
-                    params![id, reply_to, reply_to],
+                    &format!("({UNREAD}) AND (?2 IS NULL OR messages.reply_to=?2)"),
+                    params![id, reply_to],
                     *after,
                     *limit,
                 )?;
                 if !peek {
                     for msg in &mut page.messages {
-                        tx.execute(
-                            "UPDATE messages SET received_at=? WHERE id=?",
-                            params![now(), msg.id],
-                        )?;
+                        // Direct mail is acknowledged on the message; a board
+                        // reply only on this agent's delivery.
+                        if msg.recipient.as_deref() == Some(id) {
+                            tx.execute(
+                                "UPDATE messages SET received_at=? WHERE id=?",
+                                params![now(), msg.id],
+                            )?;
+                        } else {
+                            tx.execute(
+                                "UPDATE board_deliveries SET received_at=? WHERE message=? AND agent=?",
+                                params![now(), msg.id, id],
+                            )?;
+                        }
                         msg.received_at = Some(now());
                         msg.delivery = delivery(msg);
                     }
@@ -387,6 +398,8 @@ PRAGMA user_version=1; COMMIT;")?;
 pub const STALE_AFTER: u64 = 24 * 60 * 60;
 /// Window within which an identical send without an explicit key is a duplicate.
 const AUTO_KEY_WINDOW: i64 = 10 * 60;
+/// Unread for agent ?1: direct messages and board replies delivered to it.
+const UNREAD: &str = "(messages.recipient=?1 AND messages.received_at IS NULL) OR messages.id IN (SELECT message FROM board_deliveries WHERE agent=?1 AND received_at IS NULL)";
 const OPEN: &str =
     "messages.expects_reply=1 AND messages.answered_by IS NULL AND messages.cancelled=0";
 /// Stale for agent ?1 with cutoff ?2: too old, or the counterpart unregistered.
@@ -418,7 +431,7 @@ fn with_next(page: Page, next: impl Fn(&Message) -> String) -> Vec<Value> {
 fn summary(tx: &Transaction<'_>, id: &str, cutoff: i64) -> Result<Value> {
     let incoming = format!("{OPEN} AND messages.recipient=?1");
     let outgoing = format!("{OPEN} AND messages.sender=?1");
-    let unread = "messages.recipient=?1 AND messages.received_at IS NULL";
+    let unread = UNREAD;
     let requests = page(
         tx,
         &format!("{incoming} AND NOT {STALE}"),
@@ -467,11 +480,7 @@ fn summary(tx: &Transaction<'_>, id: &str, cutoff: i64) -> Result<Value> {
 fn ambient(tx: &Transaction<'_>, id: &str) -> Result<Option<Value>> {
     let cutoff = cutoff(STALE_AFTER);
     let fresh = format!("{OPEN} AND messages.recipient=?1 AND NOT {STALE}");
-    let unread = count(
-        tx,
-        "messages.recipient=?1 AND messages.received_at IS NULL",
-        params![id],
-    )?;
+    let unread = count(tx, UNREAD, params![id])?;
     let open = count(tx, &fresh, params![id, cutoff])?;
     let stale = count(
         tx,
@@ -699,7 +708,9 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
     } else if let Some(id) = explicit_key(tx, sender, key, &canonical)? {
         return Ok(json!({"message":message(tx,id)?,"duplicate":true}));
     }
-    let (recipient, board, thread_id) = if let Some(id) = reply_to {
+    // `notify` is the author of an answered board message, who receives the
+    // reply in their inbox while it stays public on the board.
+    let (recipient, board, thread_id, notify) = if let Some(id) = reply_to {
         if kind != "reply" || to.is_some() || project.is_some() || thread.is_some() {
             return Err(invalid("Replies derive routing from message ID"));
         }
@@ -712,7 +723,7 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
                     "Select the recipient identity with --agent.",
                 ));
             }
-            (Some(parent.sender), None, parent.thread_id)
+            (Some(parent.sender), None, parent.thread_id, None)
         } else {
             if *request {
                 return Err(invalid(
@@ -722,7 +733,8 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
             if !visible_thread(tx, sender, &parent.thread_id)? {
                 return Err(invalid("Board thread is not visible to this agent"));
             }
-            (None, parent.project, parent.thread_id)
+            let notify = (parent.sender != sender).then_some(parent.sender);
+            (None, parent.project, parent.thread_id, notify)
         }
     } else if let Some(project) = project {
         if to.is_some() || kind != "post" || *request {
@@ -734,6 +746,7 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
             None,
             Some(project.clone()),
             format!("thr_{}", Uuid::new_v4().simple()),
+            None,
         )
     } else {
         if kind == "reply" || kind == "post" {
@@ -761,7 +774,7 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
             }
             None => format!("thr_{}", Uuid::new_v4().simple()),
         };
-        (Some(recipient), None, thread_id)
+        (Some(recipient), None, thread_id, None)
     };
     if kind == "handoff" && thread.is_none() {
         return Err(invalid("Handoff requires a thread"));
@@ -781,9 +794,20 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
             params![thread_id, recipient],
         )?;
     }
+    if let Some(author) = notify {
+        tx.execute(
+            "INSERT INTO board_deliveries(message,agent) VALUES(?,?)",
+            params![id, author],
+        )?;
+    }
     if let Some(parent) = reply_to {
+        // Replying counts as receipt, for direct mail and board deliveries.
         tx.execute(
             "UPDATE messages SET received_at=COALESCE(received_at,?) WHERE id=? AND recipient=?",
+            params![now(), parent, sender],
+        )?;
+        tx.execute(
+            "UPDATE board_deliveries SET received_at=COALESCE(received_at,?) WHERE message=? AND agent=?",
             params![now(), parent, sender],
         )?;
         tx.execute("UPDATE messages SET answered_by=? WHERE id=? AND expects_reply=1 AND cancelled=0 AND answered_by IS NULL",params![id,parent])?;
@@ -1072,6 +1096,152 @@ mod tests {
             "  agent with 5,000 open requests: whoami {whoami:?}, attention alone {ambient_only:?}"
         );
         println!("  agent with 3 open requests:     whoami {typical:?}, whoami work without attention {bare:?}");
+    }
+    fn post(text: &str) -> Operation {
+        let mut op = send("unused", &format!("post-{text}"));
+        if let Operation::Send {
+            to,
+            project,
+            kind,
+            request,
+            parts,
+            ..
+        } = &mut op
+        {
+            *to = None;
+            *project = Some("/test/project".into());
+            *kind = "post".into();
+            *request = false;
+            *parts = vec![Part::Text { text: text.into() }];
+        }
+        op
+    }
+    fn reply(parent: u64, text: &str) -> Operation {
+        let mut op = send("unused", &format!("reply-{parent}-{text}"));
+        if let Operation::Send {
+            to,
+            reply_to,
+            kind,
+            request,
+            parts,
+            ..
+        } = &mut op
+        {
+            *to = None;
+            *reply_to = Some(parent);
+            *kind = "reply".into();
+            *request = false;
+            *parts = vec![Part::Text { text: text.into() }];
+        }
+        op
+    }
+    fn inbox(peek: bool) -> Operation {
+        Operation::Inbox {
+            peek,
+            after: 0,
+            limit: 50,
+            reply_to: None,
+            listening: false,
+        }
+    }
+    fn texts(v: &Value) -> Vec<String> {
+        v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["parts"][0]["text"].as_str().unwrap().to_string())
+            .collect()
+    }
+    fn id_of(v: &Value) -> u64 {
+        v["message"]["id"].as_u64().unwrap()
+    }
+    #[test]
+    fn board_replies_are_delivered_to_the_answered_author_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let a = register(&mut store, "a");
+        let b = register(&mut store, "b");
+        let c = register(&mut store, "c");
+        let plan = id_of(&store.execute(&rpc(post("plan"), Some(a.clone()))).unwrap());
+        // A self-reply delivers nothing.
+        store
+            .execute(&rpc(reply(plan, "self"), Some(a.clone())))
+            .unwrap();
+        assert_eq!(
+            texts(&store.execute(&rpc(inbox(true), Some(a.clone()))).unwrap()),
+            Vec::<String>::new()
+        );
+        let answer = id_of(
+            &store
+                .execute(&rpc(reply(plan, "no overlap"), Some(b.clone())))
+                .unwrap(),
+        );
+        // A reply to B's reply goes to B, not to A.
+        store
+            .execute(&rpc(reply(answer, "agreed"), Some(c.clone())))
+            .unwrap();
+        assert_eq!(
+            texts(&store.execute(&rpc(inbox(true), Some(a.clone()))).unwrap()),
+            ["no overlap"]
+        );
+        assert_eq!(
+            texts(&store.execute(&rpc(inbox(true), Some(b.clone()))).unwrap()),
+            ["agreed"]
+        );
+        assert_eq!(
+            texts(&store.execute(&rpc(inbox(true), Some(c))).unwrap()),
+            Vec::<String>::new()
+        );
+        // Everything stays public on the board.
+        let board = Operation::Board {
+            project: "/test/project".into(),
+            after: 0,
+            limit: 50,
+        };
+        assert_eq!(
+            texts(&store.execute(&rpc(board, Some(b.clone()))).unwrap()),
+            ["plan", "self", "no overlap", "agreed"]
+        );
+    }
+    #[test]
+    fn board_deliveries_are_acknowledged_per_author() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let a = register(&mut store, "a");
+        let b = register(&mut store, "b");
+        let plan = id_of(&store.execute(&rpc(post("plan"), Some(a.clone()))).unwrap());
+        store
+            .execute(&rpc(reply(plan, "noted"), Some(b.clone())))
+            .unwrap();
+        let (_, attention) = store
+            .execute_with_attention(&rpc(Operation::Whoami, Some(a.clone())))
+            .unwrap();
+        let attention = attention.unwrap();
+        assert_eq!(
+            (attention["unread"].clone(), attention["next"].clone()),
+            (json!(1), json!("tala inbox"))
+        );
+        let summary = store
+            .execute(&rpc(Operation::Attention, Some(a.clone())))
+            .unwrap();
+        assert_eq!(summary["unread"]["count"], 1);
+        // Peeking leaves it unread; consuming acknowledges it once.
+        store.execute(&rpc(inbox(true), Some(a.clone()))).unwrap();
+        let consumed = store.execute(&rpc(inbox(false), Some(a.clone()))).unwrap();
+        assert_eq!(texts(&consumed), ["noted"]);
+        assert_eq!(consumed["messages"][0]["delivery"], "received");
+        assert_eq!(
+            texts(&store.execute(&rpc(inbox(false), Some(a.clone()))).unwrap()),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            texts(&store.execute(&rpc(inbox(true), Some(b))).unwrap()),
+            Vec::<String>::new()
+        );
+        let (_, attention) = store
+            .execute_with_attention(&rpc(Operation::Whoami, Some(a)))
+            .unwrap();
+        assert!(attention.is_none());
     }
     #[test]
     fn lost_inbox_response_replays_same_batch_after_restart() {

@@ -1242,3 +1242,63 @@ fn every_response_carries_ambient_attention() {
         json!([])
     );
 }
+#[test]
+fn board_reply_reaches_the_posts_author() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    let plan = id(&h.ok(&h.a, Some(&a), &["post", "changing parser"]));
+    let waiter = h
+        .command(&h.a, Some(&a), &["inbox", "--wait", "--timeout=10"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    h.ok(&h.a, Some(&b), &["reply", &plan, "no overlap"]);
+    let o = waiter.wait_with_output().unwrap();
+    assert!(o.status.success());
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["data"]["messages"][0]["parts"][0]["text"], "no overlap");
+    assert_eq!(v["data"]["messages"][0]["reply_to"].to_string(), plan);
+    // The reply stays on the board, and reading the board acknowledges nothing.
+    let second = id(&h.ok(&h.a, Some(&b), &["reply", &plan, "one more"]));
+    assert_eq!(
+        h.ok(&h.a, Some(&a), &["board"])["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        h.ok(&h.a, Some(&a), &["inbox"])["messages"][0]["id"].to_string(),
+        second
+    );
+    assert_eq!(h.ok(&h.a, Some(&b), &["inbox"])["messages"], json!([]));
+}
+#[test]
+fn board_wait_returns_only_new_messages() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    h.ok(&h.a, Some(&a), &["post", "existing"]);
+    let o = h.raw(&h.a, Some(&b), &["board", "--wait", "--timeout=1"]);
+    assert_eq!(o.status.code(), Some(3));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["data"]["messages"], json!([]));
+    let waiter = h
+        .command(&h.a, Some(&b), &["board", "--wait", "--timeout=10"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    h.ok(&h.a, Some(&a), &["post", "new plan"]);
+    let o = waiter.wait_with_output().unwrap();
+    assert!(o.status.success());
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["data"]["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(v["data"]["messages"][0]["parts"][0]["text"], "new plan");
+    // An explicit cursor returns anything newer at once.
+    let all = h.ok(&h.a, Some(&b), &["board", "--wait", "--after=1"]);
+    assert_eq!(all["messages"][0]["parts"][0]["text"], "new plan");
+    assert_eq!(h.ok(&h.a, Some(&b), &["inbox"])["messages"], json!([]));
+}
