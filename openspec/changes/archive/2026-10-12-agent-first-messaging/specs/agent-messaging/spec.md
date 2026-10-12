@@ -3,7 +3,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Retry and restart durability
-Every send SHALL include an idempotency key scoped to sender. When no key is given, the key SHALL derive from sender, operation, target, request flag and content, and an identical send within the deduplication window (default 10 minutes) SHALL return the original message marked duplicate; outside the window it SHALL store a new message. Explicit keys SHALL deduplicate without a window. Matching retries SHALL return the original message; changed routing, metadata or content under one explicit key SHALL fail as conflict. Durable deduplication SHALL survive restart.
+Every send SHALL include an idempotency key scoped to sender; without an explicit key it SHALL derive from sender, routing and content. Derived keys SHALL deduplicate identical sends within 10 minutes; explicit keys SHALL deduplicate without a window. Matching retries SHALL return the original message marked duplicate; changed routing, metadata or content under one explicit key SHALL fail as conflict. Durable deduplication SHALL survive restart.
 
 #### Scenario: Key conflict
 - **WHEN** one explicit key is reused with another recipient

@@ -58,5 +58,7 @@
 
 ## Workflow follow-up
 
+- Archived on 2026-10-12 with 5.4 and 8.1 open by decision: both need manually orchestrated real-agent evaluations (`eval/scenarios/shared-checkout.md` and the other scenarios, per harness, without hooks). The implementation and automated verification are complete; the evaluation results feed a separate proposal, such as harness hooks, rather than this change.
+
 - Sync delta specs into `openspec/specs/` and archive the change on the feature branch, in the implementation PR.
 - Close #93, #94, #95, #97 and #98 when the PR merges; close #96 now as fixed by the protocol 2 redesign.
