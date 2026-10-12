@@ -1156,6 +1156,20 @@ fn sibling_worktrees_share_one_board() {
     assert_eq!(board["messages"][0]["parts"][0]["text"], "changing parser");
     assert_eq!(board["messages"][0]["context"]["worktree"], root);
     assert_eq!(h.ok(&h.b, Some(&other), &["board"])["messages"], json!([]));
+    // A message from the linked worktree records that worktree and branch,
+    // while staying on the shared project board.
+    let posted = h.ok(&wt, Some(&side), &["post", "changing report"]);
+    let context = &posted["message"]["context"];
+    assert_eq!(context["project"], root);
+    assert_eq!(
+        context["worktree"],
+        std::fs::canonicalize(&wt).unwrap().display().to_string()
+    );
+    assert_eq!(context["branch"], "side");
+    assert_eq!(
+        h.ok(&h.a, Some(&main), &["board"])["messages"][1]["parts"][0]["text"],
+        "changing report"
+    );
 }
 #[test]
 fn bare_tala_summarises_work_without_acknowledging_it() {
