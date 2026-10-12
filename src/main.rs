@@ -13,9 +13,9 @@ async fn main() {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    let json = std::env::args()
+    let human = std::env::args()
         .take_while(|a| a != "--")
-        .any(|a| a == "--json" || a == "-j");
+        .any(|a| a == "--human");
     let cli = match cli::Cli::try_parse() {
         Ok(c) => c,
         Err(e) => {
@@ -26,7 +26,9 @@ async fn main() {
                 let _ = e.print();
                 return;
             }
-            if json {
+            if human {
+                let _ = e.print();
+            } else {
                 eprintln!(
                     "{}",
                     serde_json::to_string(&Envelope::failure(Failure::new(
@@ -36,25 +38,27 @@ async fn main() {
                     )))
                     .expect("error serializes")
                 );
-            } else {
-                let _ = e.print();
             }
             std::process::exit(2);
         }
     };
-    let json = cli.json;
-    let is_daemon = matches!(cli.command, cli::Commands::Daemon);
+    let human = cli.human;
+    let is_daemon = matches!(cli.command, Some(cli::Commands::Daemon));
     match cli::run(cli).await {
         Ok(result) => {
             if !is_daemon {
-                if json {
+                let attention = client::take_attention();
+                if human {
+                    cli::render(&result.data, attention.as_ref());
+                } else {
                     println!(
                         "{}",
-                        serde_json::to_string(&Envelope::success(result.data))
-                            .expect("output serializes")
+                        serde_json::to_string(&Envelope {
+                            attention,
+                            ..Envelope::success(result.data)
+                        })
+                        .expect("output serializes")
                     );
-                } else {
-                    cli::render(&result.data);
                 }
             }
             if result.code != 0 {
@@ -62,14 +66,23 @@ async fn main() {
             }
         }
         Err(error) => {
-            let code = if error.code == "USAGE_ERROR" { 2 } else { 1 };
-            if json {
+            let code = if error.code == "USAGE_ERROR" {
+                2
+            } else if error.stored.is_some() {
+                4
+            } else {
+                1
+            };
+            if human {
+                eprintln!("Error: {}\n{}", error.message, error.hint);
+                if let Some(next) = &error.next {
+                    eprintln!("Next: {next}");
+                }
+            } else {
                 eprintln!(
                     "{}",
                     serde_json::to_string(&Envelope::failure(error)).expect("error serializes")
                 );
-            } else {
-                eprintln!("Error: {}\n{}", error.message, error.hint);
             }
             std::process::exit(code);
         }

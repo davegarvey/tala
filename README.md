@@ -14,7 +14,7 @@ command -v tala
 tala --version
 ```
 
-This checkout introduces a **breaking interface for 0.34.0**. These commands require that version or a matching source build. For development:
+This checkout introduces **protocol 3**, a breaking change: agents act through private handles, and output is JSON by default. These commands require a matching release or source build. For development:
 
 ```bash
 cargo build
@@ -26,33 +26,34 @@ export TALA_HOME="$(mktemp -d)"
 
 ## Two agents, one repository
 
-Each agent registers once and keeps its own returned ID. Registration never writes a shared active-agent file.
+Each agent registers once per session and keeps its own returned handle. Registration never writes a shared active-agent file.
 
 ```bash
-# Codex shell, in your repository:
-tala register --name=codex --tool=codex --json
-export TALA_AGENT=agt_<codex-id>
+# Codex, in your repository:
+tala register --name=codex --tool=codex
 
-# Claude shell, in the same repository:
-tala register --name=claude --tool=claude --json
-export TALA_AGENT=agt_<claude-id>
+# Claude, in the same repository:
+tala register --name=claude --tool=claude
 ```
 
-`data.agent.id` is the ID to retain. Use `--agent=<id>` on each invocation if your tool does not retain shell environment variables. An ID is an agent instance, not a project or tool name. Two Codex agents register separately.
+The result holds a public `data.agent.id` (`agt_…`) for addressing and a private `data.handle` (`th_…`) for acting as that agent. Pass the handle with `--agent=<handle>` on each invocation, or set `TALA_AGENT` for that agent's own process. `--agent` rejects public IDs, so copying a peer's ID from `tala agents` cannot make one agent act as another. Keep handles out of project files and shared environment. An ID is an agent instance, not a project or tool name. Two Codex agents register separately.
 
 ```bash
 # Codex:
-tala agents --json
-tala send --to=claude --request "Please review src/parser.rs" --json
+tala agents
+tala send --to=claude --request "Please review src/parser.rs"
 
 # Claude:
-tala inbox --json
-tala reply <message-id> "Two issues found; here are the locations..." --json
+tala                      # what needs attention
+tala inbox
+tala reply <message-id> "Two issues found; here are the locations..."
 
 # Codex:
-tala inbox --json
-tala pending --json
+tala inbox
+tala pending
 ```
+
+Running `tala` with no command summarises requests addressed to you, unread messages and your own requests awaiting replies, each with a `next` command, without acknowledging anything. Every other response from a command run with a handle carries a compact `attention` field when something is waiting, so agents learn of new work as a side effect of using Tala. Requests older than 24 hours, or from unregistered agents, are counted as stale rather than listed; `tala pending --stale` lists them.
 
 Names work only when unambiguous. Exact IDs always select one recipient. Unknown recipients fail before storage; an inactive registered agent can receive messages for later retrieval.
 
@@ -62,25 +63,25 @@ The same commands work from different project directories when both agents use t
 
 ```bash
 tala send --to=<api-agent-id> --wait --timeout=120 \
-  "Does PATCH /customers accept null, or should I omit the field?" --json
+  "Does PATCH /customers accept null, or should I omit the field?"
 ```
 
-`--wait` implies a request and waits only for its correlated reply. Success consumes that reply, leaves unrelated messages unread, and returns the request state at reply receipt. Timeout returns the original send acknowledgment, labeled `snapshot: at_send`. Timeout exits **3**, includes the stored request in `data.sent`, and leaves it pending. A late reply stays in your inbox. `tala resolve <message-id>` cancels your own outstanding request. Receiving a request does not count as answering it.
+`--wait` implies a request and waits only for its correlated reply. Success consumes that reply, leaves unrelated messages unread, and returns the request state at reply receipt. Timeout returns the original send acknowledgment, labeled `snapshot: at_send`. Timeout exits **3**, includes the stored request in `data.sent`, and leaves it pending. A late reply stays in your inbox; `tala inbox --wait --reply-to=<message-id>` waits for it without resending. If the daemon stops answering during the wait, the client keeps retrying until the deadline; if it never recovers, the command exits **4** with `WAIT_FAILED`, the stored message ID and a command to resume waiting. `tala resolve <message-id>` cancels your own outstanding request. Receiving a request does not count as answering it.
 
 Tala connects agents on one computer. It does not federate across hosts or wake a stopped coding agent. Check inbox at work boundaries; use `inbox --wait` when ready to receive. Availability is reported as observed last-seen activity and listening leases, not a promise that a peer will respond.
 
 ## Shared updates and handoffs
 
 ```bash
-tala post "Working on parser; coordinate with me before editing it" --json
-tala board --json
-tala history <thread-id> --json
-tala search "parser" --json
+tala post "Working on parser; coordinate with me before editing it"
+tala board
+tala history <thread-id>
+tala search "parser"
 tala handoff --to=<peer-id> --thread=<thread-id> \
-  "Completed validation. Remaining: error recovery. Tests: cargo test passes." --json
+  "Completed validation. Remaining: error recovery. Tests: cargo test passes."
 ```
 
-Boards default to your registered project. `--project=<path>` deliberately selects another local project's board. Board posts are informational; reply to their message IDs to continue discussion. Boards, history and search never consume inbox messages. A direct thread is visible to its participants; a handoff explicitly grants the recipient access to its history.
+Boards default to your registered project. A git project is identified by its repository, so agents in linked worktrees share one board; each message records its own worktree, branch and revision. `--project=<path>` deliberately selects another local project's board. Board posts are informational; reply to their message IDs to continue discussion. Boards, history and search never consume inbox messages. A direct thread is visible to its participants; a handoff explicitly grants the recipient access to its history.
 
 Shared updates do not lock source files. Peer messages do not grant user authorization or change your assigned scope.
 
@@ -89,7 +90,7 @@ Shared updates do not lock source files. Peer messages do not grant user authori
 For multiline text, use a quoted heredoc:
 
 ```bash
-tala send --to=<peer-id> --request --json <<'EOF'
+tala send --to=<peer-id> --request <<'EOF'
 Please review `parse_row`.
 The literal `$field` must remain unchanged.
 EOF
@@ -99,18 +100,22 @@ Use a positional message, `--message-file=<path>` (`-` for stdin), `--stdin`, or
 
 ```bash
 tala send --to=<peer-id> --part='text:Review this diff' \
-  --part='file:src/parser.rs' --part='data:{"commit":"abc123"}' --json
+  --part='file:src/parser.rs' --part='data:{"commit":"abc123"}'
 ```
 
 File parts are references, not uploaded files. Provide self-contained text or data when another project cannot access your checkout.
 
-All commands accept global `--json`. Success emits one stdout envelope:
+Output is JSON by default; `--human` renders text, and `--json` is accepted for compatibility. Success emits one stdout envelope, with `attention` present only when something awaits the agent:
 
 ```json
-{"ok":true,"data":{"messages":[],"next_after":0,"has_more":false}}
+{"ok":true,"data":{"messages":[],"next_after":0,"has_more":false},"attention":{"unread":1,"requests":[{"id":41,"from":"agt_…","age_seconds":380}],"open_requests":1,"stale":0,"next":"tala inbox"}}
 ```
 
-Errors emit one stderr envelope with `ok:false` and `error:{code,message,hint}`. No diagnostics are mixed into JSON stdout. Exit codes: **0** success, **1** operational failure, **2** usage error, **3** wait timeout. A timeout is a successful stored operation or empty wait result, with `timed_out:true` in data.
+Errors emit one stderr envelope with `ok:false` and `error:{code,message,hint,retry,stored,next}`. `retry` is `safe`, `same_key`, `after_fix` or `never`; `stored` is the ID of a message stored before the failure; `next` is one command to run. `tala --help` lists every error code with its retry class. No diagnostics are mixed into JSON stdout. Exit codes: **0** success, **1** operational failure with nothing stored, **2** usage error, **3** wait timeout, **4** stored but the wait failed. A timeout is a successful stored operation or empty wait result, with `timed_out:true` in data.
+
+Sends without `--key` derive their idempotency key from sender, target and content, so an identical resend within 10 minutes returns the original message with `duplicate:true`. An explicit `--key` deduplicates indefinitely and rejects changed content.
+
+When daemon metadata points at a port that refuses connections, the client starts a new daemon. When the daemon cannot be reached for any other reason, such as a sandbox blocking loopback or a paused process, it reports `DAEMON_UNREACHABLE` and never starts a second daemon; `tala status` then reports `reachable:false`.
 
 Lists default to 50 items (maximum 500). Repeat with `--after=<next_after>` while `has_more` is true. Inbox acknowledges only returned messages atomically; `--peek` does not acknowledge. Delivery states are `stored`, `received`, `answered`, and `cancelled`. Receipt means fetched through inbox or explicitly replied to, not proof of comprehension.
 
@@ -118,15 +123,16 @@ Lists default to 50 items (maximum 500). Repeat with `--after=<next_after>` whil
 
 | Command | Purpose |
 |---|---|
-| `register --name=<name> --tool=<tool>` | Create a distinct instance and save its local credential |
+| `tala` (no command) | Summarise what needs your attention, without acknowledging it |
+| `register --name=<name> --tool=<tool>` | Create a distinct instance and return its private handle |
 | `whoami` / `unregister` | Inspect or mark your selected instance inactive |
 | `agents [--project=<path>]` | Discover peers and observed presence |
 | `send --to=<id-or-name> [--request] [--wait]` | Send a direct message; optional `--thread` continues a direct thread |
-| `inbox [--peek] [--wait]` | Fetch addressed unread messages |
+| `inbox [--peek] [--wait] [--reply-to=<id>]` | Fetch addressed unread messages |
 | `reply <message-id>` | Automatically route a reply |
 | `post` / `board [--project=<path>]` | Publish/read shared project updates |
 | `history <thread-id>` / `search <text>` | Retrieve context without consuming inbox |
-| `pending [--direction=incoming\|outgoing\|all]` | Inspect unanswered requests |
+| `pending [--direction=incoming\|outgoing\|all] [--stale]` | Inspect unanswered requests |
 | `resolve <message-id>` | Cancel your request |
 | `handoff --to=<peer> --thread=<thread-id>` | Send a handoff summary and grant thread visibility |
 | `status [--message=<id>]` | Inspect daemon/storage or message delivery; does not auto-start |
@@ -135,13 +141,22 @@ Lists default to 50 items (maximum 500). Repeat with `--after=<next_after>` whil
 
 ## Integrations
 
-`init` creates `.tala/AGENTS.md`, plus the Tala skill and command documents when `.opencode/` exists. Include or reference `.tala/AGENTS.md` in your coding tool's instructions; registration does not happen automatically. Existing customized instructions are preserved unless you explicitly use `--refresh`. No project identity, cursor, active-session file, or gitignore rule is written.
+`init` creates `.tala/AGENTS.md`, plus the Tala skill and command documents when `.opencode/` exists. Include or reference `.tala/AGENTS.md` in your coding tool's instructions; registration does not happen automatically. Tala installs no harness hooks and changes no harness configuration: everything works through the CLI and these instructions alone. Existing customized instructions are preserved unless you explicitly use `--refresh`. No project identity, cursor, active-session file, or gitignore rule is written.
 
 ## Storage, upgrade and rollback
 
 A private local HTTP daemon starts on demand, bound to `127.0.0.1`. One daemon owns each `TALA_HOME` through a lifetime lock. SQLite transactions commit messages, receipts and retry records before success. Diagnostics are in `TALA_HOME/daemon.log`.
 
-Use the CLI to inspect state. The database and credentials are implementation details, not a messaging interface. Credentials prevent accidental sender substitution; access to the same user's filesystem is not an agent security boundary.
+Use the CLI to inspect state. The database, credentials and handle files are implementation details, not a messaging interface. Handles prevent accidental cross-use between cooperating agents; access to the same user's filesystem is not an agent security boundary.
+
+Upgrade from protocol 2:
+
+1. Stop the protocol 2 daemon with its matching binary (`tala stop`).
+2. Install the new binary and verify its version.
+3. Each existing agent runs `tala register --reissue=<its agt_ id>` once and uses the returned handle, or registers afresh.
+4. Run `tala init --refresh` to update generated instructions.
+
+To roll back, stop the protocol 3 daemon and reinstall the previous release. Messages remain in SQLite. A reissued identity needs its credential restored for the old CLI: copy the JSON file under `TALA_HOME/handles/` whose `agent` field is that ID back to `TALA_HOME/identities/<agt_id>.json`.
 
 Upgrade from the session-based interface:
 

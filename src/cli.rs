@@ -1,6 +1,7 @@
 use crate::{client, daemon, integration, models::*, store};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     io::{self, IsTerminal, Read},
     path::{Path, PathBuf},
@@ -13,26 +14,33 @@ use uuid::Uuid;
 #[command(
     name = "tala",
     version,
-    about = "Local messaging for distinct coding agents",
-    after_help = "Start: tala register --name=codex --tool=codex\nSelect your returned ID with TALA_AGENT or --agent.\nThen: tala agents; tala send --to=<id> --request 'Review this'; tala inbox; tala reply <id> 'Done'\nUse inbox --wait to receive, board for shared updates, history for context.\nExit codes: 0 success, 1 operational error, 2 usage error, 3 wait timeout."
+    about = "Local messaging for distinct coding agents. Without a command, shows what needs your attention.",
+    after_help = help_text()
 )]
 pub struct Cli {
     #[arg(
         long,
         global = true,
         short = 'j',
-        help = "Emit one JSON envelope; errors go to stderr"
+        hide = true,
+        help = "Accepted for compatibility; JSON is the default output"
     )]
     pub json: bool,
     #[arg(
         long,
         global = true,
+        help = "Render text for people instead of one JSON envelope"
+    )]
+    pub human: bool,
+    #[arg(
+        long,
+        global = true,
         env = "TALA_AGENT",
-        help = "Your complete registered agent ID (independent of CWD)"
+        help = "Your private handle from tala register (independent of CWD)"
     )]
     pub agent: Option<String>,
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 #[derive(Subcommand)]
 pub enum Commands {
@@ -45,14 +53,26 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Register a distinct agent instance; keep the returned ID for this run
+    /// Register a distinct agent instance; keep the returned private handle for this run
     Register {
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        tool: String,
-        #[arg(long, help = "Checkout path; defaults to the current project root")]
+        #[arg(long, required_unless_present = "reissue")]
+        name: Option<String>,
+        #[arg(long, required_unless_present = "reissue")]
+        tool: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "reissue",
+            help = "Checkout path; defaults to the current project root"
+        )]
         project: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "AGENT_ID",
+            conflicts_with_all = ["name", "tool"],
+            hide = true,
+            help = "Issue a handle, once, for your own identity created before handles existed"
+        )]
+        reissue: Option<String>,
     },
     /// Mark your instance inactive; preserve inbox and history
     Unregister,
@@ -94,6 +114,12 @@ pub enum Commands {
         peek: bool,
         #[arg(long)]
         wait: bool,
+        #[arg(
+            long,
+            value_name = "MESSAGE_ID",
+            help = "Only the reply to your request with this ID"
+        )]
+        reply_to: Option<u64>,
         #[arg(
             long,
             default_value_t = 60,
@@ -148,6 +174,11 @@ pub enum Commands {
     Pending {
         #[arg(long,default_value="all",value_parser=["all","incoming","outgoing"])]
         direction: String,
+        #[arg(
+            long,
+            help = "List only stale requests (unanswered for 24 hours, or from unregistered agents)"
+        )]
+        stale: bool,
         #[command(flatten)]
         page: PageArgs,
     },
@@ -286,14 +317,26 @@ pub fn context(path: Option<&Path>) -> Result<Context> {
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .map(|s| s.trim().into())
     };
-    let project = match git(&["rev-parse", "--show-toplevel"]) {
-        Some(root) => std::fs::canonicalize(root)?,
-        None => dir.clone(),
-    }
-    .display()
-    .to_string();
+    let worktree = git(&["rev-parse", "--show-toplevel"])
+        .map(std::fs::canonicalize)
+        .transpose()?;
+    // Linked worktrees share one repository, and so one project: the main
+    // worktree root, found from the common git directory.
+    let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .map(PathBuf::from)
+        .or_else(|| git(&["rev-parse", "--git-common-dir"]).map(|p| dir.join(p)))
+        .and_then(|p| std::fs::canonicalize(p).ok());
+    let project = match (&common, &worktree) {
+        (Some(c), _) if c.file_name().is_some_and(|n| n == ".git") => c
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| dir.clone()),
+        (_, Some(w)) => w.clone(),
+        _ => dir.clone(),
+    };
     Ok(Context {
-        project,
+        project: project.display().to_string(),
+        worktree: worktree.map(|w| w.display().to_string()),
         branch: git(&["symbolic-ref", "--short", "HEAD"]),
         revision: git(&["rev-parse", "HEAD"]),
     })
@@ -311,6 +354,92 @@ async fn identity_context(credential: &Credential) -> Result<Context> {
         serde_json::from_value(identity["agent"].clone()).map_err(|e| usage(e.to_string()))?;
     context(Some(Path::new(&registered.context.project)))
 }
+/// Fills an empty send key with one derived from sender, routing and
+/// content, so an identical resend is recognised as a duplicate.
+fn keyed(sender: &str, mut op: Operation) -> Operation {
+    if let Operation::Send {
+        to,
+        project,
+        thread,
+        reply_to,
+        parts,
+        request,
+        kind,
+        key,
+        ..
+    } = &mut op
+    {
+        if key.is_empty() {
+            let material = json!([sender, kind, to, project, thread, reply_to, request, parts]);
+            let digest = Sha256::digest(material.to_string().as_bytes());
+            *key = format!(
+                "auto:{}",
+                digest
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            );
+        }
+    }
+    op
+}
+fn shell_word(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_=./:@,+".contains(c))
+    {
+        arg.into()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
+}
+/// The current command with an explicit key, for retrying a send that may
+/// not have reached the daemon. Identity flags are left to the caller.
+fn retry_command(argv: impl IntoIterator<Item = String>, key: &str) -> Option<String> {
+    let mut args: Vec<String> = Vec::new();
+    let mut skip = false;
+    let mut has_key = false;
+    for arg in argv {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if arg == "--agent" {
+            skip = true;
+            continue;
+        }
+        if arg.starts_with("--agent=") {
+            continue;
+        }
+        has_key |= arg == "--key" || arg.starts_with("--key=");
+        args.push(shell_word(&arg));
+    }
+    if !has_key {
+        args.push(shell_word(&format!("--key={key}")));
+    }
+    let command = format!("tala {}", args.join(" "));
+    (command.len() <= 4096).then_some(command)
+}
+/// Sends one message; on a transport failure the error's next command
+/// repeats it with the same key.
+async fn send(c: Credential, op: Operation) -> Result<Value> {
+    let op = keyed(&c.agent, op);
+    let key = match &op {
+        Operation::Send { key, .. } => key.clone(),
+        _ => unreachable!(),
+    };
+    client::call(op, Some(c)).await.map_err(|e| {
+        if e.code == "CONNECTION_ERROR" {
+            match retry_command(std::env::args().skip(1), &key) {
+                Some(next) => e.with_next(next),
+                None => e,
+            }
+        } else {
+            e
+        }
+    })
+}
 async fn wait_inbox(
     credential: Credential,
     peek: bool,
@@ -320,75 +449,115 @@ async fn wait_inbox(
     timeout: u64,
 ) -> Result<Outcome> {
     let start = Instant::now();
-    let expired = || timeout != 0 && start.elapsed() >= Duration::from_secs(timeout);
+    let remaining =
+        || (timeout != 0).then(|| Duration::from_secs(timeout).saturating_sub(start.elapsed()));
     let timeout_result = || Outcome {
         data: json!({"messages":[],"next_after":after,"has_more":false,"timed_out":true}),
         code: 3,
     };
+    // A transport failure is transient until the deadline; if the deadline
+    // passes while failing, report the failure rather than a quiet timeout.
+    let mut failure: Option<Failure> = None;
+    let expired = |failure: &mut Option<Failure>| match failure.take() {
+        Some(f) => Err(f),
+        None => Ok(timeout_result()),
+    };
+    let mut backoff = Duration::from_millis(200);
+    // A consuming read is replayed with the same request ID until it
+    // succeeds, so a lost response cannot drop the batch it acknowledged.
+    let mut consume_id: Option<String> = None;
     loop {
-        if expired() {
-            return Ok(timeout_result());
+        if remaining() == Some(Duration::ZERO) {
+            return expired(&mut failure);
         }
-        // Poll without consumption, so cancelling a network call at the deadline
-        // cannot acknowledge a batch that we never return to the caller.
-        let poll = client::call(
-            Operation::Inbox {
-                peek: true,
-                after,
-                limit,
-                reply_to,
-                listening: true,
+        let operation = |peek: bool| Operation::Inbox {
+            peek,
+            after,
+            limit,
+            reply_to,
+            listening: peek,
+        };
+        let (request_id, op) = match &consume_id {
+            Some(id) => (id.clone(), operation(false)),
+            None => (Uuid::new_v4().to_string(), operation(true)),
+        };
+        let call = client::call_as(request_id, op, Some(credential.clone()));
+        let attempt = match remaining() {
+            None => call.await,
+            Some(r) => match tokio::time::timeout(r, call).await {
+                Ok(result) => result,
+                Err(_) => return expired(&mut failure),
             },
-            Some(credential.clone()),
-        );
-        let data = if timeout == 0 {
-            poll.await?
-        } else {
-            let remaining = Duration::from_secs(timeout).saturating_sub(start.elapsed());
-            match tokio::time::timeout(remaining, poll).await {
-                Ok(result) => result?,
-                Err(_) => return Ok(timeout_result()),
-            }
         };
-        if data["messages"].as_array().is_some_and(|m| !m.is_empty()) {
-            if peek {
-                return Ok(done(data));
+        match attempt {
+            Ok(data) => {
+                failure = None;
+                backoff = Duration::from_millis(200);
+                let found = data["messages"].as_array().is_some_and(|m| !m.is_empty());
+                if consume_id.take().is_some() {
+                    if found {
+                        return Ok(done(data));
+                    }
+                } else if found {
+                    if peek {
+                        return Ok(done(data));
+                    }
+                    consume_id = Some(Uuid::new_v4().to_string());
+                    continue;
+                }
             }
-            let consumed = client::call(
-                Operation::Inbox {
-                    peek: false,
-                    after,
-                    limit,
-                    reply_to,
-                    listening: false,
-                },
-                Some(credential.clone()),
-            )
-            .await?;
-            if consumed["messages"]
-                .as_array()
-                .is_some_and(|m| !m.is_empty())
-            {
-                return Ok(done(consumed));
-            }
+            Err(e) if e.is_transport() => failure = Some(e),
+            Err(e) => return Err(e),
         }
-        if expired() {
-            return Ok(timeout_result());
+        if remaining() == Some(Duration::ZERO) {
+            return expired(&mut failure);
         }
-        let delay = if timeout == 0 {
-            Duration::from_millis(200)
-        } else {
-            Duration::from_millis(200)
-                .min(Duration::from_secs(timeout).saturating_sub(start.elapsed()))
-        };
-        tokio::time::sleep(delay).await;
+        let mut delay = Duration::from_millis(200);
+        if failure.is_some() {
+            delay = backoff;
+            backoff = (backoff * 2).min(Duration::from_secs(2));
+        }
+        tokio::time::sleep(remaining().map_or(delay, |r| delay.min(r))).await;
     }
+}
+async fn reissue(id: &str) -> Result<Value> {
+    if !id.starts_with("agt_") || id.len() != 36 || !id[4..].chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(usage("--reissue requires a complete agt_ agent ID"));
+    }
+    let path = client::legacy_credential_path(id);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(Failure::new(
+                "IDENTITY_ERROR",
+                format!("No reissuable credential for {id}"),
+                "A handle is issued once per identity. Use the handle you already have, or register a new identity.",
+            ))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let c: Credential = serde_json::from_slice(&bytes).map_err(|e| usage(e.to_string()))?;
+    if c.agent != id {
+        return Err(usage("Stored credential does not match the agent ID"));
+    }
+    let mut data = client::call(Operation::Whoami, Some(c.clone())).await?;
+    let handle = client::issue_handle(&c)?;
+    std::fs::remove_file(&path)?;
+    data["handle"] = json!(handle);
+    data["select"] = json!(format!("--agent={handle}"));
+    Ok(data)
 }
 
 pub async fn run(cli: Cli) -> Result<Outcome> {
     let selected = cli.agent.as_deref();
-    let json_output = cli.json;
-    let data = match cli.command {
+    let human = cli.human;
+    let Some(command) = cli.command else {
+        return Ok(done(
+            client::call(Operation::Attention, Some(client::credential(selected)?)).await?,
+        ));
+    };
+    let data = match command {
         Commands::Daemon => {
             daemon::run().await?;
             return Ok(done(json!({"stopped":true})));
@@ -399,14 +568,18 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             dry_run,
         } => integration::init(check, refresh, dry_run)?,
         Commands::Register {
+            reissue: Some(id), ..
+        } => reissue(&id).await?,
+        Commands::Register {
             name,
             tool,
             project,
+            reissue: None,
         } => {
             let mut data = client::call(
                 Operation::Register {
-                    name,
-                    tool,
+                    name: name.unwrap_or_default(),
+                    tool: tool.unwrap_or_default(),
                     context: context(project.as_deref())?,
                 },
                 None,
@@ -414,16 +587,12 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             .await?;
             let c: Credential = serde_json::from_value(data["credential"].clone())
                 .map_err(|e| usage(e.to_string()))?;
-            let directory = store::home().join("identities");
-            store::private_dir(&directory)?;
-            store::private_write(
-                &directory.join(format!("{}.json", c.agent)),
-                &serde_json::to_vec(&c).map_err(|e| usage(e.to_string()))?,
-            )?;
+            let handle = client::issue_handle(&c)?;
             data.as_object_mut()
                 .expect("register object")
                 .remove("credential");
-            data["select"] = json!(format!("export TALA_AGENT={}", c.agent));
+            data["handle"] = json!(handle);
+            data["select"] = json!(format!("--agent={handle}"));
             data
         }
         Commands::Agents {
@@ -440,14 +609,33 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                     after,
                     limit,
                 },
-                None,
+                selected.map(|h| client::credential(Some(h))).transpose()?,
             )
             .await?
         }
         Commands::Status { message } => {
-            let mut status = client::existing(Operation::Status)
-                .await?
-                .unwrap_or_else(|| json!({"running":false,"protocol_version":PROTOCOL_VERSION}));
+            let mut status = match client::existing(Operation::Status).await {
+                Ok(Some(status)) => status,
+                Ok(None) => json!({
+                    "running": false,
+                    "protocol_version": PROTOCOL_VERSION,
+                    "stale_metadata": daemon::read_info().is_some(),
+                }),
+                // Unreachable is not proof of absence: report it as unknown.
+                Err(e) if e.code == "PROTOCOL_MISMATCH" => json!({
+                    "running": true,
+                    "compatible": false,
+                    "protocol_version": PROTOCOL_VERSION,
+                    "error": e,
+                }),
+                Err(e) if e.code == "DAEMON_UNREACHABLE" => json!({
+                    "running": null,
+                    "reachable": false,
+                    "protocol_version": PROTOCOL_VERSION,
+                    "error": e,
+                }),
+                Err(e) => return Err(e),
+            };
             status["home"] = json!(store::home());
             status["database"] = json!(store::home().join("tala.sqlite3"));
             status["legacy_files"] = json!(["sessions.json", "messages.json"]
@@ -501,25 +689,26 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
         Commands::Inbox {
             peek,
             wait,
+            reply_to,
             timeout,
             page,
         } => {
             let c = client::credential(selected)?;
             if wait {
-                if !json_output {
+                if human {
                     eprintln!(
                         "Waiting for messages addressed to {} (timeout: {}s; 0 = indefinite)",
                         c.agent, timeout
                     );
                 }
-                return wait_inbox(c, peek, page.after, page.limit, None, timeout).await;
+                return wait_inbox(c, peek, page.after, page.limit, reply_to, timeout).await;
             }
             client::call(
                 Operation::Inbox {
                     peek,
                     after: page.after,
                     limit: page.limit,
-                    reply_to: None,
+                    reply_to,
                     listening: false,
                 },
                 Some(c),
@@ -537,7 +726,9 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
         } => {
             let parts = input.read()?;
             let c = client::credential(selected)?;
-            let data = client::call(
+            let context = identity_context(&c).await?;
+            let data = send(
+                c.clone(),
                 Operation::Send {
                     to: Some(to),
                     project: None,
@@ -546,18 +737,32 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                     parts,
                     request: request || wait,
                     kind: "message".into(),
-                    key: key.unwrap_or_else(|| Uuid::new_v4().to_string()),
-                    context: identity_context(&c).await?,
+                    key: key.unwrap_or_default(),
+                    context,
                 },
-                Some(c.clone()),
             )
             .await?;
             if wait {
                 let id = data["message"]["id"].as_u64().expect("stored message ID");
-                if !json_output {
+                if human {
                     eprintln!("Stored message {id}; waiting for its correlated reply.");
                 }
-                let mut result = wait_inbox(c, false, 0, 50, Some(id), timeout).await?;
+                let mut result = match wait_inbox(c, false, 0, 50, Some(id), timeout).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        let mut failure = Failure::new(
+                            "WAIT_FAILED",
+                            format!(
+                                "Message {id} was stored, but waiting for its reply failed: {} ({})",
+                                e.message, e.code
+                            ),
+                            "Do not resend. Resume waiting for the reply with the next command once the daemon is reachable.",
+                        )
+                        .with_next(format!("tala inbox --wait --reply-to={id} --timeout={timeout}"));
+                        failure.stored = Some(id);
+                        return Err(failure);
+                    }
+                };
                 result.data["sent"] = data;
                 if !result.data["request"].is_null() {
                     result.data["sent"]["message"] = result.data["request"].take();
@@ -582,7 +787,9 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
         } => {
             let parts = input.read()?;
             let c = client::credential(selected)?;
-            client::call(
+            let context = identity_context(&c).await?;
+            send(
+                c,
                 Operation::Send {
                     to: None,
                     project: None,
@@ -591,10 +798,9 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                     parts,
                     request,
                     kind: "reply".into(),
-                    key: key.unwrap_or_else(|| Uuid::new_v4().to_string()),
-                    context: identity_context(&c).await?,
+                    key: key.unwrap_or_default(),
+                    context,
                 },
-                Some(c),
             )
             .await?
         }
@@ -611,7 +817,8 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                 .map(|p| context(Some(p)).map(|c| c.project))
                 .transpose()?
                 .unwrap_or_else(|| ctx.project.clone());
-            client::call(
+            send(
+                c,
                 Operation::Send {
                     to: None,
                     project: Some(p),
@@ -620,10 +827,9 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                     parts,
                     request: false,
                     kind: "post".into(),
-                    key: key.unwrap_or_else(|| Uuid::new_v4().to_string()),
+                    key: key.unwrap_or_default(),
                     context: ctx,
                 },
-                Some(c),
             )
             .await?
         }
@@ -674,10 +880,15 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             )
             .await?
         }
-        Commands::Pending { direction, page } => {
+        Commands::Pending {
+            direction,
+            stale,
+            page,
+        } => {
             client::call(
                 Operation::Pending {
                     direction,
+                    stale,
                     after: page.after,
                     limit: page.limit,
                 },
@@ -700,7 +911,9 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
         } => {
             let parts = input.read()?;
             let c = client::credential(selected)?;
-            client::call(
+            let context = identity_context(&c).await?;
+            send(
+                c,
                 Operation::Send {
                     to: Some(to),
                     project: None,
@@ -709,18 +922,29 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                     parts,
                     request: true,
                     kind: "handoff".into(),
-                    key: key.unwrap_or_else(|| Uuid::new_v4().to_string()),
-                    context: identity_context(&c).await?,
+                    key: key.unwrap_or_default(),
+                    context,
                 },
-                Some(c),
             )
             .await?
         }
     };
     Ok(done(data))
 }
-pub fn render(data: &Value) {
-    if let Some(messages) = data["messages"].as_array() {
+/// Age in days, hours and minutes for people.
+pub fn human_age(seconds: i64) -> String {
+    let (d, h, m) = (seconds / 86400, seconds % 86400 / 3600, seconds % 3600 / 60);
+    match (d, h, m) {
+        (0, 0, 0) => "<1m".into(),
+        (0, 0, m) => format!("{m}m"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
+}
+pub fn render(data: &Value, attention: Option<&Value>) {
+    if data["incoming_requests"].is_array() {
+        render_summary(data);
+    } else if let Some(messages) = data["messages"].as_array() {
         if messages.is_empty() {
             println!("No messages.");
         }
@@ -730,11 +954,24 @@ pub fn render(data: &Value) {
         if data["has_more"] == true {
             println!("More messages: repeat with --after={}", data["next_after"]);
         }
+        if data["stale_count"].as_u64().is_some_and(|n| n > 0) {
+            println!(
+                "{} stale requests hidden: {}",
+                data["stale_count"],
+                data["stale_next"].as_str().unwrap_or("")
+            );
+        }
     } else if data["message"].is_object() {
         render_message(&data["message"]);
         if data["duplicate"] == true {
             println!("Duplicate suppressed.");
         }
+    } else if let Some(handle) = data["handle"].as_str() {
+        println!(
+            "Registered {} ({}). Pass --agent={handle} on every tala command; keep the handle private.",
+            data["agent"]["id"].as_str().unwrap_or(""),
+            data["agent"]["name"].as_str().unwrap_or("")
+        );
     } else if let Some(agents) = data["agents"].as_array() {
         for a in agents {
             println!(
@@ -770,10 +1007,86 @@ pub fn render(data: &Value) {
     if data["timed_out"] == true {
         println!("Wait timed out; stored messages remain available.");
     }
+    if let Some(a) = attention {
+        let requests: Vec<String> = a["requests"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| {
+                format!(
+                    "{} from {} ({})",
+                    r["id"],
+                    r["from"].as_str().unwrap_or(""),
+                    human_age(r["age_seconds"].as_i64().unwrap_or(0))
+                )
+            })
+            .collect();
+        println!(
+            "Attention: {} unread, {} open requests{}{}; next: {}",
+            a["unread"],
+            a["open_requests"],
+            if requests.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", requests.join(", "))
+            },
+            if a["stale"].as_u64().is_some_and(|n| n > 0) {
+                format!(", {} stale", a["stale"])
+            } else {
+                String::new()
+            },
+            a["next"].as_str().unwrap_or("")
+        );
+    }
+}
+fn render_summary(data: &Value) {
+    let requests = data["incoming_requests"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let unread = &data["unread"];
+    let waiting = data["outgoing_requests"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    println!(
+        "{} requests to you, {} unread, {} of your requests awaiting replies.",
+        requests.len(),
+        unread["count"],
+        waiting.len()
+    );
+    for m in &requests {
+        render_message(m);
+        println!("  next: {}", m["next"].as_str().unwrap_or(""));
+    }
+    for m in unread["messages"].as_array().into_iter().flatten() {
+        if m["expects_reply"] != true {
+            render_message(m);
+        }
+    }
+    for m in &waiting {
+        println!(
+            "Awaiting reply to {} ({}); next: {}",
+            m["id"],
+            human_age(m["age_seconds"].as_i64().unwrap_or(0)),
+            m["next"].as_str().unwrap_or("")
+        );
+    }
+    let stale = data["stale"]["incoming"].as_u64().unwrap_or(0)
+        + data["stale"]["outgoing"].as_u64().unwrap_or(0);
+    if stale > 0 {
+        println!(
+            "{stale} stale requests hidden: {}",
+            data["stale"]["next"].as_str().unwrap_or("")
+        );
+    }
+    if let Some(next) = data["next"].as_str() {
+        println!("Next: {next}");
+    }
 }
 fn render_message(v: &Value) {
     println!(
-        "[{}] {} → {}  {}{}  thread {}",
+        "[{}] {} → {}  {}{}  {} ago  thread {}",
         v["id"],
         v["sender"].as_str().unwrap_or(""),
         v["recipient"]
@@ -786,6 +1099,7 @@ fn render_message(v: &Value) {
         } else {
             ""
         },
+        human_age(v["age_seconds"].as_i64().unwrap_or(0)),
         v["thread_id"].as_str().unwrap_or("")
     );
     if let Some(parts) = v["parts"].as_array() {
@@ -807,5 +1121,59 @@ mod tests {
     #[test]
     fn clap_contract_has_unique_arguments() {
         Cli::command().debug_assert();
+    }
+    #[test]
+    fn retry_command_adds_key_quotes_text_and_drops_identity() {
+        let argv = [
+            "--agent",
+            "th_x",
+            "send",
+            "--to=b",
+            "it's done",
+            "--agent=th_y",
+        ];
+        assert_eq!(
+            retry_command(argv.map(String::from), "auto:ab").as_deref(),
+            Some("tala send --to=b 'it'\\''s done' --key=auto:ab")
+        );
+        let keyed = ["send", "--to=b", "--key=k", "hi"];
+        assert_eq!(
+            retry_command(keyed.map(String::from), "k").as_deref(),
+            Some("tala send --to=b --key=k hi")
+        );
+        assert!(retry_command(["x".repeat(5000)], "k").is_none());
+    }
+    #[test]
+    fn content_keys_depend_on_sender_routing_and_content() {
+        let op = |text: &str| Operation::Send {
+            to: Some("b".into()),
+            project: None,
+            thread: None,
+            reply_to: None,
+            parts: vec![Part::Text { text: text.into() }],
+            request: false,
+            kind: "message".into(),
+            key: String::new(),
+            context: Context {
+                project: "/p".into(),
+                worktree: None,
+                branch: None,
+                revision: None,
+            },
+        };
+        let key = |sender: &str, text: &str| match keyed(sender, op(text)) {
+            Operation::Send { key, .. } => key,
+            _ => unreachable!(),
+        };
+        assert!(key("a", "hi").starts_with("auto:"));
+        assert_eq!(key("a", "hi"), key("a", "hi"));
+        assert_ne!(key("a", "hi"), key("c", "hi"));
+        assert_ne!(key("a", "hi"), key("a", "bye"));
+    }
+    #[test]
+    fn ages_render_in_days_hours_and_minutes() {
+        assert_eq!(human_age(30), "<1m");
+        assert_eq!(human_age(5400), "1h 30m");
+        assert_eq!(human_age(91104 * 60), "63d 6h");
     }
 }

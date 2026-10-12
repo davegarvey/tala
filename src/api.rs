@@ -66,11 +66,14 @@ async fn rpc(
                     "Inspect daemon.log and restart the daemon.",
                 )
             })?
-            .execute(&request)
+            .execute_with_attention(&request)
     })
     .await;
     let response = match result {
-        Ok(Ok(data)) => Envelope::success(data),
+        Ok(Ok((data, attention))) => Envelope {
+            attention,
+            ..Envelope::success(data)
+        },
         Ok(Err(e)) => Envelope::failure(e),
         Err(e) => Envelope::failure(Failure::new(
             "DAEMON_ERROR",
