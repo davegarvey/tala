@@ -740,6 +740,7 @@ fn integration_preflight_failure_preserves_existing_documents() {
     assert!(!h.a.join(".opencode/skills/tala/SKILL.md").exists());
 }
 
+#[cfg(unix)]
 fn daemon_pid(h: &Harness) -> u64 {
     let info: Value =
         serde_json::from_slice(&std::fs::read(h.home.join("daemon.json")).unwrap()).unwrap();
@@ -768,11 +769,13 @@ impl Drop for Paused {
             .status();
     }
 }
+#[cfg(unix)]
 fn second_daemon_attempted(h: &Harness) -> bool {
     std::fs::read_to_string(h.home.join("daemon.log"))
         .unwrap_or_default()
         .contains("already owns")
 }
+#[cfg(unix)]
 fn wait_for_message(h: &Harness, agent: &Ident) -> String {
     let start = Instant::now();
     loop {
