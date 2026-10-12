@@ -9,6 +9,18 @@ use tempfile::TempDir;
 fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_tala"))
 }
+/// A registered agent: public ID for addressing, private handle for acting.
+#[derive(Clone, Debug, PartialEq)]
+struct Ident {
+    id: String,
+    handle: String,
+}
+impl std::ops::Deref for Ident {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.id
+    }
+}
 struct Harness {
     temp: TempDir,
     home: PathBuf,
@@ -25,22 +37,22 @@ impl Harness {
         std::fs::create_dir_all(&b).unwrap();
         Self { temp, home, a, b }
     }
-    fn command(&self, dir: &Path, agent: Option<&str>, args: &[&str]) -> Command {
+    fn command(&self, dir: &Path, agent: Option<&Ident>, args: &[&str]) -> Command {
         let mut c = Command::new(bin());
         c.env("TALA_HOME", &self.home)
             .env_remove("TALA_AGENT")
             .current_dir(dir)
             .arg("--json");
-        if let Some(id) = agent {
-            c.arg(format!("--agent={id}"));
+        if let Some(agent) = agent {
+            c.arg(format!("--agent={}", agent.handle));
         }
         c.args(args);
         c
     }
-    fn raw(&self, dir: &Path, agent: Option<&str>, args: &[&str]) -> Output {
+    fn raw(&self, dir: &Path, agent: Option<&Ident>, args: &[&str]) -> Output {
         self.command(dir, agent, args).output().unwrap()
     }
-    fn ok(&self, dir: &Path, agent: Option<&str>, args: &[&str]) -> Value {
+    fn ok(&self, dir: &Path, agent: Option<&Ident>, args: &[&str]) -> Value {
         let o = self.raw(dir, agent, args);
         assert!(
             o.status.success(),
@@ -52,7 +64,7 @@ impl Harness {
         assert_eq!(v["ok"], true);
         v["data"].clone()
     }
-    fn error(&self, dir: &Path, agent: Option<&str>, args: &[&str], code: &str) -> Value {
+    fn error(&self, dir: &Path, agent: Option<&Ident>, args: &[&str], code: &str) -> Value {
         let o = self.raw(dir, agent, args);
         assert!(!o.status.success());
         assert!(o.stdout.is_empty());
@@ -60,13 +72,14 @@ impl Harness {
         assert_eq!(v["error"]["code"], code);
         v
     }
-    fn register(&self, dir: &Path, name: &str) -> String {
-        self.ok(dir, None, &["register", "--name", name, "--tool=fixture"])["agent"]["id"]
-            .as_str()
-            .unwrap()
-            .into()
+    fn register(&self, dir: &Path, name: &str) -> Ident {
+        let v = self.ok(dir, None, &["register", "--name", name, "--tool=fixture"]);
+        Ident {
+            id: v["agent"]["id"].as_str().unwrap().into(),
+            handle: v["handle"].as_str().unwrap().into(),
+        }
     }
-    fn send(&self, a: &str, b: &str, text: &str) -> Value {
+    fn send(&self, a: &Ident, b: &str, text: &str) -> Value {
         self.ok(&self.a, Some(a), &["send", "--to", b, "--request", text])
     }
 }
@@ -113,7 +126,7 @@ fn same_checkout_agents_have_separate_inboxes_and_receipts() {
         1
     );
     let reply = h.ok(&h.a, Some(&b), &["reply", &mid, "Two issues"]);
-    assert_eq!(reply["message"]["recipient"], a);
+    assert_eq!(reply["message"]["recipient"], a.id);
     assert_eq!(reply["message"]["thread_id"], sent["message"]["thread_id"]);
     assert_eq!(
         h.ok(&h.a, Some(&a), &["status", "--message", &mid])["message"]["delivery"],
@@ -199,7 +212,7 @@ fn duplicate_names_unknown_recipients_and_explicit_identity() {
     h.send(&a, &b, "hi");
     let nested = h.a.join("src");
     std::fs::create_dir(&nested).unwrap();
-    assert_eq!(h.ok(&nested, Some(&a), &["whoami"])["agent"]["id"], a);
+    assert_eq!(h.ok(&nested, Some(&a), &["whoami"])["agent"]["id"], a.id);
 }
 #[test]
 fn bounded_inbox_does_not_skip_messages_or_touch_peer() {
@@ -686,6 +699,32 @@ fn incompatible_live_legacy_daemon_blocks_registration_without_new_storage() {
     server.join().unwrap();
     assert!(!h.home.join("tala.sqlite3").exists());
 }
+#[test]
+fn status_reports_an_incompatible_daemon_instead_of_failing() {
+    use std::io::Read;
+    use std::net::TcpListener;
+    let h = Harness::new();
+    std::fs::create_dir(&h.home).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::fs::write(
+        h.home.join("daemon.json"),
+        json!({"pid":42,"port":port,"protocol_version":2,"instance":"old"}).to_string(),
+    )
+    .unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 2048];
+        let _ = stream.read(&mut request).unwrap();
+        let body = "{\"instance\":\"old\",\"protocol_version\":2}";
+        write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+    });
+    let status = h.ok(&h.a, None, &["status"]);
+    server.join().unwrap();
+    assert_eq!(status["compatible"], false);
+    assert_eq!(status["error"]["code"], "PROTOCOL_MISMATCH");
+    std::fs::remove_file(h.home.join("daemon.json")).unwrap();
+}
 
 #[test]
 fn integration_preflight_failure_preserves_existing_documents() {
@@ -699,4 +738,478 @@ fn integration_preflight_failure_preserves_existing_documents() {
         "original"
     );
     assert!(!h.a.join(".opencode/skills/tala/SKILL.md").exists());
+}
+
+fn daemon_pid(h: &Harness) -> u64 {
+    let info: Value =
+        serde_json::from_slice(&std::fs::read(h.home.join("daemon.json")).unwrap()).unwrap();
+    info["pid"].as_u64().unwrap()
+}
+/// Pauses the daemon so it stays alive but cannot answer; resumes on drop.
+#[cfg(unix)]
+struct Paused(u64);
+#[cfg(unix)]
+impl Paused {
+    fn new(h: &Harness) -> Self {
+        let pid = daemon_pid(h);
+        assert!(Command::new("kill")
+            .args(["-STOP", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success());
+        Paused(pid)
+    }
+}
+#[cfg(unix)]
+impl Drop for Paused {
+    fn drop(&mut self) {
+        let _ = Command::new("kill")
+            .args(["-CONT", &self.0.to_string()])
+            .status();
+    }
+}
+fn second_daemon_attempted(h: &Harness) -> bool {
+    std::fs::read_to_string(h.home.join("daemon.log"))
+        .unwrap_or_default()
+        .contains("already owns")
+}
+fn wait_for_message(h: &Harness, agent: &Ident) -> String {
+    let start = Instant::now();
+    loop {
+        let messages = h.ok(&h.b, Some(agent), &["inbox", "--peek"]);
+        if let Some(m) = messages["messages"].as_array().unwrap().first() {
+            return m["id"].as_u64().unwrap().to_string();
+        }
+        assert!(start.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+fn stderr_json(o: &Output) -> Value {
+    serde_json::from_slice(&o.stderr).unwrap()
+}
+
+#[test]
+fn help_lists_exit_codes_and_every_error_code() {
+    let o = Command::new(bin()).arg("--help").output().unwrap();
+    let help = String::from_utf8(o.stdout).unwrap();
+    assert!(help.contains("4 stored but wait failed"));
+    for code in [
+        "WAIT_FAILED",
+        "DAEMON_UNREACHABLE",
+        "RECIPIENT_NOT_FOUND",
+        "same_key",
+    ] {
+        assert!(help.contains(code), "{code}");
+    }
+}
+#[test]
+fn errors_carry_retry_class_stored_and_next() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let e = h.error(
+        &h.a,
+        Some(&a),
+        &["send", "--to=missing", "hi"],
+        "RECIPIENT_NOT_FOUND",
+    );
+    assert_eq!(e["error"]["retry"], "after_fix");
+    assert_eq!(e["error"]["next"], "tala agents");
+    assert!(e["error"]["stored"].is_null());
+}
+#[test]
+fn refused_metadata_is_replaced_by_a_new_daemon() {
+    let h = Harness::new();
+    std::fs::create_dir(&h.home).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    std::fs::write(
+        h.home.join("daemon.json"),
+        json!({"pid":1,"port":port,"protocol_version":3,"instance":"gone"}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(h.ok(&h.a, None, &["status"])["stale_metadata"], true);
+    h.register(&h.a, "a");
+    assert_eq!(h.ok(&h.a, None, &["status"])["running"], true);
+}
+#[test]
+fn unreachable_daemon_is_reported_and_never_replaced() {
+    let h = Harness::new();
+    std::fs::create_dir(&h.home).unwrap();
+    // Accepts connections through the backlog but never answers.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = silent.local_addr().unwrap().port();
+    std::fs::write(
+        h.home.join("daemon.json"),
+        json!({"pid":1,"port":port,"protocol_version":3,"instance":"busy"}).to_string(),
+    )
+    .unwrap();
+    let e = h.error(
+        &h.a,
+        None,
+        &["register", "--name=a", "--tool=t"],
+        "DAEMON_UNREACHABLE",
+    );
+    assert_eq!(e["error"]["retry"], "same_key");
+    assert_eq!(e["error"]["next"], "tala status");
+    assert!(e["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("timed out"));
+    assert!(!h.home.join("tala.sqlite3").exists());
+    let status = h.ok(&h.a, None, &["status"]);
+    assert_eq!(
+        (status["running"].clone(), status["reachable"].clone()),
+        (Value::Null, json!(false))
+    );
+    std::fs::remove_file(h.home.join("daemon.json")).unwrap();
+}
+#[cfg(unix)]
+#[test]
+fn paused_daemon_reports_transport_error_not_a_missing_recipient() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    {
+        let _paused = Paused::new(&h);
+        let o = h.raw(&h.a, Some(&a), &["send", "--to", &b, "hello"]);
+        assert_eq!(o.status.code(), Some(1));
+        let code = stderr_json(&o)["error"]["code"].clone();
+        assert!(
+            code == "DAEMON_UNREACHABLE" || code == "CONNECTION_ERROR",
+            "{code}"
+        );
+    }
+    assert!(!second_daemon_attempted(&h));
+    h.send(&a, &b, "after resume");
+}
+#[cfg(unix)]
+#[test]
+fn blocking_send_survives_a_paused_daemon() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.b, "b");
+    let waiter = h
+        .command(
+            &h.a,
+            Some(&a),
+            &["send", "--to", &b, "--wait", "--timeout=30", "question"],
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mid = wait_for_message(&h, &b);
+    {
+        let _paused = Paused::new(&h);
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    h.ok(&h.b, Some(&b), &["reply", &mid, "answer"]);
+    let o = waiter.wait_with_output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["data"]["messages"][0]["parts"][0]["text"], "answer");
+    assert!(!second_daemon_attempted(&h));
+}
+#[cfg(unix)]
+#[test]
+fn wait_failing_after_storage_exits_4_with_resume_command() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.b, "b");
+    let waiter = h
+        .command(
+            &h.a,
+            Some(&a),
+            &["send", "--to", &b, "--wait", "--timeout=6", "question"],
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mid = wait_for_message(&h, &b);
+    let o = {
+        let _paused = Paused::new(&h);
+        waiter.wait_with_output().unwrap()
+    };
+    assert_eq!(
+        o.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let e = &stderr_json(&o)["error"];
+    assert_eq!(e["code"], "WAIT_FAILED");
+    assert_eq!(e["retry"], "never");
+    assert_eq!(e["stored"].to_string(), mid);
+    assert_eq!(
+        e["next"],
+        format!("tala inbox --wait --reply-to={mid} --timeout=6")
+    );
+    assert_eq!(
+        h.ok(&h.a, Some(&a), &["pending", "--direction=outgoing"])["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(!second_daemon_attempted(&h));
+}
+#[test]
+fn inbox_reply_to_returns_only_the_correlated_reply() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    let first = id(&h.send(&a, &b, "one"));
+    let second = id(&h.send(&a, &b, "two"));
+    h.ok(&h.a, Some(&b), &["reply", &second, "answer two"]);
+    let none = h.raw(
+        &h.a,
+        Some(&a),
+        &["inbox", "--wait", "--timeout=1", "--reply-to", &first],
+    );
+    assert_eq!(none.status.code(), Some(3));
+    h.ok(&h.a, Some(&b), &["reply", &first, "answer one"]);
+    let got = h.ok(&h.a, Some(&a), &["inbox", "--wait", "--reply-to", &first]);
+    assert_eq!(got["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(got["messages"][0]["parts"][0]["text"], "answer one");
+    assert_eq!(
+        h.ok(&h.a, Some(&a), &["inbox"])["messages"][0]["parts"][0]["text"],
+        "answer two"
+    );
+}
+#[test]
+fn identical_resend_without_key_is_a_duplicate() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    let c = h.register(&h.a, "c");
+    let one = h.send(&a, &b, "same text");
+    let two = h.send(&a, &b, "same text");
+    assert_eq!(two["duplicate"], true);
+    assert_eq!(two["message"]["id"], one["message"]["id"]);
+    assert_eq!(h.send(&c, &b, "same text")["duplicate"], false);
+    assert_eq!(h.send(&a, &b, "different text")["duplicate"], false);
+}
+#[test]
+fn public_ids_cannot_select_an_identity() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    h.send(&a, &b, "for b only");
+    for agent in [b.id.as_str(), "th_short"] {
+        let o = h
+            .command(&h.a, None, &["inbox"])
+            .arg(format!("--agent={agent}"))
+            .output()
+            .unwrap();
+        assert_eq!(stderr_json(&o)["error"]["code"], "IDENTITY_ERROR");
+    }
+    assert_eq!(
+        h.ok(&h.a, Some(&b), &["inbox"])["messages"][0]["parts"][0]["text"],
+        "for b only"
+    );
+}
+#[test]
+fn reissue_issues_one_handle_for_a_legacy_identity() {
+    use sha2::{Digest, Sha256};
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    h.send(&a, &b, "kept");
+    // Recreate the protocol 2 layout: credential stored by public ID only.
+    let digest: String = Sha256::digest(b.handle.as_bytes())
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect();
+    let handle_file = h.home.join("handles").join(format!("{digest}.json"));
+    std::fs::create_dir_all(h.home.join("identities")).unwrap();
+    std::fs::rename(
+        &handle_file,
+        h.home.join("identities").join(format!("{}.json", b.id)),
+    )
+    .unwrap();
+    let issued = h.ok(&h.a, None, &["register", &format!("--reissue={}", b.id)]);
+    assert_eq!(issued["agent"]["id"], b.id);
+    let reissued = Ident {
+        id: b.id.clone(),
+        handle: issued["handle"].as_str().unwrap().into(),
+    };
+    assert_eq!(
+        h.ok(&h.a, Some(&reissued), &["inbox"])["messages"][0]["parts"][0]["text"],
+        "kept"
+    );
+    h.error(
+        &h.a,
+        None,
+        &["register", &format!("--reissue={}", b.id)],
+        "IDENTITY_ERROR",
+    );
+    h.ok(&h.a, Some(&reissued), &["whoami"]);
+}
+#[test]
+fn handles_never_appear_in_shared_output() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    let sent = h.send(&a, &b, "parser");
+    h.ok(&h.a, Some(&a), &["post", "parser update"]);
+    let outputs = [
+        h.ok(&h.a, None, &["agents"]),
+        h.ok(&h.a, Some(&b), &["history", &thread(&sent)]),
+        h.ok(&h.a, Some(&b), &["search", "parser"]),
+        h.ok(&h.a, Some(&b), &["board"]),
+        h.ok(&h.a, Some(&b), &["inbox"]),
+        h.ok(&h.a, Some(&b), &["pending"]),
+        h.ok(&h.a, Some(&b), &[]),
+    ];
+    for output in outputs {
+        let text = output.to_string();
+        assert!(
+            !text.contains(&a.handle) && !text.contains(&b.handle),
+            "{text}"
+        );
+    }
+}
+#[test]
+fn json_is_the_default_and_human_renders_text() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    h.send(&a, &b, "rendered");
+    let plain = |args: &[&str]| {
+        let mut c = Command::new(bin());
+        c.env("TALA_HOME", &h.home)
+            .env("TALA_AGENT", &b.handle)
+            .current_dir(&h.a)
+            .args(args);
+        c.output().unwrap()
+    };
+    let o = plain(&["inbox", "--peek"]);
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["ok"], true);
+    let o = plain(&["inbox", "--peek", "--human"]);
+    let text = String::from_utf8(o.stdout).unwrap();
+    assert!(text.contains("rendered") && text.contains("ago"), "{text}");
+    assert!(text.contains("Attention: 1 unread"), "{text}");
+    let o = plain(&["--human"]);
+    let text = String::from_utf8(o.stdout).unwrap();
+    assert!(
+        text.contains("1 requests to you") && text.contains("Next: tala inbox"),
+        "{text}"
+    );
+    let o = plain(&["send", "--to=missing", "x", "--human"]);
+    assert!(String::from_utf8(o.stderr)
+        .unwrap()
+        .contains("Next: tala agents"));
+}
+fn git(dir: &Path, args: &[&str]) {
+    assert!(Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap()
+        .status
+        .success());
+}
+#[test]
+fn sibling_worktrees_share_one_board() {
+    let h = Harness::new();
+    git(&h.a, &["init", "-q"]);
+    git(&h.a, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    let wt = h.temp.path().join("wt");
+    git(
+        &h.a,
+        &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "side"],
+    );
+    git(&h.b, &["init", "-q"]);
+    let main = h.register(&h.a, "main");
+    let side = h.register(&wt, "side");
+    let other = h.register(&h.b, "other");
+    let root = std::fs::canonicalize(&h.a).unwrap().display().to_string();
+    let who = h.ok(&wt, Some(&side), &["whoami"]);
+    assert_eq!(who["agent"]["context"]["project"], root);
+    assert_eq!(
+        who["agent"]["context"]["worktree"],
+        std::fs::canonicalize(&wt).unwrap().display().to_string()
+    );
+    h.ok(&h.a, Some(&main), &["post", "changing parser"]);
+    let board = h.ok(&wt, Some(&side), &["board"]);
+    assert_eq!(board["messages"][0]["parts"][0]["text"], "changing parser");
+    assert_eq!(board["messages"][0]["context"]["worktree"], root);
+    assert_eq!(h.ok(&h.b, Some(&other), &["board"])["messages"], json!([]));
+}
+#[test]
+fn bare_tala_summarises_work_without_acknowledging_it() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    let empty = h.ok(&h.a, Some(&b), &[]);
+    assert_eq!(empty["incoming_requests"], json!([]));
+    assert_eq!(empty["unread"]["count"], 0);
+    assert!(empty["next"].is_null());
+    h.error(&h.a, None, &[], "IDENTITY_REQUIRED");
+    let request = id(&h.send(&a, &b, "review"));
+    h.ok(&h.a, Some(&a), &["send", "--to", &b, "fyi"]);
+    let summary = h.ok(&h.a, Some(&b), &[]);
+    assert_eq!(summary["incoming_requests"][0]["id"].to_string(), request);
+    assert_eq!(
+        summary["incoming_requests"][0]["next"],
+        format!("tala reply {request} '<answer>'")
+    );
+    assert_eq!(summary["unread"]["count"], 2);
+    assert_eq!(
+        h.ok(&h.a, Some(&b), &["inbox", "--peek"])["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let waiting = h.ok(&h.a, Some(&a), &[]);
+    assert_eq!(
+        waiting["outgoing_requests"][0]["next"],
+        format!("tala inbox --wait --reply-to={request}")
+    );
+    // An unregistered sender makes the request stale.
+    h.ok(&h.a, Some(&a), &["unregister"]);
+    let summary = h.ok(&h.a, Some(&b), &[]);
+    assert_eq!(summary["incoming_requests"], json!([]));
+    assert_eq!(summary["stale"]["incoming"], 1);
+    assert_eq!(
+        h.ok(&h.a, Some(&b), &["pending", "--stale"])["messages"][0]["id"].to_string(),
+        request
+    );
+}
+#[test]
+fn every_response_carries_ambient_attention() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    let envelope = |agent: &Ident, args: &[&str]| -> Value {
+        let o = h.raw(&h.a, Some(agent), args);
+        assert!(o.status.success());
+        serde_json::from_slice(&o.stdout).unwrap()
+    };
+    assert!(envelope(&b, &["post", "nothing waiting"])
+        .get("attention")
+        .is_none());
+    assert!(envelope(&b, &["agents"]).get("attention").is_none());
+    let request = id(&h.send(&a, &b, "review this"));
+    let posted = envelope(&b, &["post", "working"]);
+    assert_eq!(posted["data"]["message"]["parts"][0]["text"], "working");
+    let attention = &posted["attention"];
+    assert_eq!(attention["requests"][0]["id"].to_string(), request);
+    assert_eq!(attention["requests"][0]["from"], a.id);
+    assert!(!attention.to_string().contains("review this"));
+    assert_eq!(envelope(&b, &["agents"])["attention"]["open_requests"], 1);
+    let consumed = envelope(&b, &["inbox"]);
+    assert_eq!(consumed["attention"]["unread"], 0);
+    assert_eq!(consumed["attention"]["open_requests"], 1);
+    assert_eq!(
+        h.ok(&h.a, Some(&b), &["inbox", "--peek"])["messages"],
+        json!([])
+    );
 }

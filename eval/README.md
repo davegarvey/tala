@@ -22,5 +22,8 @@ Each agent registers once and retains its own ID through TALA_AGENT or explicit 
 | [Same project](scenarios/same-project.md) | Claude/Codex identities, inboxes and project board in one checkout |
 | [Cross project](scenarios/cross-project.md) | Addressed API question, context and automatic reply routing |
 | [Delivery and handoff](scenarios/delivery-handoff.md) | Receipt vs answer, timeout, late reply and successor context |
+| [Interrupted wait](scenarios/interrupted-wait.md) | Blocking send survives a paused daemon; no second daemon; exit 4 after storage |
+| [Shared checkout](scenarios/shared-checkout.md) | Two hookless agents in one directory: handles, missed requests, lost identity |
+| [Sibling worktrees](scenarios/sibling-worktrees.md) | Linked worktrees share one project board |
 
 Capture CLI JSON outputs, elapsed times and feedback in scratch files. Retrieve history and pending state through the CLI before stopping the daemon. Record message count, first-reply latency, timeouts, help lookups, incorrect commands, and internal-storage reads. A successful evaluation has correct recipients, no skipped messages, no identity confusion and no storage inspection. Report findings for human review and fold accepted changes into OpenSpec.

@@ -98,6 +98,8 @@ CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT, thread
 CREATE INDEX IF NOT EXISTS inbox ON messages(recipient,received_at,id);
 CREATE INDEX IF NOT EXISTS thread_messages ON messages(thread,id);
 CREATE INDEX IF NOT EXISTS board_messages ON messages(project,id);
+CREATE INDEX IF NOT EXISTS incoming_requests ON messages(recipient,expects_reply,answered_by);
+CREATE INDEX IF NOT EXISTS outgoing_requests ON messages(sender,expects_reply,answered_by);
 CREATE TABLE IF NOT EXISTS rpc_results(request_id TEXT PRIMARY KEY, canonical TEXT NOT NULL, response TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS participants(thread TEXT NOT NULL, agent TEXT NOT NULL REFERENCES agents(id), PRIMARY KEY(thread,agent));
 PRAGMA user_version=1; COMMIT;")?;
@@ -111,7 +113,14 @@ PRAGMA user_version=1; COMMIT;")?;
         }
         Ok(Self { db })
     }
+    #[cfg(test)]
     pub fn execute(&mut self, rpc: &Rpc) -> Result<Value> {
+        Ok(self.execute_with_attention(rpc)?.0)
+    }
+    /// Executes one operation and, for an authenticated agent, computes its
+    /// compact attention summary in the same transaction, after the
+    /// operation's own effects.
+    pub fn execute_with_attention(&mut self, rpc: &Rpc) -> Result<(Value, Option<Value>)> {
         if rpc.protocol_version != PROTOCOL_VERSION {
             return Err(Failure::new(
                 "PROTOCOL_MISMATCH",
@@ -137,40 +146,39 @@ PRAGMA user_version=1; COMMIT;")?;
                 [&rpc.request_id],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             ) {
-                Ok((old, response)) if old == canonical => return decode(&response),
+                Ok((old, response)) if old == canonical => return Ok((decode(&response)?, None)),
                 Ok(_) => return Err(invalid("Request ID reused for another operation")),
                 Err(rusqlite::Error::QueryReturnedNoRows) => {}
                 Err(e) => return Err(e.into()),
             }
         }
-        let identity = if let Some(c) = &rpc.credential {
-            let found = tx.query_row("SELECT token FROM agents WHERE id=?", [&c.agent], |r| {
-                r.get::<_, String>(0)
-            });
-            match found {
-                Ok(token) if token == c.token => {}
-                _ => {
-                    return Err(Failure::new(
+        let identity =
+            if let Some(c) = &rpc.credential {
+                let found = tx.query_row("SELECT token FROM agents WHERE id=?", [&c.agent], |r| {
+                    r.get::<_, String>(0)
+                });
+                match found {
+                    Ok(token) if token == c.token => {}
+                    _ => return Err(Failure::new(
                         "IDENTITY_ERROR",
                         "Agent credential is unknown or invalid",
-                        "Register an agent and select its ID with TALA_AGENT or --agent.",
-                    ))
+                        "Register an agent and pass its private handle with --agent or TALA_AGENT.",
+                    )),
                 }
-            }
-            tx.execute(
-                "UPDATE agents SET last_seen=?, active=1 WHERE id=?",
-                params![now(), c.agent],
-            )?;
-            Some(c.agent.as_str())
-        } else {
-            None
-        };
+                tx.execute(
+                    "UPDATE agents SET last_seen=?, active=1 WHERE id=?",
+                    params![now(), c.agent],
+                )?;
+                Some(c.agent.as_str())
+            } else {
+                None
+            };
         let require = || {
             identity.ok_or_else(|| {
                 Failure::new(
                     "IDENTITY_REQUIRED",
                     "Select your agent identity",
-                    "Run tala register, then set TALA_AGENT to its returned agent ID.",
+                    "Run tala register, then pass its private handle with --agent or TALA_AGENT.",
                 )
             })
         };
@@ -304,15 +312,40 @@ PRAGMA user_version=1; COMMIT;")?;
             }
             Operation::Pending {
                 direction,
+                stale,
                 after,
                 limit,
             } => {
                 let id = require()?;
-                if !["all", "incoming", "outgoing"].contains(&direction.as_str()) {
-                    return Err(invalid("Direction must be incoming, outgoing or all"));
+                let side = match direction.as_str() {
+                    "incoming" => "messages.recipient=?1",
+                    "outgoing" => "messages.sender=?1",
+                    "all" => "(messages.recipient=?1 OR messages.sender=?1)",
+                    _ => return Err(invalid("Direction must be incoming, outgoing or all")),
+                };
+                let cutoff = cutoff(STALE_AFTER);
+                let open = format!("{OPEN} AND {side}");
+                let selected = if *stale {
+                    format!("{open} AND {STALE}")
+                } else {
+                    format!("{open} AND NOT {STALE}")
+                };
+                let mut data = json!(page(&tx, &selected, params![id, cutoff], *after, *limit)?);
+                if !stale {
+                    data["stale_count"] = json!(count(
+                        &tx,
+                        &format!("{open} AND {STALE}"),
+                        params![id, cutoff]
+                    )?);
+                    data["stale_next"] = json!(if direction == "all" {
+                        "tala pending --stale".to_string()
+                    } else {
+                        format!("tala pending --stale --direction={direction}")
+                    });
                 }
-                json!(page(&tx,"expects_reply=1 AND answered_by IS NULL AND cancelled=0 AND ((recipient=? AND ?!='outgoing') OR (sender=? AND ?!='incoming'))",params![id,direction,id,direction],*after,*limit)?)
+                data
             }
+            Operation::Attention => summary(&tx, require()?, cutoff(STALE_AFTER))?,
             Operation::Resolve { message: id } => {
                 let msg = message(&tx, *id)?;
                 if msg.sender != require()? || !msg.expects_reply {
@@ -336,6 +369,10 @@ PRAGMA user_version=1; COMMIT;")?;
             }
             Operation::Stop => json!({"stopped":true}),
         };
+        let attention = match identity {
+            Some(id) if !matches!(rpc.operation, Operation::Attention) => ambient(&tx, id)?,
+            _ => None,
+        };
         if cache {
             tx.execute(
                 "INSERT INTO rpc_results(request_id,canonical,response) VALUES(?,?,?)",
@@ -343,8 +380,137 @@ PRAGMA user_version=1; COMMIT;")?;
             )?;
         }
         tx.commit()?;
-        Ok(result)
+        Ok((result, attention))
     }
+}
+/// Default age after which an unanswered request counts as stale.
+pub const STALE_AFTER: u64 = 24 * 60 * 60;
+/// Window within which an identical send without an explicit key is a duplicate.
+const AUTO_KEY_WINDOW: i64 = 10 * 60;
+const OPEN: &str =
+    "messages.expects_reply=1 AND messages.answered_by IS NULL AND messages.cancelled=0";
+/// Stale for agent ?1 with cutoff ?2: too old, or the counterpart unregistered.
+const STALE: &str = "(messages.created_at < ?2 OR EXISTS(SELECT 1 FROM agents x WHERE x.id = CASE WHEN messages.recipient=?1 THEN messages.sender ELSE messages.recipient END AND x.active=0))";
+fn cutoff(stale_after: u64) -> i64 {
+    now() - stale_after as i64
+}
+fn count<P: rusqlite::Params>(tx: &Transaction<'_>, predicate: &str, p: P) -> Result<u64> {
+    Ok(tx.query_row(
+        &format!("SELECT count(*) FROM messages WHERE {predicate}"),
+        p,
+        |r| r.get(0),
+    )?)
+}
+fn reply_next(id: u64) -> String {
+    format!("tala reply {id} '<answer>'")
+}
+fn with_next(page: Page, next: impl Fn(&Message) -> String) -> Vec<Value> {
+    page.messages
+        .iter()
+        .map(|m| {
+            let mut v = json!(m);
+            v["next"] = json!(next(m));
+            v
+        })
+        .collect()
+}
+/// Full attention summary for bare `tala`; acknowledges nothing.
+fn summary(tx: &Transaction<'_>, id: &str, cutoff: i64) -> Result<Value> {
+    let incoming = format!("{OPEN} AND messages.recipient=?1");
+    let outgoing = format!("{OPEN} AND messages.sender=?1");
+    let unread = "messages.recipient=?1 AND messages.received_at IS NULL";
+    let requests = page(
+        tx,
+        &format!("{incoming} AND NOT {STALE}"),
+        params![id, cutoff],
+        0,
+        50,
+    )?;
+    let more = requests.has_more;
+    let requests = with_next(requests, |m| reply_next(m.id));
+    let waiting = with_next(
+        page(
+            tx,
+            &format!("{outgoing} AND NOT {STALE}"),
+            params![id, cutoff],
+            0,
+            50,
+        )?,
+        |m| format!("tala inbox --wait --reply-to={}", m.id),
+    );
+    let unread_count = count(tx, unread, params![id])?;
+    let unread_page = with_next(page(tx, unread, params![id], 0, 50)?, |_| {
+        "tala inbox".into()
+    });
+    let stale_in = count(tx, &format!("{incoming} AND {STALE}"), params![id, cutoff])?;
+    let stale_out = count(tx, &format!("{outgoing} AND {STALE}"), params![id, cutoff])?;
+    let next = if unread_count > 0 {
+        Some("tala inbox".to_string())
+    } else if let Some(first) = requests.first() {
+        first["next"].as_str().map(Into::into)
+    } else if stale_in + stale_out > 0 {
+        Some("tala pending --stale".to_string())
+    } else {
+        None
+    };
+    Ok(json!({
+        "incoming_requests": requests,
+        "incoming_has_more": more,
+        "unread": {"count": unread_count, "messages": unread_page},
+        "outgoing_requests": waiting,
+        "stale": {"incoming": stale_in, "outgoing": stale_out, "next": "tala pending --stale"},
+        "next": next,
+    }))
+}
+/// Compact attention attached to every authenticated response; None when
+/// nothing awaits the agent. Contains no message bodies.
+fn ambient(tx: &Transaction<'_>, id: &str) -> Result<Option<Value>> {
+    let cutoff = cutoff(STALE_AFTER);
+    let fresh = format!("{OPEN} AND messages.recipient=?1 AND NOT {STALE}");
+    let unread = count(
+        tx,
+        "messages.recipient=?1 AND messages.received_at IS NULL",
+        params![id],
+    )?;
+    let open = count(tx, &fresh, params![id, cutoff])?;
+    let stale = count(
+        tx,
+        &format!("{OPEN} AND (messages.recipient=?1 OR messages.sender=?1) AND {STALE}"),
+        params![id, cutoff],
+    )?;
+    if unread + open + stale == 0 {
+        return Ok(None);
+    }
+    let mut stmt = tx.prepare(&format!(
+        "SELECT id,sender,created_at FROM messages WHERE {fresh} ORDER BY id LIMIT 3"
+    ))?;
+    let requests = stmt
+        .query_map(params![id, cutoff], |r| {
+            Ok((
+                r.get::<_, u64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let next = if unread > 0 {
+        "tala inbox".to_string()
+    } else if let Some((first, _, _)) = requests.first() {
+        reply_next(*first)
+    } else {
+        "tala pending --stale".to_string()
+    };
+    let requests: Vec<Value> = requests
+        .into_iter()
+        .map(|(id, from, created)| json!({"id": id, "from": from, "age_seconds": (now() - created).max(0)}))
+        .collect();
+    Ok(Some(json!({
+        "unread": unread,
+        "requests": requests,
+        "open_requests": open,
+        "stale": stale,
+        "next": next,
+    })))
 }
 fn bounds(limit: usize) -> Result<()> {
     if !(1..=500).contains(&limit) {
@@ -440,6 +606,7 @@ fn row_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         answered_by: r.get(12)?,
         cancelled: r.get(13)?,
         delivery: String::new(),
+        age_seconds: (now() - r.get::<_, i64>(10)?).max(0),
     };
     msg.delivery = delivery(&msg);
     Ok(msg)
@@ -512,24 +679,25 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
         return Err(invalid("Message exceeds the 1 MiB limit"));
     }
     let canonical = encode(operation)?;
-    let prior = tx.query_row(
-        "SELECT id,canonical FROM messages WHERE sender=? AND key=?",
-        params![sender, key],
-        |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?)),
-    );
-    match prior {
-        Ok((id, old)) => {
-            if old != canonical {
-                return Err(Failure::new(
-                    "IDEMPOTENCY_CONFLICT",
-                    "Key already used for a different operation",
-                    "Use a fresh key for a new message; preserve keys only for identical retries.",
-                ));
+    let mut stored_key = key.clone();
+    if key.starts_with("auto:") {
+        // Content-derived key: an identical send inside the window is a
+        // duplicate; outside it, store a new message under a suffixed key.
+        let prior = tx.query_row(
+            "SELECT id,created_at FROM messages WHERE sender=?1 AND key>=?2 AND key<?3 ORDER BY id DESC LIMIT 1",
+            params![sender, key, format!("{key};")],
+            |r| Ok((r.get::<_, u64>(0)?, r.get::<_, i64>(1)?)),
+        );
+        match prior {
+            Ok((id, created)) if now() - created <= AUTO_KEY_WINDOW => {
+                return Ok(json!({"message":message(tx,id)?,"duplicate":true}));
             }
-            return Ok(json!({"message":message(tx,id)?,"duplicate":true}));
+            Ok(_) => stored_key = format!("{key}:{}", Uuid::new_v4().simple()),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(e) => return Err(e.into()),
         }
-        Err(rusqlite::Error::QueryReturnedNoRows) => {}
-        Err(e) => return Err(e.into()),
+    } else if let Some(id) = explicit_key(tx, sender, key, &canonical)? {
+        return Ok(json!({"message":message(tx,id)?,"duplicate":true}));
     }
     let (recipient, board, thread_id) = if let Some(id) = reply_to {
         if kind != "reply" || to.is_some() || project.is_some() || thread.is_some() {
@@ -601,7 +769,7 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
     if recipient.as_deref() == Some(sender) {
         return Err(invalid("Choose a different recipient"));
     }
-    tx.execute("INSERT INTO messages(thread,sender,recipient,project,context,parts,kind,reply_to,expects_reply,created_at,key,canonical) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",params![thread_id,sender,recipient,board,encode(context)?,encode(parts)?,kind,reply_to,request,now(),key,canonical])?;
+    tx.execute("INSERT INTO messages(thread,sender,recipient,project,context,parts,kind,reply_to,expects_reply,created_at,key,canonical) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",params![thread_id,sender,recipient,board,encode(context)?,encode(parts)?,kind,reply_to,request,now(),stored_key,canonical])?;
     let id = tx.last_insert_rowid() as u64;
     tx.execute(
         "INSERT OR IGNORE INTO participants(thread,agent) VALUES(?,?)",
@@ -623,6 +791,30 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
     Ok(json!({"message":message(tx,id)?,"duplicate":false}))
 }
 
+/// Explicit keys deduplicate without a window and reject changed content.
+fn explicit_key(
+    tx: &Transaction<'_>,
+    sender: &str,
+    key: &str,
+    canonical: &str,
+) -> Result<Option<u64>> {
+    let prior = tx.query_row(
+        "SELECT id,canonical FROM messages WHERE sender=? AND key=?",
+        params![sender, key],
+        |r| Ok((r.get::<_, u64>(0)?, r.get::<_, String>(1)?)),
+    );
+    match prior {
+        Ok((_, old)) if old != canonical => Err(Failure::new(
+            "IDEMPOTENCY_CONFLICT",
+            "Key already used for a different operation",
+            "Use a fresh key for a new message; preserve keys only for identical retries.",
+        )),
+        Ok((id, _)) => Ok(Some(id)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,6 +829,7 @@ mod tests {
     fn context() -> Context {
         Context {
             project: "/test/project".into(),
+            worktree: None,
             branch: None,
             revision: None,
         }
@@ -668,6 +861,217 @@ mod tests {
             key: key.into(),
             context: context(),
         }
+    }
+    fn age(store: &Store, id: u64, seconds: i64) {
+        store
+            .db
+            .execute(
+                "UPDATE messages SET created_at=created_at-? WHERE id=?",
+                params![seconds, id],
+            )
+            .unwrap();
+    }
+    fn pending(stale: bool) -> Operation {
+        Operation::Pending {
+            direction: "incoming".into(),
+            stale,
+            after: 0,
+            limit: 50,
+        }
+    }
+    fn auto(to: &str, text: &str) -> Operation {
+        let mut op = send(to, &format!("auto:{text}"));
+        if let Operation::Send { parts, .. } = &mut op {
+            *parts = vec![Part::Text { text: text.into() }];
+        }
+        op
+    }
+    #[test]
+    fn ages_and_staleness_are_computed_at_response_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let a = register(&mut store, "a");
+        let b = register(&mut store, "b");
+        let fresh = store
+            .execute(&rpc(send(&b.agent, "1"), Some(a.clone())))
+            .unwrap();
+        let old = store
+            .execute(&rpc(send(&b.agent, "2"), Some(a.clone())))
+            .unwrap();
+        let fresh_id = fresh["message"]["id"].as_u64().unwrap();
+        let old_id = old["message"]["id"].as_u64().unwrap();
+        age(&store, fresh_id, 5400);
+        age(&store, old_id, 30 * 86400);
+        let listed = store
+            .execute(&rpc(pending(false), Some(b.clone())))
+            .unwrap();
+        assert_eq!(listed["messages"].as_array().unwrap().len(), 1);
+        let seconds = listed["messages"][0]["age_seconds"].as_i64().unwrap();
+        assert!((5400..5410).contains(&seconds));
+        assert_eq!(listed["stale_count"], 1);
+        let stale = store.execute(&rpc(pending(true), Some(b.clone()))).unwrap();
+        assert_eq!(stale["messages"][0]["id"], old_id);
+        // Staleness does not change state: the stale request is still answerable.
+        let mut reply = send("unused", "r");
+        if let Operation::Send {
+            to,
+            reply_to,
+            kind,
+            request,
+            ..
+        } = &mut reply
+        {
+            *to = None;
+            *reply_to = Some(old_id);
+            *kind = "reply".into();
+            *request = false;
+        }
+        store.execute(&rpc(reply, Some(b.clone()))).unwrap();
+        let stale = store.execute(&rpc(pending(true), Some(b))).unwrap();
+        assert_eq!(stale["messages"], json!([]));
+    }
+    #[test]
+    fn unregistered_counterpart_makes_request_stale() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let a = register(&mut store, "a");
+        let b = register(&mut store, "b");
+        store
+            .execute(&rpc(send(&b.agent, "1"), Some(a.clone())))
+            .unwrap();
+        store.execute(&rpc(Operation::Unregister, Some(a))).unwrap();
+        let listed = store
+            .execute(&rpc(pending(false), Some(b.clone())))
+            .unwrap();
+        assert_eq!(
+            (listed["messages"].clone(), listed["stale_count"].clone()),
+            (json!([]), json!(1))
+        );
+        let summary = store.execute(&rpc(Operation::Attention, Some(b))).unwrap();
+        assert_eq!(summary["incoming_requests"], json!([]));
+        assert_eq!(summary["stale"]["incoming"], 1);
+        assert_eq!(summary["next"], "tala inbox");
+    }
+    #[test]
+    fn automatic_keys_deduplicate_only_inside_the_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let a = register(&mut store, "a");
+        let b = register(&mut store, "b");
+        let c = register(&mut store, "c");
+        let first = store
+            .execute(&rpc(auto(&b.agent, "same"), Some(a.clone())))
+            .unwrap();
+        let again = store
+            .execute(&rpc(auto(&b.agent, "same"), Some(a.clone())))
+            .unwrap();
+        assert_eq!(again["duplicate"], true);
+        assert_eq!(again["message"]["id"], first["message"]["id"]);
+        // The same key from another sender is a different message.
+        let other = store
+            .execute(&rpc(auto(&b.agent, "same"), Some(c)))
+            .unwrap();
+        assert_eq!(other["duplicate"], false);
+        age(
+            &store,
+            first["message"]["id"].as_u64().unwrap(),
+            AUTO_KEY_WINDOW + 1,
+        );
+        let later = store
+            .execute(&rpc(auto(&b.agent, "same"), Some(a.clone())))
+            .unwrap();
+        assert_eq!(later["duplicate"], false);
+        assert_ne!(later["message"]["id"], first["message"]["id"]);
+        let repeat = store
+            .execute(&rpc(auto(&b.agent, "same"), Some(a)))
+            .unwrap();
+        assert_eq!(repeat["message"]["id"], later["message"]["id"]);
+    }
+    #[test]
+    fn ambient_attention_reflects_the_operations_own_effects() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let a = register(&mut store, "a");
+        let b = register(&mut store, "b");
+        let (_, none) = store
+            .execute_with_attention(&rpc(Operation::Whoami, Some(b.clone())))
+            .unwrap();
+        assert!(none.is_none());
+        let sent = store.execute(&rpc(send(&b.agent, "k"), Some(a))).unwrap();
+        let id = sent["message"]["id"].as_u64().unwrap();
+        let (_, attention) = store
+            .execute_with_attention(&rpc(Operation::Whoami, Some(b.clone())))
+            .unwrap();
+        let attention = attention.unwrap();
+        assert_eq!(attention["unread"], 1);
+        assert_eq!(attention["requests"][0]["id"], id);
+        assert!(attention.to_string().find("hello").is_none());
+        let consume = Operation::Inbox {
+            peek: false,
+            after: 0,
+            limit: 50,
+            reply_to: None,
+            listening: false,
+        };
+        let (_, attention) = store
+            .execute_with_attention(&rpc(consume, Some(b)))
+            .unwrap();
+        let attention = attention.unwrap();
+        assert_eq!(attention["unread"], 0);
+        assert_eq!(attention["open_requests"], 1);
+        assert_eq!(attention["next"], format!("tala reply {id} '<answer>'"));
+    }
+    /// Measures ambient attention cost on 10,000 messages:
+    /// `cargo test --release --bin tala attention_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn attention_cost() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let a = register(&mut store, "a");
+        let b = register(&mut store, "b");
+        let c = register(&mut store, "c");
+        for n in 0..10_000 {
+            let (from, to) = if n % 2 == 0 { (&a, &b) } else { (&c, &a) };
+            store
+                .execute(&rpc(send(&to.agent, &n.to_string()), Some(from.clone())))
+                .unwrap();
+        }
+        let runs = 500;
+        let time = |store: &mut Store, f: &dyn Fn(&mut Store)| {
+            let start = std::time::Instant::now();
+            for _ in 0..runs {
+                f(store);
+            }
+            start.elapsed() / runs
+        };
+        let whoami = time(&mut store, &|s| {
+            s.execute_with_attention(&rpc(Operation::Whoami, Some(b.clone())))
+                .unwrap();
+        });
+        let ambient_only = time(&mut store, &|s| {
+            let tx = s.db.transaction().unwrap();
+            ambient(&tx, &b.agent).unwrap();
+        });
+        let d = register(&mut store, "d");
+        for n in 0..3 {
+            store
+                .execute(&rpc(send(&d.agent, &format!("d{n}")), Some(a.clone())))
+                .unwrap();
+        }
+        let typical = time(&mut store, &|s| {
+            s.execute_with_attention(&rpc(Operation::Whoami, Some(d.clone())))
+                .unwrap();
+        });
+        let bare = time(&mut store, &|s| {
+            let tx = s.db.transaction().unwrap();
+            agent(&tx, &d.agent).unwrap();
+        });
+        println!("10,000 messages in the home:");
+        println!(
+            "  agent with 5,000 open requests: whoami {whoami:?}, attention alone {ambient_only:?}"
+        );
+        println!("  agent with 3 open requests:     whoami {typical:?}, whoami work without attention {bare:?}");
     }
     #[test]
     fn lost_inbox_response_replays_same_batch_after_restart() {
@@ -706,8 +1110,10 @@ mod tests {
             },
             None,
         );
-        req.protocol_version = 1;
-        assert_eq!(store.execute(&req).unwrap_err().code, "PROTOCOL_MISMATCH");
+        for old in [1, 2] {
+            req.protocol_version = old;
+            assert_eq!(store.execute(&req).unwrap_err().code, "PROTOCOL_MISMATCH");
+        }
         assert_eq!(
             store.execute(&rpc(Operation::Status, None)).unwrap()["agents"],
             0
