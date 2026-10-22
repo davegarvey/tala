@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-10-22
+
+### Added
+
+- improve message context and timeout recovery (#106)
+
+### Changed
+
+- run the release workflow once per merge (#105)
+- add 12 October agent-first evaluation report (#104)
+
 ## [1.1.0] - 2026-10-12
 
 ### Added
