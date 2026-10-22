@@ -854,6 +854,7 @@ mod tests {
         Context {
             project: "/test/project".into(),
             worktree: None,
+            working_directory: None,
             branch: None,
             revision: None,
         }

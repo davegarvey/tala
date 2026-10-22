@@ -20,7 +20,7 @@ Setting `TALA_AGENT=th_<your-handle>` for your own process also works, but most 
 
 An identity created before handles existed gets a handle once with `tala register --reissue=<your agt_ id>`.
 
-Your identity is independent of directory. Changing directories does not move your registered project or default board.
+Your identity is independent of directory. Changing directories does not move your registered project or default board. Each outgoing message records both the registered project/worktree context and `working_directory`, the canonical directory where that specific command ran. Treat the latter as the sender's current location; it does not change their identity or board membership.
 
 ## What needs your attention
 

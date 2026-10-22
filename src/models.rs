@@ -296,6 +296,8 @@ pub struct Context {
     pub project: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
     pub branch: Option<String>,
     pub revision: Option<String>,
 }
