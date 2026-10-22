@@ -361,11 +361,51 @@ fn timeout_retains_stored_request_and_late_reply() {
     let sent = &v["data"]["sent"];
     assert_eq!(v["data"]["timed_out"], true);
     assert_eq!(v["data"]["sent"]["snapshot"], "at_send");
+    assert_eq!(
+        v["data"]["next"],
+        format!("tala inbox --wait --reply-to={} --timeout=1", id(sent))
+    );
+    assert_eq!(
+        h.ok(&h.a, Some(&a), &["status", "--message", &id(sent)])["message"]["delivery"],
+        "stored"
+    );
     h.ok(&h.b, Some(&b), &["reply", &id(sent), "late reply"]);
     assert_eq!(
-        h.ok(&h.a, Some(&a), &["inbox"])["messages"][0]["parts"][0]["text"],
+        h.ok(
+            &h.a,
+            Some(&a),
+            &["inbox", "--wait", "--reply-to", &id(sent), "--timeout=5"]
+        )["messages"][0]["parts"][0]["text"],
         "late reply"
     );
+    assert_eq!(
+        h.ok(&h.a, Some(&a), &["status", "--message", &id(sent)])["message"]["delivery"],
+        "answered"
+    );
+}
+
+#[test]
+fn send_wait_timeout_human_output_has_safe_recovery_guidance() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.b, "b");
+    let o = h.raw(
+        &h.a,
+        Some(&a),
+        &[
+            "send",
+            "--to",
+            &b,
+            "--wait",
+            "--timeout=1",
+            "question",
+            "--human",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(3));
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    assert!(stdout.contains("the request was stored. Do not resend it."));
+    assert!(stdout.contains("tala inbox --wait --reply-to=1 --timeout=1"));
 }
 #[test]
 fn blocking_send_matches_only_correlated_reply_and_preserves_other_messages() {
@@ -668,6 +708,30 @@ fn git_root_and_branch_context_are_stable_from_nested_directories() {
     h.ok(&nested, None, &["init"]);
     assert!(h.a.join(".tala/AGENTS.md").exists());
     assert!(!nested.join(".tala").exists());
+}
+
+#[test]
+fn outgoing_message_records_current_directory_without_changing_identity_context() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.b, "b");
+    let sent = h.ok(
+        &h.b,
+        Some(&a),
+        &["send", "--to", &b, "message from another checkout"],
+    );
+    assert_eq!(
+        sent["message"]["context"]["project"],
+        h.a.canonicalize().unwrap().display().to_string()
+    );
+    assert_eq!(
+        sent["message"]["context"]["working_directory"],
+        h.b.canonicalize().unwrap().display().to_string()
+    );
+    assert_eq!(
+        h.ok(&h.b, Some(&a), &["whoami"])["agent"]["context"]["project"],
+        h.a.canonicalize().unwrap().display().to_string()
+    );
 }
 
 #[test]

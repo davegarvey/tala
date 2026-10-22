@@ -348,6 +348,7 @@ pub fn context(path: Option<&Path>) -> Result<Context> {
     Ok(Context {
         project: project.display().to_string(),
         worktree: worktree.map(|w| w.display().to_string()),
+        working_directory: Some(dir.display().to_string()),
         branch: git(&["symbolic-ref", "--short", "HEAD"]),
         revision: git(&["rev-parse", "HEAD"]),
     })
@@ -366,13 +367,15 @@ async fn identity_context(credential: &Credential) -> Result<Context> {
     // Rebuild from the registered worktree, not the project root: in a linked
     // worktree the project is the main checkout, but messages must record the
     // sender's own worktree, branch and revision.
-    let dir = registered
-        .context
-        .worktree
-        .as_deref()
-        .filter(|w| Path::new(w).is_dir())
-        .unwrap_or(&registered.context.project);
-    context(Some(Path::new(dir)))
+    let mut context = registered.context;
+    context.working_directory = Some(
+        std::fs::canonicalize(std::env::current_dir()?)?
+            .display()
+            .to_string(),
+    );
+    // Preserve identity and board context while recording where this specific
+    // message command was invoked.
+    Ok(context)
 }
 /// Fills an empty send key with one derived from sender, routing and
 /// content, so an identical resend is recognised as a duplicate.
@@ -894,6 +897,11 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                 } else {
                     result.data["sent"]["snapshot"] = json!("at_send");
                 }
+                if result.data["timed_out"] == true {
+                    result.data["next"] = json!(format!(
+                        "tala inbox --wait --reply-to={id} --timeout={timeout}"
+                    ));
+                }
                 return Ok(result);
             }
             data
@@ -1132,7 +1140,14 @@ pub fn render(data: &Value, attention: Option<&Value>) {
         );
     }
     if data["timed_out"] == true {
-        println!("Wait timed out; stored messages remain available.");
+        if !data["sent"].is_null() {
+            println!("Wait timed out; the request was stored. Do not resend it.");
+            if let Some(next) = data["next"].as_str() {
+                println!("Resume waiting with: {next}");
+            }
+        } else {
+            println!("Wait timed out; no messages were returned.");
+        }
     }
     if let Some(a) = attention {
         let requests: Vec<String> = a["requests"]
@@ -1284,6 +1299,7 @@ mod tests {
             context: Context {
                 project: "/p".into(),
                 worktree: None,
+                working_directory: None,
                 branch: None,
                 revision: None,
             },
