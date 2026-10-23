@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Every error code with its retry class, meaning and default next command.
 /// Retry classes: `safe` (repeat as is), `same_key` (repeat with the same
@@ -111,6 +111,12 @@ pub const ERRORS: &[(&str, Retry, &str, Option<&str>)] = &[
         Some("tala --help"),
     ),
     (
+        "NOT_PROJECT_OWNER",
+        Retry::Never,
+        "Only the owning agent can change project lifecycle",
+        None,
+    ),
+    (
         "RECIPIENT_NOT_FOUND",
         Retry::AfterFix,
         "No agent has that ID or name",
@@ -192,6 +198,7 @@ pub fn help_text() -> String {
         "Start: tala register --name=codex --tool=codex\n\
 Pass the returned private handle with --agent=<handle> or TALA_AGENT on every command.\n\
 Then: tala (what needs attention); tala agents; tala send --to=<id> --request 'Review this'; tala inbox; tala reply <id> 'Done'\n\
+Projects: tala list-projects [--stale|--closed|--all]; owner lifecycle: tala close-project / tala reopen-project\n\
 Output is one JSON envelope; --human renders text.\n\n\
 Exit codes: 0 success, 1 operational error (nothing stored), 2 usage error, 3 wait timeout, 4 stored but wait failed (do not resend).\n\n\
 Error codes (retry class: safe | same_key | after_fix | never):\n",
@@ -379,6 +386,14 @@ pub enum Operation {
         after: String,
         limit: usize,
     },
+    ListProjects {
+        include_stale: bool,
+        include_closed: bool,
+        after: String,
+        limit: usize,
+    },
+    CloseProject,
+    ReopenProject,
     Send {
         to: Option<String>,
         project: Option<String>,

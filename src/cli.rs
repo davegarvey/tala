@@ -87,6 +87,27 @@ pub enum Commands {
         #[arg(long,default_value_t=50,value_parser=limit)]
         limit: usize,
     },
+    /// List current projects; stale and closed projects are hidden by default
+    ListProjects {
+        #[arg(long, help = "Include stale projects")]
+        stale: bool,
+        #[arg(long, help = "Include closed projects")]
+        closed: bool,
+        #[arg(long, conflicts_with_all = ["stale", "closed"], help = "Include stale and closed projects")]
+        all: bool,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Return project paths after this cursor"
+        )]
+        after: String,
+        #[arg(long, default_value_t=50,value_parser=limit)]
+        limit: usize,
+    },
+    /// Close the project owned by your selected agent
+    CloseProject,
+    /// Reopen the project owned by your selected agent
+    ReopenProject,
     /// Send to an explicit recipient; --wait consumes only its correlated reply
     Send {
         #[arg(long)]
@@ -735,6 +756,34 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             )
             .await?
         }
+        Commands::ListProjects {
+            stale,
+            closed,
+            all,
+            after,
+            limit,
+        } => {
+            client::call(
+                Operation::ListProjects {
+                    include_stale: all || stale,
+                    include_closed: all || closed,
+                    after,
+                    limit,
+                },
+                Some(client::credential(selected)?),
+            )
+            .await?
+        }
+        Commands::CloseProject => {
+            client::call(Operation::CloseProject, Some(client::credential(selected)?)).await?
+        }
+        Commands::ReopenProject => {
+            client::call(
+                Operation::ReopenProject,
+                Some(client::credential(selected)?),
+            )
+            .await?
+        }
         Commands::Status { message } => {
             let mut status = match client::existing(Operation::Status).await {
                 Ok(Some(status)) => status,
@@ -1101,6 +1150,23 @@ pub fn render(data: &Value, attention: Option<&Value>) {
         if data["duplicate"] == true {
             println!("Duplicate suppressed.");
         }
+    } else if let Some(projects) = data["projects"].as_array() {
+        render_projects(data, projects);
+    } else if data["project"].is_string() && data["changed"].is_boolean() {
+        let state = if data["closed"] == true {
+            "closed"
+        } else {
+            "open"
+        };
+        println!(
+            "Project {} is {state}{}.",
+            data["project"].as_str().unwrap_or(""),
+            if data["changed"] == true {
+                ""
+            } else {
+                " (no change)"
+            }
+        );
     } else if let Some(handle) = data["handle"].as_str() {
         println!(
             "Registered {} ({}). Pass --agent={handle} on every tala command; keep the handle private.",
@@ -1178,6 +1244,49 @@ pub fn render(data: &Value, attention: Option<&Value>) {
                 String::new()
             },
             a["next"].as_str().unwrap_or("")
+        );
+    }
+}
+fn render_projects(data: &Value, projects: &[Value]) {
+    if projects.is_empty() {
+        println!("No projects match these filters.");
+    }
+    let now = store::now();
+    for project in projects {
+        let mut states = vec![if project["closed"] == true {
+            "closed"
+        } else {
+            "open"
+        }];
+        if project["stale"] == true {
+            states.push("stale");
+        }
+        let age = now.saturating_sub(project["last_activity"].as_i64().unwrap_or(now));
+        println!(
+            "{}  {}  owner: {} ({})  last activity: {} ago",
+            states.join(", "),
+            project["project"].as_str().unwrap_or(""),
+            project["owner_name"].as_str().unwrap_or(""),
+            project["owner_id"].as_str().unwrap_or(""),
+            human_age(age),
+        );
+    }
+    let stale = data["hidden"]["stale"].as_u64().unwrap_or(0);
+    let closed = data["hidden"]["closed"].as_u64().unwrap_or(0);
+    if stale > 0 {
+        println!(
+            "{stale} stale project(s) hidden. Include with: tala list-projects --stale (or --all)."
+        );
+    }
+    if closed > 0 {
+        println!(
+            "{closed} closed project(s) hidden. Include with: tala list-projects --closed (or --all)."
+        );
+    }
+    if data["has_more"] == true {
+        println!(
+            "More projects: repeat with --after='{}'",
+            data["next_after"].as_str().unwrap_or("")
         );
     }
 }

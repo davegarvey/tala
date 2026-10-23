@@ -138,6 +138,43 @@ fn same_checkout_agents_have_separate_inboxes_and_receipts() {
         sent["message"]["id"]
     );
 }
+
+#[test]
+fn project_list_hides_closed_projects_and_owner_can_reopen() {
+    let h = Harness::new();
+    let owner = h.register(&h.a, "owner");
+    let peer = h.register(&h.a, "peer");
+    let other = h.register(&h.b, "other");
+    let project_a = std::fs::canonicalize(&h.a).unwrap().display().to_string();
+    let project_b = std::fs::canonicalize(&h.b).unwrap().display().to_string();
+
+    let initial = h.ok(&h.a, Some(&owner), &["list-projects"]);
+    assert_eq!(initial["projects"].as_array().unwrap().len(), 2);
+    assert_eq!(initial["projects"][0]["project"], project_a);
+    assert_eq!(initial["projects"][0]["owner_id"], owner.id);
+    assert_eq!(initial["projects"][1]["project"], project_b);
+    assert_eq!(initial["projects"][1]["owner_id"], other.id);
+
+    let closed = h.ok(&h.a, Some(&owner), &["close-project"]);
+    assert_eq!(closed["closed"], true);
+    assert_eq!(closed["changed"], true);
+    let default = h.ok(&h.a, Some(&owner), &["list-projects"]);
+    assert_eq!(default["projects"].as_array().unwrap().len(), 1);
+    assert_eq!(default["projects"][0]["project"], project_b);
+    assert_eq!(default["hidden"]["closed"], 1);
+
+    let error = h.error(&h.a, Some(&peer), &["close-project"], "NOT_PROJECT_OWNER");
+    assert_eq!(error["error"]["retry"], "never");
+    let with_closed = h.ok(&h.a, Some(&owner), &["list-projects", "--closed"]);
+    assert_eq!(with_closed["projects"].as_array().unwrap().len(), 2);
+    assert_eq!(with_closed["projects"][0]["closed"], true);
+
+    let reopened = h.ok(&h.a, Some(&owner), &["reopen-project"]);
+    assert_eq!(reopened["closed"], false);
+    let all = h.ok(&h.a, Some(&owner), &["list-projects", "--all"]);
+    assert_eq!(all["projects"].as_array().unwrap().len(), 2);
+}
+
 #[test]
 fn cross_project_context_boards_and_handoff() {
     let h = Harness::new();
@@ -876,7 +913,14 @@ fn help_lists_exit_codes_and_every_error_code() {
         "WAIT_FAILED",
         "DAEMON_UNREACHABLE",
         "RECIPIENT_NOT_FOUND",
+        "NOT_PROJECT_OWNER",
         "same_key",
+        "list-projects",
+        "close-project",
+        "reopen-project",
+        "--stale",
+        "--closed",
+        "--all",
     ] {
         assert!(help.contains(code), "{code}");
     }
