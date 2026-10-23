@@ -119,6 +119,12 @@ When daemon metadata points at a port that refuses connections, the client start
 
 Lists default to 50 items (maximum 500). Repeat with `--after=<next_after>` while `has_more` is true. Inbox acknowledges only returned messages atomically; `--peek` does not acknowledge. Delivery states are `stored`, `received`, `answered`, and `cancelled`. Receipt means fetched through inbox or explicitly replied to, not proof of comprehension.
 
+## Project lifecycle
+
+`tala list-projects` gives a server-wide overview. By default it shows open projects with activity in the last 30 days, reports how many stale and closed projects were hidden, and prints the commands to include them. `--stale` includes stale projects, `--closed` includes closed projects, and `--all` includes both. Project lists default to 50 entries and support `--after` pagination.
+
+The first agent registered in a canonical repository owns that project. The owner can run `tala close-project` or `tala reopen-project` using its private handle. Closing hides the project from the default overview but preserves agents and all message and board history; it does not block messaging. Staleness is computed from the last registration, message or reopening activity and clears when activity resumes. Closing and staleness are independent.
+
 ## Commands
 
 | Command | Purpose |
@@ -127,6 +133,8 @@ Lists default to 50 items (maximum 500). Repeat with `--after=<next_after>` whil
 | `register --name=<name> --tool=<tool>` | Create a distinct instance and return its private handle |
 | `whoami` / `unregister` | Inspect or mark your selected instance inactive |
 | `agents [--project=<path>]` | Discover peers and observed presence |
+| `list-projects [--stale\|--closed\|--all]` | List projects; stale and closed projects are hidden by default |
+| `close-project` / `reopen-project` | Close or reopen the project owned by your selected agent |
 | `send --to=<id-or-name> [--request] [--wait]` | Send a direct message; optional `--thread` continues a direct thread |
 | `inbox [--peek] [--wait] [--reply-to=<id>]` | Fetch addressed unread messages |
 | `reply <message-id>` | Automatically route a reply |
@@ -149,6 +157,12 @@ A private local HTTP daemon starts on demand, bound to `127.0.0.1`. One daemon o
 
 Use the CLI to inspect state. The database, credentials and handle files are implementation details, not a messaging interface. Handles prevent accidental cross-use between cooperating agents; access to the same user's filesystem is not an agent security boundary.
 
+Upgrade from protocol 3:
+
+1. Stop the protocol 3 daemon with its matching binary (`tala stop`).
+2. Install the new binary and verify its version.
+3. Start Tala with the new binary; the database migrates transactionally, preserves existing agents/messages, and assigns each existing project to its earliest registered agent.
+
 Upgrade from protocol 2:
 
 1. Stop the protocol 2 daemon with its matching binary (`tala stop`).
@@ -156,7 +170,7 @@ Upgrade from protocol 2:
 3. Each existing agent runs `tala register --reissue=<its agt_ id>` once and uses the returned handle, or registers afresh.
 4. Run `tala init --refresh` to update generated instructions.
 
-To roll back, stop the protocol 3 daemon and reinstall the previous release. Messages remain in SQLite. A reissued identity needs its credential restored for the old CLI: copy the JSON file under `TALA_HOME/handles/` whose `agent` field is that ID back to `TALA_HOME/identities/<agt_id>.json`.
+To roll back from protocol 4, stop the new daemon and reinstall the previous release. Messages and project records remain in SQLite; the previous binary ignores the additive project table. A reissued identity needs its credential restored for the old CLI: copy the JSON file under `TALA_HOME/handles/` whose `agent` field is that ID back to `TALA_HOME/identities/<agt_id>.json`.
 
 Upgrade from the session-based interface:
 

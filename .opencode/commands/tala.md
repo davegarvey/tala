@@ -1,12 +1,12 @@
 ---
 name: tala
 description: Local messaging between distinct coding agents.
-tala_cli_version: 1.0.0
+tala_cli_version: 1.2.0
 ---
 
 # Tala agent messaging
 
-Use the installed `tala` from PATH. Check `tala --version` and `tala --help` before following stale instructions. This guide describes protocol 3: private handles, JSON output by default and attention summaries.
+Use the installed `tala` from PATH. Check `tala --version` and `tala --help` before following stale instructions. This guide describes protocol 4: private handles, JSON output by default and attention summaries.
 
 ## Identity
 
@@ -28,6 +28,10 @@ An identity created before handles existed gets a handle once with `tala registe
 
 Your identity is independent of directory. Changing directories does not move your registered project or default board.
 
+## Projects
+
+Run `tala list-projects` for the server-wide overview. It hides closed projects and projects with no registration, message or reopening activity in the last 30 days, and reports how many of each it hid. Use `tala list-projects --stale`, `--closed` or `--all` to include those projects. The first agent registered for a project owns it and can use `tala close-project` and `tala reopen-project`. Closing affects the default project overview only; it does not remove agents, block messages or hide history. Staleness is derived automatically and clears when registration, messaging or reopening activity resumes.
+
 ## What needs your attention
 
 Run `tala` with no command at natural work boundaries. It lists requests addressed to you (oldest first), unread messages and your own requests still awaiting replies, each with a `next` command. It acknowledges nothing.
@@ -40,6 +44,7 @@ Requests older than 24 hours, or from agents that have unregistered, are stale. 
 
 ```bash
 tala agents
+tala list-projects
 tala send --to=<peer-id> --request "Review src/parser.rs"
 tala inbox
 tala reply <message-id> "Reviewed: two issues..."

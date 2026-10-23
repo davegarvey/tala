@@ -7,6 +7,8 @@ use std::{
 };
 use uuid::Uuid;
 
+const PROJECT_STALE_AFTER: i64 = 30 * 24 * 60 * 60;
+
 pub fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -95,6 +97,7 @@ impl Store {
         db.execute_batch("BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY, name TEXT NOT NULL, tool TEXT NOT NULL, context TEXT NOT NULL, token TEXT NOT NULL, last_seen INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1, listening_until INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL, sender TEXT NOT NULL REFERENCES agents(id), recipient TEXT REFERENCES agents(id), project TEXT, context TEXT NOT NULL, parts TEXT NOT NULL, kind TEXT NOT NULL, reply_to INTEGER REFERENCES messages(id), expects_reply INTEGER NOT NULL, created_at INTEGER NOT NULL, received_at INTEGER, answered_by INTEGER REFERENCES messages(id), cancelled INTEGER NOT NULL DEFAULT 0, key TEXT NOT NULL, canonical TEXT NOT NULL, UNIQUE(sender,key));
+CREATE TABLE IF NOT EXISTS projects(project TEXT PRIMARY KEY, owner_agent TEXT NOT NULL REFERENCES agents(id), closed INTEGER NOT NULL DEFAULT 0, last_activity INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS inbox ON messages(recipient,received_at,id);
 CREATE INDEX IF NOT EXISTS thread_messages ON messages(thread,id);
 CREATE INDEX IF NOT EXISTS board_messages ON messages(project,id);
@@ -104,6 +107,28 @@ CREATE TABLE IF NOT EXISTS rpc_results(request_id TEXT PRIMARY KEY, canonical TE
 CREATE TABLE IF NOT EXISTS participants(thread TEXT NOT NULL, agent TEXT NOT NULL REFERENCES agents(id), PRIMARY KEY(thread,agent));
 CREATE TABLE IF NOT EXISTS board_deliveries(message INTEGER NOT NULL REFERENCES messages(id), agent TEXT NOT NULL REFERENCES agents(id), received_at INTEGER, PRIMARY KEY(message,agent));
 CREATE INDEX IF NOT EXISTS unread_deliveries ON board_deliveries(agent,received_at);
+INSERT OR IGNORE INTO projects(project,owner_agent,closed,last_activity)
+SELECT json_extract(first.context,'$.project'), first.id, 0, activity.last_activity
+FROM agents AS first
+JOIN (
+  SELECT json_extract(context,'$.project') AS project, MIN(rowid) AS first_rowid,
+         MAX(last_seen) AS last_seen
+  FROM agents
+  WHERE json_extract(context,'$.project') IS NOT NULL
+  GROUP BY json_extract(context,'$.project')
+) AS owners ON owners.first_rowid=first.rowid
+JOIN (
+  SELECT json_extract(context,'$.project') AS project, MAX(last_seen) AS last_activity
+  FROM agents
+  WHERE json_extract(context,'$.project') IS NOT NULL
+  GROUP BY json_extract(context,'$.project')
+) AS activity ON activity.project=json_extract(first.context,'$.project');
+UPDATE projects
+SET last_activity=MAX(last_activity, COALESCE((
+  SELECT MAX(created_at) FROM messages
+  WHERE json_extract(messages.context,'$.project')=projects.project
+     OR messages.project=projects.project
+),last_activity));
 PRAGMA user_version=1; COMMIT;")?;
         let check: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
         if check != "ok" {
@@ -139,6 +164,8 @@ PRAGMA user_version=1; COMMIT;")?;
                 | Operation::Send { .. }
                 | Operation::Inbox { peek: false, .. }
                 | Operation::Resolve { .. }
+                | Operation::CloseProject
+                | Operation::ReopenProject
                 | Operation::Unregister
         );
         let canonical = encode(rpc)?;
@@ -195,9 +222,18 @@ PRAGMA user_version=1; COMMIT;")?;
                 }
                 let id = format!("agt_{}", Uuid::new_v4().simple());
                 let token = Uuid::new_v4().to_string();
+                let created_at = now();
                 tx.execute(
                     "INSERT INTO agents(id,name,tool,context,token,last_seen) VALUES(?,?,?,?,?,?)",
-                    params![id, name, tool, encode(context)?, token, now()],
+                    params![id, name, tool, encode(context)?, token, created_at],
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO projects(project,owner_agent,closed,last_activity) VALUES(?,?,0,?)",
+                    params![context.project, id, created_at],
+                )?;
+                tx.execute(
+                    "UPDATE projects SET last_activity=? WHERE project=?",
+                    params![created_at, context.project],
                 )?;
                 json!({"agent":agent(&tx,&id)?,"credential":Credential{agent:id,token}})
             }
@@ -234,6 +270,96 @@ PRAGMA user_version=1; COMMIT;")?;
                 list.truncate(*limit);
                 let next = list.last().map(|a| a.id.as_str()).unwrap_or(after);
                 json!({"next_after":next,"has_more":more,"agents":list})
+            }
+            Operation::ListProjects {
+                include_stale,
+                include_closed,
+                after,
+                limit,
+            } => {
+                let _ = require()?;
+                bounds(*limit)?;
+                let at = now();
+                let stale_before = at - PROJECT_STALE_AFTER;
+                let mut stmt = tx.prepare(
+                    "SELECT project,owner_agent,closed,last_activity FROM projects ORDER BY project",
+                )?;
+                let rows = stmt
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, bool>(2)?,
+                            r.get::<_, i64>(3)?,
+                        ))
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let mut projects = Vec::new();
+                let (mut hidden_stale, mut hidden_closed) = (0usize, 0usize);
+                for (project, owner_id, closed, last_activity) in rows {
+                    let stale = last_activity <= stale_before;
+                    if closed && !include_closed {
+                        hidden_closed += 1;
+                    }
+                    if stale && !closed && !include_stale {
+                        hidden_stale += 1;
+                    }
+                    if (closed && !include_closed) || (!closed && stale && !include_stale) {
+                        continue;
+                    }
+                    if project.as_str() <= after.as_str() {
+                        continue;
+                    }
+                    let owner = agent(&tx, &owner_id)?;
+                    projects.push(json!({
+                        "project": project,
+                        "owner_id": owner.id,
+                        "owner_name": owner.name,
+                        "closed": closed,
+                        "stale": stale,
+                        "last_activity": last_activity,
+                    }));
+                }
+                let has_more = projects.len() > *limit;
+                projects.truncate(*limit);
+                let next = projects
+                    .last()
+                    .and_then(|p| p["project"].as_str())
+                    .unwrap_or(after);
+                json!({
+                    "projects": projects,
+                    "next_after": next,
+                    "has_more": has_more,
+                    "hidden": {"stale": hidden_stale, "closed": hidden_closed},
+                    "include_stale": include_stale,
+                    "include_closed": include_closed,
+                })
+            }
+            Operation::CloseProject | Operation::ReopenProject => {
+                let id = require()?;
+                let project = agent(&tx, id)?.context.project;
+                let (owner, closed): (String, bool) = tx.query_row(
+                    "SELECT owner_agent,closed FROM projects WHERE project=?",
+                    [&project],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                if owner != id {
+                    return Err(Failure::new(
+                        "NOT_PROJECT_OWNER",
+                        "Only the owning agent can change project lifecycle",
+                        "Select the owner identity or ask the owner agent to change the project state.",
+                    ));
+                }
+                let should_close = matches!(&rpc.operation, Operation::CloseProject);
+                if closed != should_close && should_close {
+                    tx.execute("UPDATE projects SET closed=1 WHERE project=?", [&project])?;
+                } else if closed != should_close {
+                    tx.execute(
+                        "UPDATE projects SET closed=0,last_activity=? WHERE project=?",
+                        params![now(), project],
+                    )?;
+                }
+                json!({"project":project,"closed":should_close,"changed":closed != should_close})
             }
             Operation::Send { .. } => send(&tx, require()?, &rpc.operation)?,
             Operation::Inbox {
@@ -782,8 +908,30 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
     if recipient.as_deref() == Some(sender) {
         return Err(invalid("Choose a different recipient"));
     }
-    tx.execute("INSERT INTO messages(thread,sender,recipient,project,context,parts,kind,reply_to,expects_reply,created_at,key,canonical) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",params![thread_id,sender,recipient,board,encode(context)?,encode(parts)?,kind,reply_to,request,now(),stored_key,canonical])?;
+    let created_at = now();
+    tx.execute("INSERT INTO messages(thread,sender,recipient,project,context,parts,kind,reply_to,expects_reply,created_at,key,canonical) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",params![thread_id,sender,recipient,board,encode(context)?,encode(parts)?,kind,reply_to,request,created_at,stored_key,canonical])?;
     let id = tx.last_insert_rowid() as u64;
+    tx.execute(
+        "UPDATE projects SET last_activity=? WHERE project=?",
+        params![created_at, context.project],
+    )?;
+    if let Some(recipient_id) = recipient.as_deref() {
+        let recipient_project = agent(tx, recipient_id)?.context.project;
+        if recipient_project != context.project {
+            tx.execute(
+                "UPDATE projects SET last_activity=? WHERE project=?",
+                params![created_at, recipient_project],
+            )?;
+        }
+    }
+    if let Some(board_project) = &board {
+        if board_project != &context.project {
+            tx.execute(
+                "UPDATE projects SET last_activity=? WHERE project=?",
+                params![created_at, board_project],
+            )?;
+        }
+    }
     tx.execute(
         "INSERT OR IGNORE INTO participants(thread,agent) VALUES(?,?)",
         params![thread_id, sender],
@@ -871,6 +1019,14 @@ mod tests {
             ))
             .unwrap();
         serde_json::from_value(v["credential"].clone()).unwrap()
+    }
+    fn list_projects(include_stale: bool, include_closed: bool) -> Operation {
+        Operation::ListProjects {
+            include_stale,
+            include_closed,
+            after: String::new(),
+            limit: 50,
+        }
     }
     fn send(to: &str, key: &str) -> Operation {
         Operation::Send {
@@ -1364,6 +1520,154 @@ mod tests {
                 .unwrap_err()
                 .code,
             "IDENTITY_ERROR"
+        );
+    }
+
+    #[test]
+    fn projects_are_owned_listed_and_closed_without_losing_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let owner = register(&mut store, "owner");
+        let peer = register(&mut store, "peer");
+
+        let projects = store
+            .execute(&rpc(list_projects(false, false), Some(owner.clone())))
+            .unwrap();
+        assert_eq!(projects["projects"].as_array().unwrap().len(), 1);
+        assert_eq!(projects["projects"][0]["owner_id"], owner.agent);
+
+        let sent = store
+            .execute(&rpc(
+                send(&peer.agent, "project-message"),
+                Some(owner.clone()),
+            ))
+            .unwrap();
+        let thread_id = sent["message"]["thread_id"].as_str().unwrap().to_string();
+        store
+            .db
+            .execute(
+                "UPDATE projects SET last_activity=? WHERE project=?",
+                params![now() - PROJECT_STALE_AFTER - 1, "/test/project"],
+            )
+            .unwrap();
+
+        let hidden = store
+            .execute(&rpc(list_projects(false, false), Some(owner.clone())))
+            .unwrap();
+        assert_eq!(hidden["projects"], json!([]));
+        assert_eq!(hidden["hidden"]["stale"], 1);
+        let stale = store
+            .execute(&rpc(list_projects(true, false), Some(owner.clone())))
+            .unwrap();
+        assert_eq!(stale["projects"][0]["stale"], true);
+
+        let err = store
+            .execute(&rpc(Operation::CloseProject, Some(peer.clone())))
+            .unwrap_err();
+        assert_eq!(err.code, "NOT_PROJECT_OWNER");
+        let closed = store
+            .execute(&rpc(Operation::CloseProject, Some(owner.clone())))
+            .unwrap();
+        assert_eq!(closed["closed"], true);
+        let visible_closed = store
+            .execute(&rpc(list_projects(false, true), Some(owner.clone())))
+            .unwrap();
+        assert_eq!(visible_closed["projects"][0]["closed"], true);
+        assert_eq!(visible_closed["projects"][0]["stale"], true);
+
+        store
+            .execute(&rpc(
+                send(&peer.agent, "project-message-2"),
+                Some(owner.clone()),
+            ))
+            .unwrap();
+        let all = store
+            .execute(&rpc(list_projects(true, true), Some(owner.clone())))
+            .unwrap();
+        assert_eq!(all["projects"][0]["closed"], true);
+        assert_eq!(all["projects"][0]["stale"], false);
+
+        store
+            .db
+            .execute(
+                "UPDATE projects SET last_activity=? WHERE project=?",
+                params![now() - PROJECT_STALE_AFTER - 1, "/test/project"],
+            )
+            .unwrap();
+        store
+            .execute(&rpc(Operation::ReopenProject, Some(owner.clone())))
+            .unwrap();
+        let reopened = store
+            .execute(&rpc(list_projects(false, false), Some(owner.clone())))
+            .unwrap();
+        assert_eq!(reopened["projects"].as_array().unwrap().len(), 1);
+        assert_eq!(reopened["projects"][0]["stale"], false);
+        let history = store
+            .execute(&rpc(
+                Operation::History {
+                    thread: thread_id,
+                    after: 0,
+                    limit: 50,
+                },
+                Some(owner),
+            ))
+            .unwrap();
+        assert_eq!(history["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migration_backfills_project_owner_and_last_activity() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("db");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE agents(id TEXT PRIMARY KEY, name TEXT NOT NULL, tool TEXT NOT NULL, context TEXT NOT NULL, token TEXT NOT NULL, last_seen INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1, listening_until INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL, sender TEXT NOT NULL REFERENCES agents(id), recipient TEXT REFERENCES agents(id), project TEXT, context TEXT NOT NULL, parts TEXT NOT NULL, kind TEXT NOT NULL, reply_to INTEGER REFERENCES messages(id), expects_reply INTEGER NOT NULL, created_at INTEGER NOT NULL, received_at INTEGER, answered_by INTEGER REFERENCES messages(id), cancelled INTEGER NOT NULL DEFAULT 0, key TEXT NOT NULL, canonical TEXT NOT NULL, UNIQUE(sender,key));
+             PRAGMA user_version=1;",
+        )
+        .unwrap();
+        let context = encode(&context()).unwrap();
+        db.execute(
+            "INSERT INTO agents(id,name,tool,context,token,last_seen) VALUES('agt_first','first','test',?,'secret-first',100)",
+            [&context],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO agents(id,name,tool,context,token,last_seen) VALUES('agt_second','second','test',?,'secret-second',200)",
+            [&context],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO messages(thread,sender,project,context,parts,kind,expects_reply,created_at,key,canonical) VALUES('thr_old','agt_second',NULL,?,'[]','message',0,300,'old','old')",
+            [&context],
+        )
+        .unwrap();
+        drop(db);
+
+        let store = Store::open(&path).unwrap();
+        let (owner, activity): (String, i64) = store
+            .db
+            .query_row(
+                "SELECT owner_agent,last_activity FROM projects WHERE project='/test/project'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(owner, "agt_first");
+        assert_eq!(activity, 300);
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT count(*) FROM agents", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            1
         );
     }
 }
