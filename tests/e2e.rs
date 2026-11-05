@@ -975,7 +975,8 @@ fn unified_wait_watches_explicit_project_and_resumes_from_separate_cursors() {
     assert_eq!(waiting["events"][0]["id"], post_id.parse::<u64>().unwrap());
     assert_eq!(waiting["events"][0]["type"], "board_post");
     let restart = waiting["next"]["listen_again"].as_str().unwrap();
-    assert!(restart.contains(&format!("--project={canonical_project}")));
+    assert!(restart.contains("--project="));
+    assert!(restart.contains(&canonical_project));
     assert!(restart.contains(&format!("--board-after={post_id}")));
     assert!(restart.contains("--inbox-after=0"));
 

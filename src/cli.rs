@@ -723,7 +723,10 @@ fn wait_command(inbox_after: u64, board_after: Option<u64>, timeout: u64, projec
         command.push_str(&format!(" --board-after={board_after}"));
     }
     if !project.is_empty() {
-        command.push_str(&format!(" --project={}", shell_word(project)));
+        command.push_str(&format!(
+            " --project={}",
+            shell_quote_selector_path(project)
+        ));
     }
     command
 }
@@ -756,7 +759,10 @@ fn wait_result(events: BTreeMap<u64, (String, Vec<String>)>, meta: WaitResultMet
     let mut board_next = board_present.then(|| format!("tala board --after={}", meta.board_before));
     if let Some(command) = &mut board_next {
         if !meta.project.is_empty() {
-            command.push_str(&format!(" --project={}", shell_word(&meta.project)));
+            command.push_str(&format!(
+                " --project={}",
+                shell_quote_selector_path(&meta.project)
+            ));
         }
     }
     let listen_again = wait_command(
