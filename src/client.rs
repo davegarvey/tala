@@ -4,7 +4,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Write},
+    io::Read,
     path::Path,
     process::{Command, Stdio},
     sync::Mutex,
@@ -317,6 +317,7 @@ fn open_selector_read(path: &Path) -> Result<File> {
 
 #[cfg(unix)]
 fn write_selector(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
     let parent = path
