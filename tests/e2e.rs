@@ -778,6 +778,12 @@ fn git_root_and_branch_context_are_stable_from_nested_directories() {
 #[test]
 fn outgoing_message_records_current_directory_without_changing_identity_context() {
     let h = Harness::new();
+    git(&h.a, &["init", "-q"]);
+    git(&h.a, &["branch", "-M", "main"]);
+    git(
+        &h.a,
+        &["commit", "-q", "--allow-empty", "-m", "registered revision"],
+    );
     let a = h.register(&h.a, "a");
     let b = h.register(&h.b, "b");
     let sent = h.ok(
@@ -793,9 +799,16 @@ fn outgoing_message_records_current_directory_without_changing_identity_context(
         sent["message"]["context"]["working_directory"],
         h.b.canonicalize().unwrap().display().to_string()
     );
+    assert!(sent["message"]["context"]["worktree"].is_null());
+    assert!(sent["message"]["context"]["branch"].is_null());
+    assert!(sent["message"]["context"]["revision"].is_null());
     assert_eq!(
         h.ok(&h.b, Some(&a), &["whoami"])["agent"]["context"]["project"],
         h.a.canonicalize().unwrap().display().to_string()
+    );
+    assert_eq!(
+        h.ok(&h.b, Some(&a), &["whoami"])["agent"]["context"]["branch"],
+        "main"
     );
 }
 
@@ -1305,6 +1318,72 @@ fn sibling_worktrees_share_one_board() {
     assert_eq!(
         h.ok(&h.a, Some(&main), &["board"])["messages"][1]["parts"][0]["text"],
         "changing report"
+    );
+}
+
+#[test]
+fn outgoing_message_uses_invocation_linked_worktree_branch_revision_and_directory() {
+    let h = Harness::new();
+    git(&h.a, &["init", "-q"]);
+    git(&h.a, &["branch", "-M", "main"]);
+    git(
+        &h.a,
+        &["commit", "-q", "--allow-empty", "-m", "registered revision"],
+    );
+    let wt = h.temp.path().join("invocation-worktree");
+    git(
+        &h.a,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            wt.to_str().unwrap(),
+            "-b",
+            "feature",
+        ],
+    );
+    git(
+        &wt,
+        &["commit", "-q", "--allow-empty", "-m", "invocation revision"],
+    );
+    let nested = wt.join("src").join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    let sender = h.register(&h.a, "sender");
+    let reader = h.register(&h.a, "reader");
+    let posted = h.ok(
+        &nested,
+        Some(&sender),
+        &["post", "current worktree context"],
+    );
+    let message_context = &posted["message"]["context"];
+    let project = h.a.canonicalize().unwrap().display().to_string();
+    let canonical_wt = wt.canonicalize().unwrap().display().to_string();
+    let canonical_nested = nested.canonicalize().unwrap().display().to_string();
+    let expected_revision = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&wt)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+
+    assert_eq!(message_context["project"], project);
+    assert_eq!(message_context["working_directory"], canonical_nested);
+    assert_eq!(message_context["worktree"], canonical_wt);
+    assert_eq!(message_context["branch"], "feature");
+    assert_eq!(message_context["revision"], expected_revision);
+    assert_eq!(
+        h.ok(&h.a, Some(&reader), &["board"])["messages"][0]["context"]["project"],
+        project
+    );
+    assert_eq!(
+        h.ok(&h.a, Some(&sender), &["whoami"])["agent"]["context"]["branch"],
+        "main"
     );
 }
 #[test]
