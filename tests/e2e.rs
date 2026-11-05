@@ -979,6 +979,212 @@ fn status_is_read_only_and_corrupt_database_fails_loudly() {
         "not a database"
     );
 }
+
+#[test]
+fn status_reports_identity_context_for_each_selector_without_exposing_secrets() {
+    let h = Harness::new();
+    let none = h.ok(&h.a, None, &["status"]);
+    assert_eq!(none["identity_context"]["selector_source"], "none");
+    assert_eq!(none["identity_context"]["selection_state"], "none");
+    assert_eq!(
+        none["identity_context"]["unavailable_reason"],
+        "no_identity"
+    );
+
+    let selector_path = h.home.join("private-selector");
+    let registered = h.ok(
+        &h.a,
+        None,
+        &[
+            "register",
+            "--name=status-agent",
+            "--tool=fixture",
+            &format!("--save-handle-to={}", selector_path.display()),
+        ],
+    );
+    let identity = Ident {
+        id: registered["agent"]["id"].as_str().unwrap().into(),
+        handle: std::fs::read_to_string(&selector_path)
+            .unwrap()
+            .trim()
+            .into(),
+    };
+    let expected_project = std::fs::canonicalize(&h.a).unwrap();
+    let assert_context = |data: &Value, source: &str| {
+        let context = &data["identity_context"];
+        assert_eq!(context["selector_source"], source);
+        assert_eq!(context["selection_state"], "selected");
+        assert_eq!(context["agent"]["id"], identity.id);
+        assert_eq!(context["agent"]["name"], "status-agent");
+        assert_eq!(context["project_root"], expected_project.to_str().unwrap());
+        assert_eq!(context["board_latest_id"], 0);
+        assert!(context["unavailable_reason"].is_null());
+        let serialized = data.to_string();
+        assert!(!serialized.contains(&identity.handle));
+        assert!(!serialized.contains(selector_path.to_str().unwrap()));
+    };
+
+    assert_context(&h.ok(&h.b, Some(&identity), &["status"]), "--agent");
+
+    let mut env_agent = h.command(&h.b, None, &["status"]);
+    env_agent.env("TALA_AGENT", &identity.handle);
+    let env_agent = env_agent.output().unwrap();
+    assert!(env_agent.status.success());
+    assert_context(
+        &serde_json::from_slice::<Value>(&env_agent.stdout).unwrap()["data"],
+        "environment",
+    );
+
+    let mut explicit_file = h.command(
+        &h.b,
+        None,
+        &["--agent-file", selector_path.to_str().unwrap(), "status"],
+    );
+    let explicit_file = explicit_file.output().unwrap();
+    assert!(
+        explicit_file.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit_file.stderr)
+    );
+    assert_context(
+        &serde_json::from_slice::<Value>(&explicit_file.stdout).unwrap()["data"],
+        "selector_file",
+    );
+
+    let mut env_file = h.command(&h.b, None, &["status"]);
+    env_file.env("TALA_AGENT_FILE", &selector_path);
+    let env_file = env_file.output().unwrap();
+    assert!(env_file.status.success());
+    assert_context(
+        &serde_json::from_slice::<Value>(&env_file.stdout).unwrap()["data"],
+        "selector_file",
+    );
+
+    let mut invalid = h.command(&h.b, None, &["status"]);
+    invalid.env("TALA_AGENT", "th_private-invalid-value");
+    let invalid = invalid.output().unwrap();
+    assert!(invalid.status.success());
+    let invalid_data: Value = serde_json::from_slice(&invalid.stdout).unwrap();
+    assert_eq!(
+        invalid_data["data"]["identity_context"]["selection_state"],
+        "invalid"
+    );
+    assert_eq!(
+        invalid_data["data"]["identity_context"]["error_code"],
+        "IDENTITY_ERROR"
+    );
+    assert!(!String::from_utf8_lossy(&invalid.stdout).contains("th_private-invalid-value"));
+
+    let mut conflict = h.command(&h.b, None, &["status"]);
+    conflict
+        .env("TALA_AGENT", "th_private-conflicting-value")
+        .env("TALA_AGENT_FILE", &selector_path);
+    let conflict = conflict.output().unwrap();
+    assert!(conflict.status.success());
+    let conflict_text = String::from_utf8_lossy(&conflict.stdout);
+    let conflict_data: Value = serde_json::from_slice(&conflict.stdout).unwrap();
+    assert_eq!(
+        conflict_data["data"]["identity_context"]["selector_source"],
+        "environment"
+    );
+    assert_eq!(
+        conflict_data["data"]["identity_context"]["selection_state"],
+        "invalid"
+    );
+    assert!(!conflict_text.contains("th_private-conflicting-value"));
+    assert!(!conflict_text.contains(selector_path.to_str().unwrap()));
+
+    let human = h.raw(&h.b, Some(&identity), &["status", "--human"]);
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("Identity selector: --agent (selected)"));
+    assert!(human.contains(&identity.id));
+    assert!(human.contains("status-agent"));
+    assert!(human.contains(expected_project.to_str().unwrap()));
+    assert!(human.contains("Board latest ID: 0 (read-only high-water mark)"));
+    assert!(!human.contains(&identity.handle));
+    assert!(!human.contains(selector_path.to_str().unwrap()));
+}
+
+#[test]
+fn status_board_high_water_mark_does_not_acknowledge_board_delivery() {
+    let h = Harness::new();
+    let author = h.register(&h.a, "author");
+    let replier = h.register(&h.a, "replier");
+    let posted = h.ok(&h.a, Some(&author), &["post", "announcement"]);
+    let post_id = posted["message"]["id"].as_u64().unwrap();
+    h.ok(
+        &h.a,
+        Some(&replier),
+        &["reply", &post_id.to_string(), "ack"],
+    );
+    let unread_before = h.ok(&h.a, Some(&author), &["inbox", "--peek"])["messages"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(unread_before, 1);
+
+    let status = h.ok(&h.a, Some(&author), &["status"]);
+    let board = h.ok(&h.a, Some(&author), &["board"]);
+    assert_eq!(
+        status["identity_context"]["board_latest_id"],
+        board["latest_id"]
+    );
+    assert!(
+        status["identity_context"]["board_latest_id"]
+            .as_u64()
+            .unwrap()
+            > post_id
+    );
+    let unread_after = h.ok(&h.a, Some(&author), &["inbox", "--peek"])["messages"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(unread_after, unread_before);
+}
+
+#[test]
+fn status_context_explains_stopped_and_stale_daemon_without_starting_it() {
+    let h = Harness::new();
+    let agent = h.register(&h.a, "offline");
+    let protocol = h.ok(&h.a, Some(&agent), &["status"])["protocol_version"].clone();
+    h.ok(&h.a, None, &["stop"]);
+
+    let stopped = h.ok(&h.a, Some(&agent), &["status"]);
+    assert_eq!(stopped["running"], false);
+    assert_eq!(stopped["identity_context"]["selection_state"], "selected");
+    assert_eq!(stopped["identity_context"]["agent"]["id"], agent.id);
+    assert!(stopped["identity_context"]["agent"]["name"].is_null());
+    assert_eq!(
+        stopped["identity_context"]["unavailable_reason"],
+        "daemon_stopped"
+    );
+    assert!(!h.home.join("daemon.json").exists());
+
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    std::fs::write(
+        h.home.join("daemon.json"),
+        json!({"pid":1,"port":port,"protocol_version":protocol,"instance":"stale"}).to_string(),
+    )
+    .unwrap();
+    let stale = h.ok(&h.a, Some(&agent), &["status"]);
+    assert_eq!(stale["running"], false);
+    assert_eq!(stale["stale_metadata"], true);
+    assert_eq!(
+        stale["identity_context"]["unavailable_reason"],
+        "stale_metadata"
+    );
+    assert_eq!(
+        std::fs::read_to_string(h.home.join("daemon.json")).unwrap(),
+        json!({"pid":1,"port":port,"protocol_version":protocol,"instance":"stale"}).to_string()
+    );
+}
 #[test]
 fn integration_generation_is_safe_and_versioned() {
     let h = Harness::new();
@@ -1536,7 +1742,8 @@ fn status_reports_an_incompatible_daemon_instead_of_failing() {
     use std::io::Read;
     use std::net::TcpListener;
     let h = Harness::new();
-    std::fs::create_dir(&h.home).unwrap();
+    let agent = h.register(&h.a, "incompatible-status");
+    h.ok(&h.a, None, &["stop"]);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::fs::write(
@@ -1557,10 +1764,15 @@ fn status_reports_an_incompatible_daemon_instead_of_failing() {
         let body = "{\"instance\":\"old\",\"protocol_version\":2}";
         write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
     });
-    let status = h.ok(&h.a, None, &["status"]);
+    let status = h.ok(&h.a, Some(&agent), &["status"]);
     server.join().unwrap();
     assert_eq!(status["compatible"], false);
     assert_eq!(status["error"]["code"], "PROTOCOL_MISMATCH");
+    assert_eq!(
+        status["identity_context"]["unavailable_reason"],
+        "protocol_mismatch"
+    );
+    assert_eq!(status["identity_context"]["agent"]["id"], agent.id);
     std::fs::remove_file(h.home.join("daemon.json")).unwrap();
 }
 

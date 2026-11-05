@@ -764,6 +764,11 @@ pub async fn call_as(
     Err(last.unwrap_or_else(|| network("Request failed")))
 }
 pub async fn existing(op: Operation) -> Result<Option<Value>> {
+    existing_as(op, None).await
+}
+/// Calls a currently reachable compatible daemon without starting one, using
+/// an optional identity for read-only diagnostics such as `tala status`.
+pub async fn existing_as(op: Operation, credential: Option<Credential>) -> Result<Option<Value>> {
     // Stop is deliberately allowed against a compatible daemon only; no stale PID signalling.
     let Some(info) = usable().await? else {
         return Ok(None);
@@ -771,7 +776,7 @@ pub async fn existing(op: Operation) -> Result<Option<Value>> {
     let request = Rpc {
         protocol_version: PROTOCOL_VERSION,
         request_id: Uuid::new_v4().to_string(),
-        credential: None,
+        credential,
         operation: op,
     };
     let response = http()?
