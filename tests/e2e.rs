@@ -308,8 +308,56 @@ fn cross_project_context_boards_and_handoff() {
         sent["message"]["context"]["project"],
         std::fs::canonicalize(&h.a).unwrap().display().to_string()
     );
-    h.error(&h.b, Some(&c), &["history", &t], "THREAD_NOT_VISIBLE");
-    h.ok(&h.a, Some(&a), &["post", "Frontend update"]);
+    let hidden = h.error(&h.b, Some(&c), &["history", &t], "THREAD_NOT_VISIBLE");
+    h.ok(&h.a, Some(&a), &["history", &t]);
+    let missing = h.error(
+        &h.b,
+        Some(&c),
+        &["history", "thr_missing_from_another_project"],
+        "THREAD_NOT_VISIBLE",
+    );
+    assert_eq!(hidden["error"], missing["error"]);
+    assert_eq!(hidden["error"]["next"], "tala guide identity");
+    let error_text = hidden["error"].to_string();
+    assert!(!error_text.contains(&a.id));
+    assert!(!error_text.contains(h.a.to_str().unwrap()));
+
+    let handoff = h.error(
+        &h.b,
+        Some(&c),
+        &["handoff", "--to", &a.id, "--thread", &t, "Summary"],
+        "THREAD_NOT_VISIBLE",
+    );
+    assert_eq!(hidden["error"], handoff["error"]);
+    let continuation = h.error(
+        &h.b,
+        Some(&c),
+        &[
+            "send",
+            "--to",
+            &a.id,
+            "--thread",
+            &t,
+            "Continue this thread",
+        ],
+        "THREAD_NOT_VISIBLE",
+    );
+    assert_eq!(hidden["error"], continuation["error"]);
+    let status = h.error(
+        &h.b,
+        Some(&c),
+        &["status", "--message", &id(&sent)],
+        "THREAD_NOT_VISIBLE",
+    );
+    assert_eq!(hidden["error"], status["error"]);
+    let board_post = h.ok(&h.a, Some(&a), &["post", "Frontend update"]);
+    let board_reply = h.error(
+        &h.b,
+        Some(&c),
+        &["reply", &id(&board_post), "Reply outside this project"],
+        "THREAD_NOT_VISIBLE",
+    );
+    assert_eq!(hidden["error"], board_reply["error"]);
     assert_eq!(h.ok(&h.b, Some(&b), &["board"])["messages"], json!([]));
     assert_eq!(
         h.ok(

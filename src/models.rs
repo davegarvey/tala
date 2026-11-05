@@ -138,7 +138,7 @@ pub const ERRORS: &[(&str, Retry, &str, Option<&str>)] = &[
         "THREAD_NOT_VISIBLE",
         Retry::AfterFix,
         "Thread is missing or not visible to this agent",
-        Some("tala"),
+        Some("tala guide identity"),
     ),
     (
         "NOT_RECIPIENT",
