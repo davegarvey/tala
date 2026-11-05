@@ -1,6 +1,6 @@
 # Spec Delta
 
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Status reports selected identity context
 `tala status` SHALL identify the selector source and report the selected identity and registered project context when available, without exposing private selector data.
@@ -19,15 +19,7 @@
 - **THEN** it reports an explicit `none` or `invalid` selection state while still returning daemon diagnostics
 - **AND** it does not expose the raw selector value or selector-file path
 
-### Requirement: Status output is consistent across formats
-Status SHALL report selector, identity, project, and board high-water context consistently in JSON and human-readable output.
-
-#### Scenario: Human status shows context and availability
-- **WHEN** status runs with `--human`
-- **THEN** it labels the selector source, identity ID/name, registered project root, and board latest ID when available
-- **AND** it clearly explains when identity context or the board high-water mark is unavailable
-
-#### Scenario: Board high-water mark is read-only
-- **WHEN** status reports `board_latest_id`
-- **THEN** the value is the latest message ID in the registered project's board at inspection time
-- **AND** reading it does not acknowledge a board message or persist a per-agent cursor
+#### Scenario: Context is available independently of daemon state
+- **WHEN** status has a valid selector and the local database is readable while the daemon is stopped, stale, or incompatible
+- **THEN** it reports the persisted identity, registered project root, and board latest ID from the local snapshot
+- **AND** the daemon's stopped/stale/incompatible state remains separately visible in daemon diagnostics

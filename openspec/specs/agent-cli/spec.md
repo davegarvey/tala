@@ -213,6 +213,11 @@ Human-readable output for direct sends and direct replies SHALL describe recipie
 - **THEN** it reports an explicit `none` or `invalid` selection state while still returning daemon diagnostics
 - **AND** it does not expose the raw selector value or selector-file path
 
+#### Scenario: Context is available independently of daemon state
+- **WHEN** status has a valid selector and the local database is readable while the daemon is stopped, stale, or incompatible
+- **THEN** it reports the persisted identity, registered project root, and board latest ID from the local snapshot
+- **AND** the daemon's stopped/stale/incompatible state remains separately visible in daemon diagnostics
+
 ### Requirement: Status output is consistent across formats
 Status SHALL report selector, identity, project, and board high-water context consistently in JSON and human-readable output.
 

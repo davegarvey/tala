@@ -1168,24 +1168,11 @@ fn status_selector(agent: Option<String>, agent_file: Option<PathBuf>) -> Status
     }
 }
 
-fn status_context_reason(status: &Value) -> &'static str {
-    if status["compatible"] == false {
-        "protocol_mismatch"
-    } else if status["reachable"] == false || status["running"].is_null() {
-        "daemon_unreachable"
-    } else if status["stale_metadata"] == true {
-        "stale_metadata"
-    } else if status["running"] == false {
-        "daemon_stopped"
-    } else {
-        "context_unavailable"
-    }
-}
-
-async fn add_status_identity_context(status: &mut Value, selector: &StatusSelector) {
+fn add_status_identity_context(status: &mut Value, selector: &StatusSelector) {
     let mut context = json!({
         "selector_source": selector.source,
         "selection_state": selector.state,
+        "context_source": "local_database_snapshot",
         "agent": Value::Null,
         "project_root": Value::Null,
         "board_latest_id": Value::Null,
@@ -1203,67 +1190,18 @@ async fn add_status_identity_context(status: &mut Value, selector: &StatusSelect
     };
 
     context["agent"] = json!({"id": credential.agent, "name": Value::Null});
-    if status["running"] != true || status["compatible"] == false {
-        context["unavailable_reason"] = json!(status_context_reason(status));
-        status["identity_context"] = context;
-        return;
-    }
-
-    let whoami = client::existing_as(Operation::Whoami, Some(credential.clone())).await;
-    let agent = match whoami {
-        Ok(Some(data)) => data["agent"].clone(),
+    match store::status_context_snapshot(&store::home().join("tala.sqlite3"), credential) {
+        Ok(Some(snapshot)) => {
+            context["agent"]["name"] = json!(snapshot.name);
+            context["project_root"] = json!(snapshot.project);
+            context["board_latest_id"] = json!(snapshot.board_latest_id);
+        }
         Ok(None) => {
-            context["unavailable_reason"] = json!("daemon_stopped");
-            status["identity_context"] = context;
-            return;
+            context["selection_state"] = json!("invalid");
+            context["unavailable_reason"] = json!("identity_not_found");
+            context["error_code"] = json!("IDENTITY_ERROR");
         }
-        Err(error) => {
-            context["unavailable_reason"] = json!(match error.code.as_str() {
-                "PROTOCOL_MISMATCH" => "protocol_mismatch",
-                "DAEMON_UNREACHABLE" | "CONNECTION_ERROR" => "daemon_unreachable",
-                "IDENTITY_ERROR" => "identity_rejected",
-                _ => "context_unavailable",
-            });
-            context["error_code"] = json!(error.code);
-            if error.code == "IDENTITY_ERROR" {
-                context["selection_state"] = json!("invalid");
-            }
-            status["identity_context"] = context;
-            return;
-        }
-    };
-
-    let public_id = agent["id"].as_str().unwrap_or(&credential.agent);
-    let project_root = agent["context"]["project"].as_str().map(str::to_owned);
-    context["agent"] = json!({
-        "id": public_id,
-        "name": agent["name"],
-    });
-    if let Some(project_root) = project_root {
-        context["project_root"] = json!(project_root);
-        match client::existing_as(
-            Operation::Board {
-                project: project_root,
-                after: 0,
-                limit: 1,
-            },
-            Some(credential.clone()),
-        )
-        .await
-        {
-            Ok(Some(board)) => context["board_latest_id"] = board["latest_id"].clone(),
-            Ok(None) => context["unavailable_reason"] = json!("daemon_stopped"),
-            Err(error) => {
-                context["unavailable_reason"] = json!(match error.code.as_str() {
-                    "PROTOCOL_MISMATCH" => "protocol_mismatch",
-                    "DAEMON_UNREACHABLE" | "CONNECTION_ERROR" => "daemon_unreachable",
-                    _ => "board_context_unavailable",
-                });
-                context["error_code"] = json!(error.code);
-            }
-        }
-    } else {
-        context["unavailable_reason"] = json!("project_context_unavailable");
+        Err(_) => context["unavailable_reason"] = json!("storage_unavailable"),
     }
     status["identity_context"] = context;
 }
@@ -1490,7 +1428,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                 .await?["message"]
                     .clone();
             } else if let Some(selector) = status_selector.as_ref() {
-                add_status_identity_context(&mut status, selector).await;
+                add_status_identity_context(&mut status, selector);
             }
             status
         }
@@ -2008,10 +1946,20 @@ pub fn render(data: &Value, attention: Option<&Value>) {
     }
 }
 fn escape_status_text(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(char::escape_default)
-        .collect::<String>()
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if !character.is_control() {
+            escaped.push(character);
+            continue;
+        }
+        match character {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push_str(&format!("\\u{{{:x}}}", other as u32)),
+        }
+    }
+    escaped
 }
 
 fn render_status(data: &Value) {
@@ -2034,6 +1982,12 @@ fn render_status(data: &Value) {
         context["selector_source"].as_str().unwrap_or("none"),
         context["selection_state"].as_str().unwrap_or("unknown")
     );
+    if context["context_source"] == "local_database_snapshot"
+        && context["unavailable_reason"].is_null()
+        && context["selection_state"] == "selected"
+    {
+        println!("Identity context: available from a read-only local database snapshot");
+    }
     if context["agent"].is_object() {
         let id = context["agent"]["id"].as_str().unwrap_or("unknown");
         match context["agent"]["name"].as_str() {
@@ -2367,5 +2321,13 @@ mod tests {
         assert_eq!(human_age(30), "<1m");
         assert_eq!(human_age(5400), "1h 30m");
         assert_eq!(human_age(91104 * 60), "63d 6h");
+    }
+    #[test]
+    fn status_text_escapes_controls_without_changing_path_separators() {
+        assert_eq!(escape_status_text("C:\\work\\project"), "C:\\work\\project");
+        assert_eq!(
+            escape_status_text("first\nsecond\t\u{1b}"),
+            "first\\nsecond\\t\\u{1b}"
+        );
     }
 }

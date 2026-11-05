@@ -1018,6 +1018,7 @@ fn status_reports_identity_context_for_each_selector_without_exposing_secrets() 
         assert_eq!(context["agent"]["name"], "status-agent");
         assert_eq!(context["project_root"], expected_project.to_str().unwrap());
         assert_eq!(context["board_latest_id"], 0);
+        assert_eq!(context["context_source"], "local_database_snapshot");
         assert!(context["unavailable_reason"].is_null());
         let serialized = data.to_string();
         assert!(!serialized.contains(&identity.handle));
@@ -1102,6 +1103,7 @@ fn status_reports_identity_context_for_each_selector_without_exposing_secrets() 
     );
     let human = String::from_utf8(human.stdout).unwrap();
     assert!(human.contains("Identity selector: --agent (selected)"));
+    assert!(human.contains("available from a read-only local database snapshot"));
     assert!(human.contains(&identity.id));
     assert!(human.contains("status-agent"));
     assert!(human.contains(expected_project.to_str().unwrap()));
@@ -1128,7 +1130,23 @@ fn status_board_high_water_mark_does_not_acknowledge_board_delivery() {
         .len();
     assert_eq!(unread_before, 1);
 
+    let db = rusqlite::Connection::open(h.home.join("tala.sqlite3")).unwrap();
+    let presence_before: (i64, bool) = db
+        .query_row(
+            "SELECT last_seen,active FROM agents WHERE id=?",
+            [&author.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
     let status = h.ok(&h.a, Some(&author), &["status"]);
+    let presence_after: (i64, bool) = db
+        .query_row(
+            "SELECT last_seen,active FROM agents WHERE id=?",
+            [&author.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(presence_after, presence_before);
     let board = h.ok(&h.a, Some(&author), &["board"]);
     assert_eq!(
         status["identity_context"]["board_latest_id"],
@@ -1158,11 +1176,13 @@ fn status_context_explains_stopped_and_stale_daemon_without_starting_it() {
     assert_eq!(stopped["running"], false);
     assert_eq!(stopped["identity_context"]["selection_state"], "selected");
     assert_eq!(stopped["identity_context"]["agent"]["id"], agent.id);
-    assert!(stopped["identity_context"]["agent"]["name"].is_null());
+    assert_eq!(stopped["identity_context"]["agent"]["name"], "offline");
     assert_eq!(
-        stopped["identity_context"]["unavailable_reason"],
-        "daemon_stopped"
+        stopped["identity_context"]["project_root"],
+        std::fs::canonicalize(&h.a).unwrap().to_str().unwrap()
     );
+    assert_eq!(stopped["identity_context"]["board_latest_id"], 0);
+    assert!(stopped["identity_context"]["unavailable_reason"].is_null());
     assert!(!h.home.join("daemon.json").exists());
 
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1176,14 +1196,30 @@ fn status_context_explains_stopped_and_stale_daemon_without_starting_it() {
     let stale = h.ok(&h.a, Some(&agent), &["status"]);
     assert_eq!(stale["running"], false);
     assert_eq!(stale["stale_metadata"], true);
-    assert_eq!(
-        stale["identity_context"]["unavailable_reason"],
-        "stale_metadata"
-    );
+    assert_eq!(stale["identity_context"]["agent"]["name"], "offline");
+    assert!(stale["identity_context"]["unavailable_reason"].is_null());
     assert_eq!(
         std::fs::read_to_string(h.home.join("daemon.json")).unwrap(),
         json!({"pid":1,"port":port,"protocol_version":protocol,"instance":"stale"}).to_string()
     );
+}
+
+#[test]
+fn status_reports_unavailable_local_context_without_creating_storage() {
+    let h = Harness::new();
+    let agent = h.register(&h.a, "missing-storage");
+    h.ok(&h.a, None, &["stop"]);
+    let database = h.home.join("tala.sqlite3");
+    std::fs::remove_file(&database).unwrap();
+
+    let status = h.ok(&h.a, Some(&agent), &["status"]);
+    assert_eq!(status["running"], false);
+    assert_eq!(status["identity_context"]["selection_state"], "selected");
+    assert_eq!(
+        status["identity_context"]["unavailable_reason"],
+        "storage_unavailable"
+    );
+    assert!(!database.exists());
 }
 #[test]
 fn integration_generation_is_safe_and_versioned() {
@@ -1769,10 +1805,14 @@ fn status_reports_an_incompatible_daemon_instead_of_failing() {
     assert_eq!(status["compatible"], false);
     assert_eq!(status["error"]["code"], "PROTOCOL_MISMATCH");
     assert_eq!(
-        status["identity_context"]["unavailable_reason"],
-        "protocol_mismatch"
+        status["identity_context"]["context_source"],
+        "local_database_snapshot"
     );
     assert_eq!(status["identity_context"]["agent"]["id"], agent.id);
+    assert_eq!(
+        status["identity_context"]["agent"]["name"],
+        "incompatible-status"
+    );
     std::fs::remove_file(h.home.join("daemon.json")).unwrap();
 }
 

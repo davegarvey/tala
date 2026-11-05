@@ -25,6 +25,53 @@ pub fn home() -> PathBuf {
                 .join(".tala")
         })
 }
+
+/// Identity and board summary read from one read-only SQLite snapshot.
+pub struct StatusContextSnapshot {
+    pub name: String,
+    pub project: String,
+    pub board_latest_id: u64,
+}
+
+/// Reads status context without opening the daemon store for writes or
+/// refreshing agent presence. The identity lookup requires both public ID and
+/// private token; only non-secret display context is returned.
+pub fn status_context_snapshot(
+    path: &Path,
+    credential: &Credential,
+) -> std::result::Result<Option<StatusContextSnapshot>, rusqlite::Error> {
+    let db = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    db.busy_timeout(std::time::Duration::from_secs(1))?;
+    let tx = db.unchecked_transaction()?;
+    let identity = tx.query_row(
+        "SELECT name,context FROM agents WHERE id=? AND token=?",
+        params![credential.agent, credential.token],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    );
+    let (name, context) = match identity {
+        Ok(identity) => identity,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let context: Context = serde_json::from_str(&context).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let board_latest_id = tx.query_row(
+        "SELECT COALESCE(MAX(id),0) FROM messages WHERE project=?",
+        [&context.project],
+        |row| row.get(0),
+    )?;
+    tx.commit()?;
+    Ok(Some(StatusContextSnapshot {
+        name,
+        project: context.project,
+        board_latest_id,
+    }))
+}
+
 pub fn private_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)?;
     #[cfg(unix)]
