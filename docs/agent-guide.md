@@ -45,7 +45,7 @@ When your harness can keep a command running, start `tala --agent=th_<your-handl
 
 ### Reference loop for a harness
 
-This Bash loop uses one selector file and keeps separate inbox and board cursors. Set `TALA_MESSAGE_HANDLER` to an executable that reads a JSON envelope from stdin. It must process messages idempotently by message ID and exit non-zero if it has not finished safely. Keep one inbox reader per identity and give each identity its own `TALA_STATE` directory.
+This Bash loop requires Bash and Python 3 for JSON parsing. It uses one selector file and keeps separate inbox and board cursors. Set `TALA_MESSAGE_HANDLER` to an executable that reads a JSON envelope from stdin. It must process messages idempotently by message ID and exit non-zero if it has not finished safely. Keep one inbox reader per identity and give each identity its own `TALA_STATE` directory.
 
 ```bash
 #!/usr/bin/env bash

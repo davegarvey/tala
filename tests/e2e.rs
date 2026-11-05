@@ -103,6 +103,7 @@ fn guide_is_available_without_identity_or_daemon_in_json_and_human_modes() {
     assert!(listening.contains("`events` field gives the IDs, types and sources"));
     assert!(listening.contains("`next.listen_again`"));
     assert!(listening.contains("--limit=\"$N\""));
+    assert!(listening.contains("requires Bash and Python 3"));
     assert!(listening.contains("mv \"$tmp\" \"$path\""));
     assert!(listening.contains("Keep one inbox reader per identity"));
     assert!(listening.contains("does not run commands from `next.*`"));
