@@ -35,10 +35,17 @@ pub struct Cli {
     #[arg(
         long,
         global = true,
-        env = "TALA_AGENT",
-        help = "Your private handle from tala register (independent of CWD)"
+        help = "Your private handle from tala register (or TALA_AGENT; independent of CWD)"
     )]
     pub agent: Option<String>,
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "agent",
+        value_name = "PATH",
+        help = "Read your private handle from a protected selector file (or TALA_AGENT_FILE)"
+    )]
+    pub agent_file: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -53,7 +60,7 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Register a distinct agent instance; keep the returned private handle for this run
+    /// Register a distinct agent instance; optionally save its private handle to a selector file
     Register {
         #[arg(long, required_unless_present = "reissue")]
         name: Option<String>,
@@ -65,6 +72,13 @@ pub enum Commands {
             help = "Checkout path; defaults to the current project root"
         )]
         project: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with = "reissue",
+            help = "Save the private selector in a new, protected file instead of displaying it"
+        )]
+        save_handle_to: Option<PathBuf>,
         #[arg(
             long,
             value_name = "AGENT_ID",
@@ -692,8 +706,94 @@ async fn reissue(id: &str) -> Result<Value> {
     Ok(data)
 }
 
+fn resolve_selector(agent: Option<String>, agent_file: Option<PathBuf>) -> Result<Option<String>> {
+    if let Some(handle) = agent {
+        if handle.is_empty() {
+            return Err(Failure::new(
+                "IDENTITY_ERROR",
+                "The --agent selector is empty",
+                "Pass a complete private handle with --agent or select one with --agent-file.",
+            ));
+        }
+        return Ok(Some(handle));
+    }
+    if let Some(path) = agent_file {
+        if path.as_os_str().is_empty() {
+            return Err(Failure::new(
+                "IDENTITY_ERROR",
+                "The --agent-file path is empty",
+                "Pass a path to a protected selector file.",
+            ));
+        }
+        return client::read_selector_file(&path).map(Some);
+    }
+
+    let env_agent = std::env::var_os("TALA_AGENT");
+    let env_file = std::env::var_os("TALA_AGENT_FILE");
+    match (env_agent, env_file) {
+        (Some(_), Some(_)) => Err(Failure::new(
+            "IDENTITY_ERROR",
+            "Both TALA_AGENT and TALA_AGENT_FILE are set",
+            "Set exactly one identity selector, or pass one explicit --agent or --agent-file option.",
+        )),
+        (Some(value), None) => {
+            let value = value.into_string().map_err(|_| Failure::new(
+                "IDENTITY_ERROR",
+                "TALA_AGENT is not valid UTF-8",
+                "Set TALA_AGENT to the complete private handle returned by tala register.",
+            ))?;
+            if value.is_empty() {
+                return Err(Failure::new(
+                    "IDENTITY_ERROR",
+                    "TALA_AGENT is empty",
+                    "Unset TALA_AGENT or set it to a complete private handle.",
+                ));
+            }
+            Ok(Some(value))
+        }
+        (None, Some(path)) => {
+            let path = PathBuf::from(path);
+            if path.as_os_str().is_empty() {
+                return Err(Failure::new(
+                    "IDENTITY_ERROR",
+                    "TALA_AGENT_FILE is empty",
+                    "Unset TALA_AGENT_FILE or set it to a protected selector file path.",
+                ));
+            }
+            client::read_selector_file(&path).map(Some)
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+fn shell_quote_selector_path(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        format!("\"{path}\"")
+    }
+    #[cfg(not(windows))]
+    {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+
 pub async fn run(cli: Cli) -> Result<Outcome> {
-    let selected = cli.agent.as_deref();
+    let uses_identity = !matches!(
+        cli.command.as_ref(),
+        Some(
+            Commands::Init { .. }
+                | Commands::Register { .. }
+                | Commands::Status { message: None }
+                | Commands::Stop
+                | Commands::Daemon
+        )
+    );
+    let selected = if uses_identity {
+        resolve_selector(cli.agent, cli.agent_file)?
+    } else {
+        None
+    };
+    let selected = selected.as_deref();
     let human = cli.human;
     let Some(command) = cli.command else {
         return Ok(done(
@@ -717,8 +817,17 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             name,
             tool,
             project,
+            save_handle_to,
             reissue: None,
         } => {
+            let save_path_text = save_handle_to
+                .as_deref()
+                .map(|path| {
+                    path.to_str().ok_or_else(|| {
+                        usage("--save-handle-to path must be valid UTF-8 so Tala can return a reusable selector")
+                    })
+                })
+                .transpose()?;
             let mut data = client::call(
                 Operation::Register {
                     name: name.unwrap_or_default(),
@@ -759,8 +868,27 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             data.as_object_mut()
                 .expect("register object")
                 .remove("credential");
-            data["handle"] = json!(handle);
-            data["select"] = json!(format!("--agent={handle}"));
+            if let Some(path) = save_handle_to.as_deref() {
+                let path_text = save_path_text.expect("save path was checked as UTF-8");
+                match client::save_selector_file(path, &handle) {
+                    Ok(()) => {
+                        let quoted = shell_quote_selector_path(path_text);
+                        data["selector_file"] = json!(path_text);
+                        data["select"] = json!(format!("--agent-file={quoted}"));
+                    }
+                    Err(error) => {
+                        // Registration and the internal handle are durable. Give
+                        // the operator the handle once so a failed external save
+                        // never strands the new identity.
+                        data["handle"] = json!(handle);
+                        data["select"] = json!(format!("--agent={handle}"));
+                        data["selector_file_error"] = json!(error.message);
+                    }
+                }
+            } else {
+                data["handle"] = json!(handle);
+                data["select"] = json!(format!("--agent={handle}"));
+            }
             data
         }
         Commands::Agents {
@@ -1192,7 +1320,22 @@ pub fn render(data: &Value, attention: Option<&Value>) {
                 " (no change)"
             }
         );
+    } else if let Some(path) = data["selector_file"].as_str() {
+        let quoted = shell_quote_selector_path(path);
+        println!(
+            "Registered {} ({}). Private selector saved to {path}; pass --agent-file={quoted} on tala commands.",
+            data["agent"]["id"].as_str().unwrap_or(""),
+            data["agent"]["name"].as_str().unwrap_or("")
+        );
     } else if let Some(handle) = data["handle"].as_str() {
+        if let Some(error) = data["selector_file_error"].as_str() {
+            println!(
+                "Registered {} ({}), but selector-file save failed: {error}. Use --agent={handle} now and keep this private handle.",
+                data["agent"]["id"].as_str().unwrap_or(""),
+                data["agent"]["name"].as_str().unwrap_or("")
+            );
+            return;
+        }
         println!(
             "Registered {} ({}). Pass --agent={handle} on every tala command; keep the handle private.",
             data["agent"]["id"].as_str().unwrap_or(""),

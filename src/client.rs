@@ -3,7 +3,9 @@ use fs2::FileExt;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
+    io::{Read, Write},
+    path::Path,
     process::{Command, Stdio},
     sync::Mutex,
     time::Duration,
@@ -232,6 +234,442 @@ pub fn credential(handle: Option<&str>) -> Result<Credential> {
             "Use the handle tala register returned in this TALA_HOME, or register a new identity.",
         )),
         Err(e) => Err(e.into()),
+    }
+}
+
+const MAX_SELECTOR_BYTES: usize = 37;
+
+fn selector_failure(message: impl Into<String>) -> Failure {
+    Failure::new(
+        "IDENTITY_ERROR",
+        message,
+        "Use a private selector file containing only your th_ handle, or select an identity with --agent.",
+    )
+}
+
+fn validate_handle(handle: &str) -> Result<()> {
+    if handle.starts_with("th_")
+        && handle.len() == 35
+        && handle[3..].chars().all(|c| c.is_ascii_hexdigit())
+    {
+        Ok(())
+    } else {
+        Err(selector_failure(
+            "Selector file must contain one complete th_ handle",
+        ))
+    }
+}
+
+/// Read and validate a private one-line selector file without following a
+/// symlink/reparse point or accepting a file readable by other users.
+pub fn read_selector_file(path: &Path) -> Result<String> {
+    let file = open_selector_read(path)?;
+    let mut bytes = Vec::new();
+    file.take((MAX_SELECTOR_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| selector_failure(format!("Cannot read selector file: {e}")))?;
+    if bytes.len() > MAX_SELECTOR_BYTES {
+        return Err(selector_failure("Selector file is too large"));
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| selector_failure("Selector file is not valid UTF-8"))?;
+    let handle = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
+        .unwrap_or(text);
+    validate_handle(handle)?;
+    Ok(handle.to_owned())
+}
+
+/// Save a selector without replacing an existing path or changing its parent.
+pub fn save_selector_file(path: &Path, handle: &str) -> Result<()> {
+    validate_handle(handle)?;
+    write_selector(path, format!("{handle}\n").as_bytes()).map_err(|e| {
+        Failure::new(
+            "IO_ERROR",
+            format!("Could not save selector file: {e}"),
+            "Choose a new path in a private directory; Tala never overwrites selector files.",
+        )
+    })
+}
+
+#[cfg(unix)]
+fn open_selector_read(path: &Path) -> Result<File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|e| selector_failure(format!("Cannot open selector file safely: {e}")))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| selector_failure(format!("Cannot inspect selector file: {e}")))?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(selector_failure(
+            "Selector file must be a regular file owned by this user with no group or other permissions",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn write_selector(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent_meta = std::fs::metadata(parent)?;
+    if !parent_meta.is_dir()
+        || parent_meta.uid() != unsafe { libc::geteuid() }
+        || parent_meta.mode() & 0o022 != 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "parent directory must be owned by the current user and not group/world writable",
+        ));
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn open_selector_read(path: &Path) -> Result<File> {
+    windows_selector::open_read(path).map_err(|e| {
+        selector_failure(format!(
+            "Cannot open or validate selector file securely: {e}"
+        ))
+    })
+}
+
+#[cfg(windows)]
+fn write_selector(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    windows_selector::write_new(path, bytes)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_selector_read(_path: &Path) -> Result<File> {
+    Err(selector_failure(
+        "Private selector files are unsupported on this platform",
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn write_selector(_path: &Path, _bytes: &[u8]) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "private selector files are unsupported on this platform",
+    ))
+}
+
+#[cfg(windows)]
+mod windows_selector {
+    use std::{
+        ffi::c_void,
+        fs::File,
+        io,
+        os::windows::{ffi::OsStrExt, io::FromRawHandle},
+        path::Path,
+        ptr,
+    };
+    use windows_sys::Win32::{
+        Foundation::{
+            CloseHandle, GetLastError, LocalFree, GENERIC_READ, GENERIC_WRITE, HANDLE,
+            INVALID_HANDLE_VALUE,
+        },
+        Security::Authorization::{
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
+            GetSecurityInfo, SE_FILE_OBJECT,
+        },
+        Security::{
+            AclSizeInformation, EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorControl,
+            TokenUser, ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION,
+            OWNER_SECURITY_INFORMATION, SECURITY_ATTRIBUTES, SE_DACL_PROTECTED, TOKEN_QUERY,
+            TOKEN_USER,
+        },
+        Storage::FileSystem::{
+            CreateFileW, FileAttributeTagInfo, GetFileInformationByHandleEx, CREATE_NEW,
+            FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_FLAG_WRITE_THROUGH, FILE_SHARE_READ, OPEN_EXISTING,
+        },
+        System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION},
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    fn last_error() -> io::Error {
+        io::Error::from_raw_os_error(unsafe { GetLastError() } as i32)
+    }
+
+    fn wide_path(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    struct UserSid {
+        token: HANDLE,
+        bytes: Vec<u8>,
+    }
+
+    impl UserSid {
+        fn new() -> io::Result<Self> {
+            let mut token = ptr::null_mut();
+            if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+                return Err(last_error());
+            }
+            let mut needed = 0;
+            unsafe {
+                windows_sys::Win32::Security::GetTokenInformation(
+                    token,
+                    TokenUser,
+                    ptr::null_mut(),
+                    0,
+                    &mut needed,
+                );
+            }
+            if needed == 0 {
+                unsafe { CloseHandle(token) };
+                return Err(last_error());
+            }
+            let mut bytes = vec![0u8; needed as usize];
+            if unsafe {
+                windows_sys::Win32::Security::GetTokenInformation(
+                    token,
+                    TokenUser,
+                    bytes.as_mut_ptr().cast(),
+                    needed,
+                    &mut needed,
+                )
+            } == 0
+            {
+                unsafe { CloseHandle(token) };
+                return Err(last_error());
+            }
+            Ok(Self { token, bytes })
+        }
+
+        fn sid(&self) -> windows_sys::Win32::Security::PSID {
+            unsafe { (*(self.bytes.as_ptr() as *const TOKEN_USER)).User.Sid }
+        }
+
+        fn sddl(&self) -> io::Result<Vec<u16>> {
+            let mut sid_text = ptr::null_mut();
+            if unsafe {
+                windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW(
+                    self.sid(),
+                    &mut sid_text,
+                )
+            } == 0
+            {
+                return Err(last_error());
+            }
+            let sid = unsafe {
+                let mut len = 0;
+                while *sid_text.add(len) != 0 {
+                    len += 1;
+                }
+                let text = String::from_utf16_lossy(std::slice::from_raw_parts(sid_text, len));
+                LocalFree(sid_text.cast());
+                text
+            };
+            Ok(format!("O:{sid}D:P(A;;FA;;;{sid})(A;;FA;;;SY)")
+                .encode_utf16()
+                .chain(Some(0))
+                .collect())
+        }
+    }
+
+    impl Drop for UserSid {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.token) };
+        }
+    }
+
+    fn security_descriptor(sid: &UserSid) -> io::Result<*mut c_void> {
+        let sddl = sid.sddl()?;
+        let mut descriptor = ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SECURITY_DESCRIPTOR_REVISION,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(last_error());
+        }
+        Ok(descriptor)
+    }
+
+    fn validate_acl(handle: HANDLE, sid: &UserSid) -> io::Result<()> {
+        unsafe {
+            let mut owner = ptr::null_mut();
+            let mut dacl: *mut ACL = ptr::null_mut();
+            let mut descriptor = ptr::null_mut();
+            let status = GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                ptr::null_mut(),
+                &mut dacl,
+                ptr::null_mut(),
+                &mut descriptor,
+            );
+            if status != 0 {
+                return Err(io::Error::from_raw_os_error(status as i32));
+            }
+            let mut control = 0;
+            let mut revision = 0;
+            let control_ok = GetSecurityDescriptorControl(descriptor, &mut control, &mut revision)
+                != 0
+                && control & SE_DACL_PROTECTED != 0;
+            let owner_ok = !owner.is_null() && EqualSid(owner, sid.sid()) != 0;
+            let mut system_sid = ptr::null_mut();
+            let system_sddl: Vec<u16> = "S-1-5-18".encode_utf16().chain(Some(0)).collect();
+            let system_ok = ConvertStringSidToSidW(system_sddl.as_ptr(), &mut system_sid) != 0;
+            let mut acl_info = ACL_SIZE_INFORMATION::default();
+            let acl_ok = !dacl.is_null()
+                && GetAclInformation(
+                    dacl,
+                    (&mut acl_info as *mut ACL_SIZE_INFORMATION).cast(),
+                    std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                    AclSizeInformation,
+                ) != 0
+                && acl_info.AceCount == 2;
+            let mut saw_user = false;
+            let mut saw_system = false;
+            if acl_ok && system_ok {
+                for index in 0..acl_info.AceCount {
+                    let mut raw_ace = ptr::null_mut();
+                    if GetAce(dacl, index, &mut raw_ace) == 0 || raw_ace.is_null() {
+                        saw_user = false;
+                        saw_system = false;
+                        break;
+                    }
+                    let ace = &*(raw_ace as *const ACCESS_ALLOWED_ACE);
+                    if ace.Header.AceType != ACCESS_ALLOWED_ACE_TYPE as u8
+                        || ace.Header.AceFlags != 0
+                        || ace.Mask != FILE_ALL_ACCESS
+                    {
+                        saw_user = false;
+                        saw_system = false;
+                        break;
+                    }
+                    let ace_sid = (&ace.SidStart as *const u32).cast_mut().cast();
+                    if EqualSid(ace_sid, sid.sid()) != 0 && !saw_user {
+                        saw_user = true;
+                    } else if EqualSid(ace_sid, system_sid) != 0 && !saw_system {
+                        saw_system = true;
+                    } else {
+                        saw_user = false;
+                        saw_system = false;
+                        break;
+                    }
+                }
+            }
+            if !system_sid.is_null() {
+                LocalFree(system_sid.cast());
+            }
+            LocalFree(descriptor.cast());
+            if control_ok && owner_ok && saw_user && saw_system {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "selector file ACL is not protected for this user and SYSTEM only",
+                ))
+            }
+        }
+    }
+
+    fn open(path: &Path, disposition: u32, write: bool) -> io::Result<File> {
+        let sid = UserSid::new()?;
+        let mut descriptor = ptr::null_mut();
+        let mut attributes = SECURITY_ATTRIBUTES::default();
+        if write {
+            descriptor = security_descriptor(&sid)?;
+            attributes.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+            attributes.lpSecurityDescriptor = descriptor;
+            attributes.bInheritHandle = 0;
+        }
+        let path_w = wide_path(path);
+        let handle = unsafe {
+            CreateFileW(
+                path_w.as_ptr(),
+                if write {
+                    GENERIC_WRITE | GENERIC_READ
+                } else {
+                    GENERIC_READ
+                },
+                if write { 0 } else { FILE_SHARE_READ },
+                if write {
+                    &attributes as *const SECURITY_ATTRIBUTES
+                } else {
+                    ptr::null()
+                },
+                disposition,
+                FILE_ATTRIBUTE_NORMAL
+                    | FILE_FLAG_OPEN_REPARSE_POINT
+                    | if write { FILE_FLAG_WRITE_THROUGH } else { 0 },
+                ptr::null_mut(),
+            )
+        };
+        if !descriptor.is_null() {
+            unsafe { LocalFree(descriptor.cast()) };
+        }
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(last_error());
+        }
+        let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+        if unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileAttributeTagInfo,
+                (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+                std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+            )
+        } == 0
+        {
+            let error = last_error();
+            unsafe { CloseHandle(handle) };
+            return Err(error);
+        }
+        if info.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
+            unsafe { CloseHandle(handle) };
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "selector path is a reparse point or directory",
+            ));
+        }
+        if let Err(error) = validate_acl(handle, &sid) {
+            unsafe { CloseHandle(handle) };
+            return Err(error);
+        }
+        Ok(unsafe { File::from_raw_handle(handle) })
+    }
+
+    pub fn open_read(path: &Path) -> io::Result<File> {
+        open(path, OPEN_EXISTING, false)
+    }
+
+    pub fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        let mut file = open(path, CREATE_NEW, true)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
     }
 }
 static ATTENTION: Mutex<Option<Value>> = Mutex::new(None);

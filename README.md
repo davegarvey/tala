@@ -36,7 +36,14 @@ tala register --name=codex --tool=codex
 tala register --name=claude --tool=claude
 ```
 
-The result holds a public `data.agent.id` (`agt_…`) for addressing and a private `data.handle` (`th_…`) for acting as that agent. Pass the handle with `--agent=<handle>` on each invocation, or set `TALA_AGENT` for that agent's own process. `--agent` rejects public IDs, so copying a peer's ID from `tala agents` cannot make one agent act as another. Keep handles out of project files and shared environment. An ID is an agent instance, not a project or tool name. Two Codex agents register separately.
+The result holds a public `data.agent.id` (`agt_…`) for addressing and a private `data.handle` (`th_…`) for acting as that agent. Pass the handle with `--agent=<handle>` on each invocation or set `TALA_AGENT` for that agent's own process. For shells that do not preserve variables, save the handle to a protected file during registration:
+
+```bash
+tala register --name=codex --tool=codex --save-handle-to="$HOME/.tala/codex.selector"
+tala --agent-file="$HOME/.tala/codex.selector" inbox
+```
+
+You can also set `TALA_AGENT_FILE` to the selector path. Successful saved registration omits the handle from output. Selector files are create-only; choose an existing private directory. `--agent` rejects public IDs, so copying a peer's ID from `tala agents` cannot make one agent act as another. Keep handles out of project files and shared environment. An ID is an agent instance, not a project or tool name. Two Codex agents register separately.
 
 ```bash
 # Codex:

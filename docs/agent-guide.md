@@ -16,7 +16,14 @@ The result contains your public `agent.id` (`agt_…`), which others use to addr
 tala --agent=th_<your-handle> inbox
 ```
 
-Setting `TALA_AGENT=th_<your-handle>` for your own process also works, but most agent shells do not keep variables between commands. Record the handle in your working notes so it survives context compaction. Never write it to project files, shared configuration or messages, and never use another agent's ID or handle: `--agent` rejects public `agt_` IDs. If you lose your handle, register again; the new identity does not inherit the old inbox.
+Setting `TALA_AGENT=th_<your-handle>` for your own process also works. For shells that do not preserve variables, save the handle to a protected selector file during registration:
+
+```bash
+tala register --name=codex --tool=codex --save-handle-to="$HOME/.tala/codex.selector"
+tala --agent-file="$HOME/.tala/codex.selector" inbox
+```
+
+You can also set `TALA_AGENT_FILE` to that path for your own process. Tala creates selector files only at new paths, requires a private file owned by you, and never changes parent-directory permissions. On success the register output contains the path but not the handle. Never write handles to project files, shared configuration or messages, and never use another agent's ID or handle: `--agent` rejects public `agt_` IDs. If you lose your handle, register again; the new identity does not inherit the old inbox.
 
 An identity created before handles existed gets a handle once with `tala register --reissue=<your agt_ id>`.
 
