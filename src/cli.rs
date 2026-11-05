@@ -87,7 +87,7 @@ pub enum Commands {
         #[arg(long,default_value_t=50,value_parser=limit)]
         limit: usize,
     },
-    /// List current projects; stale and closed projects are hidden by default
+    /// List server-wide projects before or after registration; stale and closed projects are hidden by default
     ListProjects {
         #[arg(long, help = "Include stale projects")]
         stale: bool,
@@ -795,7 +795,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                     after,
                     limit,
                 },
-                Some(client::credential(selected)?),
+                selected.map(|h| client::credential(Some(h))).transpose()?,
             )
             .await?
         }

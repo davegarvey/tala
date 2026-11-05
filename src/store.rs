@@ -317,7 +317,6 @@ PRAGMA user_version=1; COMMIT;")?;
                 after,
                 limit,
             } => {
-                let _ = require()?;
                 bounds(*limit)?;
                 let at = now();
                 let stale_before = at - PROJECT_STALE_AFTER;
