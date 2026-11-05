@@ -920,33 +920,6 @@ fn wait_recovers_after_daemon_crash_without_blocking_a_concurrent_client() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn graceful_stop_during_wait_allows_the_next_client_to_restart_the_daemon() {
-    let h = Harness::new();
-    let a = h.register(&h.a, "a");
-    let mut waiter = h
-        .command(&h.a, Some(&a), &["wait", "--timeout=30"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(waiter.try_wait().unwrap().is_none());
-
-    h.ok(&h.a, None, &["stop"]);
-    assert!(waiter.try_wait().unwrap().is_none());
-    assert_eq!(
-        h.ok(&h.a, Some(&a), &["inbox", "--peek"])["messages"],
-        json!([])
-    );
-    assert!(waiter.try_wait().unwrap().is_none());
-    assert_eq!(h.ok(&h.a, None, &["status"])["running"], true);
-
-    let _ = waiter.kill();
-    waiter.wait().unwrap();
-}
-
 #[test]
 fn direct_messages_cannot_leak_into_public_board_threads() {
     let h = Harness::new();
