@@ -67,7 +67,7 @@ impl Harness {
     }
     fn error(&self, dir: &Path, agent: Option<&Ident>, args: &[&str], code: &str) -> Value {
         let o = self.raw(dir, agent, args);
-        assert!(!o.status.success());
+        assert!(!o.status.success(), "{:?} unexpectedly succeeded", args);
         assert!(o.stdout.is_empty());
         let v: Value = serde_json::from_slice(&o.stderr).unwrap();
         assert_eq!(v["error"]["code"], code);
@@ -1081,6 +1081,423 @@ fn board_search_history_are_nonconsuming_and_parts_are_preserved() {
         h.ok(&h.a, Some(&b), &["inbox"])["messages"][0]["parts"],
         sent["message"]["parts"]
     );
+}
+
+#[test]
+fn history_list_uses_narrow_visibility_and_reports_summary_fields() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "author");
+    let b = h.register(&h.a, "replier");
+    let c = h.register(&h.a, "bystander");
+    let d = h.register(&h.b, "other-project-agent");
+
+    let direct = h.send(&a, &b.id, "direct work");
+    let direct_thread = direct["message"]["thread_id"].as_str().unwrap().to_string();
+    h.ok(
+        &h.a,
+        Some(&a),
+        &[
+            "handoff",
+            "--to",
+            &c.id,
+            "--thread",
+            &direct_thread,
+            "handoff summary",
+        ],
+    );
+
+    let board_post = h.ok(&h.a, Some(&a), &["post", "first | row\nsecond row"]);
+    let board_thread = board_post["message"]["thread_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    h.ok(
+        &h.a,
+        Some(&b),
+        &[
+            "reply",
+            &board_post["message"]["id"].as_u64().unwrap().to_string(),
+            "first | row\nsecond row",
+        ],
+    );
+
+    let other_project = h.b.to_str().unwrap().to_string();
+    let cross_post = h.ok(
+        &h.a,
+        Some(&a),
+        &[
+            "post",
+            &format!("--project={other_project}"),
+            "cross-project post",
+        ],
+    );
+    h.ok(
+        &h.b,
+        Some(&d),
+        &[
+            "reply",
+            &cross_post["message"]["id"].as_u64().unwrap().to_string(),
+            "cross-project response",
+        ],
+    );
+
+    let listed = h.ok(&h.a, Some(&a), &["history"]);
+    let rows = listed["threads"].as_array().unwrap();
+    let direct_row = rows
+        .iter()
+        .find(|row| row["thread"] == direct_thread)
+        .unwrap();
+    assert_eq!(direct_row["kind"], "direct");
+    assert!(direct_row["project"].is_null());
+    assert_eq!(direct_row["participants"].as_array().unwrap().len(), 2);
+    assert_eq!(direct_row["handoff_only_recipients"][0]["id"], c.id);
+
+    let board_row = rows
+        .iter()
+        .find(|row| row["thread"] == board_thread)
+        .unwrap();
+    assert_eq!(board_row["kind"], "board");
+    assert_eq!(
+        board_row["project"],
+        std::fs::canonicalize(&h.a).unwrap().to_str().unwrap()
+    );
+    assert_eq!(board_row["message_count"], 2);
+    assert_eq!(board_row["unread"], 1);
+    assert_eq!(board_row["excerpt"], "first | row");
+
+    let cross_thread = cross_post["message"]["thread_id"].as_str().unwrap();
+    let cross_row = rows
+        .iter()
+        .find(|row| row["thread"] == cross_thread)
+        .unwrap();
+    assert_eq!(cross_row["kind"], "board");
+    assert_eq!(
+        cross_row["project"],
+        std::fs::canonicalize(&h.b).unwrap().to_str().unwrap()
+    );
+
+    let c_rows = h.ok(&h.a, Some(&c), &["history"])["threads"].clone();
+    assert_eq!(c_rows.as_array().unwrap().len(), 1);
+    assert_eq!(c_rows[0]["thread"], direct_thread);
+
+    let history = h.ok(&h.a, Some(&a), &["history", &board_thread]);
+    assert_eq!(history["messages"].as_array().unwrap().len(), 2);
+    let human = h.raw(&h.a, Some(&a), &["history", "--human"]);
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("THREAD | LAST ID | MESSAGES"));
+    assert!(human.contains("first \\| row"));
+    assert!(human.contains(&direct_thread));
+}
+
+#[test]
+fn history_list_cursor_modes_preserve_thread_history_usage() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    let sent = h.send(&a, &b.id, "thread history");
+    let thread = sent["message"]["thread_id"].as_str().unwrap();
+
+    let list = h.ok(&h.a, Some(&a), &["history"]);
+    assert_eq!(list["threads"].as_array().unwrap().len(), 1);
+    let history = h.ok(&h.a, Some(&a), &["history", thread, "--after=0"]);
+    assert_eq!(history["messages"].as_array().unwrap().len(), 1);
+    h.error(&h.a, Some(&a), &["history", "--after=0"], "USAGE_ERROR");
+    h.error(
+        &h.a,
+        Some(&a),
+        &["history", thread, "--cursor=v1_invalid"],
+        "USAGE_ERROR",
+    );
+}
+
+#[test]
+fn history_list_snapshot_freezes_activity_receipts_and_visibility() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "snapshot-author");
+    let b = h.register(&h.a, "snapshot-peer");
+    let c = h.register(&h.a, "snapshot-handoff");
+    let older = h.send(&a, &b.id, "older thread");
+    let cancelled = h.send(&a, &b.id, "cancelled thread");
+    let newest = h.send(&a, &b.id, "newest thread");
+    let older_id = older["message"]["id"].as_u64().unwrap();
+    let older_thread = older["message"]["thread_id"].as_str().unwrap().to_string();
+    let cancelled_id = cancelled["message"]["id"].as_u64().unwrap();
+    let cancelled_thread = cancelled["message"]["thread_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let newest_thread = newest["message"]["thread_id"].as_str().unwrap();
+
+    let first = h.ok(&h.a, Some(&a), &["history", "--limit=1"]);
+    assert_eq!(first["threads"][0]["thread"], newest_thread);
+    let first_cursor = first["next_cursor"].as_str().unwrap().to_string();
+    let first_high_water = first["snapshot_high_water_id"].as_u64().unwrap();
+
+    h.ok(
+        &h.a,
+        Some(&b),
+        &["reply", &older_id.to_string(), "reply after snapshot"],
+    );
+    h.ok(&h.a, Some(&a), &["resolve", &cancelled_id.to_string()]);
+    h.ok(
+        &h.a,
+        Some(&a),
+        &[
+            "handoff",
+            "--to",
+            &c.id,
+            "--thread",
+            &older_thread,
+            "new handoff grant",
+        ],
+    );
+    h.ok(&h.a, Some(&b), &["rename", "--name=renamed-after-snapshot"]);
+    h.send(&a, &c.id, "new thread after snapshot");
+
+    let page2 = h.ok(
+        &h.a,
+        Some(&a),
+        &["history", "--limit=1", &format!("--cursor={first_cursor}")],
+    );
+    assert_eq!(page2["snapshot_high_water_id"], first_high_water);
+    assert_eq!(page2["threads"][0]["thread"], cancelled_thread);
+    assert_eq!(page2["threads"][0]["last_message_id"], cancelled_id);
+    assert_eq!(page2["threads"][0]["pending_outgoing"], 1);
+    let page2_cursor = page2["next_cursor"].as_str().unwrap().to_string();
+    let page3 = h.ok(
+        &h.a,
+        Some(&a),
+        &["history", "--limit=1", &format!("--cursor={page2_cursor}")],
+    );
+    assert_eq!(page3["snapshot_high_water_id"], first_high_water);
+    let older_row = &page3["threads"][0];
+    assert_eq!(older_row["thread"], older_thread);
+    assert_eq!(older_row["last_message_id"], older_id);
+    assert_eq!(older_row["message_count"], 1);
+    assert_eq!(older_row["unread"], 0);
+    assert_eq!(older_row["pending_outgoing"], 1);
+    assert_eq!(older_row["handoff_only_recipients"], json!([]));
+    assert!(older_row["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|person| person["id"] == b.id && person["name"] == "snapshot-peer"));
+    assert_eq!(page3["has_more"], false);
+
+    let replay = h.ok(
+        &h.a,
+        Some(&a),
+        &["history", "--limit=1", &format!("--cursor={first_cursor}")],
+    );
+    assert_eq!(replay["threads"], page2["threads"]);
+    assert_eq!(replay["next_cursor"], page2["next_cursor"]);
+
+    let fresh = h.ok(&h.a, Some(&a), &["history", "--limit=10"]);
+    assert_eq!(fresh["threads"].as_array().unwrap().len(), 4);
+    let fresh_older = fresh["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["thread"] == older_thread)
+        .unwrap();
+    assert_eq!(fresh_older["message_count"], 3);
+    assert_eq!(fresh_older["unread"], 1);
+    assert_eq!(fresh_older["pending_outgoing"], 1);
+    assert_eq!(fresh_older["handoff_only_recipients"][0]["id"], c.id);
+    assert!(fresh_older["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|person| person["id"] == b.id && person["name"] == "renamed-after-snapshot"));
+}
+
+#[test]
+fn history_list_attention_counts_match_pending_without_consuming() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "attention-a");
+    let b = h.register(&h.a, "attention-b");
+    let c = h.register(&h.a, "attention-c");
+
+    let outgoing = h.send(&a, &b.id, "outgoing fresh");
+    let incoming = h.send(&c, &a.id, "incoming fresh");
+    let stale = h.send(&b, &a.id, "incoming stale");
+    let cancelled = h.send(&a, &c.id, "cancel me");
+    let superseded = h.send(&a, &c.id, "old obligation");
+    let superseding = h.ok(
+        &h.a,
+        Some(&a),
+        &[
+            "send",
+            "--to",
+            &c.id,
+            "--request",
+            "replacement obligation",
+            &format!("--supersedes={}", superseded["message"]["id"]),
+        ],
+    );
+    h.ok(
+        &h.a,
+        Some(&a),
+        &["resolve", &cancelled["message"]["id"].to_string()],
+    );
+    h.ok(&h.a, Some(&b), &["unregister"]);
+
+    let listed = h.ok(&h.a, Some(&a), &["history"]);
+    let row_for = |thread: &str| {
+        listed["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["thread"] == thread)
+            .unwrap()
+    };
+    let outgoing_thread = outgoing["message"]["thread_id"].as_str().unwrap();
+    let incoming_thread = incoming["message"]["thread_id"].as_str().unwrap();
+    let stale_thread = stale["message"]["thread_id"].as_str().unwrap();
+    let cancelled_thread = cancelled["message"]["thread_id"].as_str().unwrap();
+    let superseded_thread = superseding["message"]["thread_id"].as_str().unwrap();
+    assert_eq!(row_for(outgoing_thread)["pending_outgoing"], 0);
+    assert_eq!(row_for(outgoing_thread)["stale_pending_outgoing"], 1);
+    assert_eq!(row_for(incoming_thread)["pending_incoming"], 1);
+    assert_eq!(row_for(incoming_thread)["unread"], 1);
+    assert_eq!(row_for(stale_thread)["pending_incoming"], 0);
+    assert_eq!(row_for(stale_thread)["stale_pending_incoming"], 1);
+    assert_eq!(row_for(cancelled_thread)["pending_outgoing"], 0);
+    assert_eq!(row_for(cancelled_thread)["stale_pending_outgoing"], 0);
+    assert_eq!(row_for(superseded_thread)["pending_outgoing"], 1);
+    assert_eq!(row_for(superseded_thread)["message_count"], 2);
+
+    let pending_in = h.ok(&h.a, Some(&a), &["pending", "--direction=incoming"]);
+    let pending_stale = h.ok(
+        &h.a,
+        Some(&a),
+        &["pending", "--direction=incoming", "--stale"],
+    );
+    let pending_outgoing = h.ok(&h.a, Some(&a), &["pending", "--direction=outgoing"]);
+    let pending_stale_outgoing = h.ok(
+        &h.a,
+        Some(&a),
+        &["pending", "--direction=outgoing", "--stale"],
+    );
+    assert_eq!(pending_in["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(pending_in["messages"][0]["id"], incoming["message"]["id"]);
+    assert_eq!(pending_in["stale_count"], 1);
+    assert_eq!(pending_stale["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(pending_stale["messages"][0]["id"], stale["message"]["id"]);
+    assert_eq!(pending_outgoing["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        pending_outgoing["messages"][0]["id"],
+        superseding["message"]["id"]
+    );
+    assert_eq!(
+        pending_stale_outgoing["messages"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        pending_stale_outgoing["messages"][0]["id"],
+        outgoing["message"]["id"]
+    );
+
+    let inbox = h.ok(&h.a, Some(&a), &["inbox", "--peek"]);
+    assert_eq!(inbox["messages"].as_array().unwrap().len(), 2);
+    assert!(inbox["messages"].as_array().unwrap().iter().any(|message| {
+        message["id"] == incoming["message"]["id"] && message["received_at"].is_null()
+    }));
+}
+
+#[test]
+fn history_list_rejects_invalid_cursors_and_bounds_snapshot_retention() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "cursor-owner");
+    let b = h.register(&h.a, "other-agent");
+    h.send(&a, &b.id, "first thread");
+    h.send(&a, &b.id, "second thread");
+
+    let first = h.ok(&h.a, Some(&a), &["history", "--limit=1"]);
+    let cursor = first["next_cursor"].as_str().unwrap().to_string();
+    let malformed = h.error(
+        &h.a,
+        Some(&a),
+        &["history", "--cursor=not-a-cursor"],
+        "INVALID_CURSOR",
+    );
+    let foreign = h.error(
+        &h.a,
+        Some(&b),
+        &["history", &format!("--cursor={cursor}")],
+        "INVALID_CURSOR",
+    );
+    assert_eq!(malformed["error"], foreign["error"]);
+
+    let db = rusqlite::Connection::open(h.home.join("tala.sqlite3")).unwrap();
+    let snapshot_id: String = db
+        .query_row(
+            "SELECT snapshot_id FROM thread_list_cursors WHERE token=?",
+            [&cursor],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let expired_rows = db
+        .execute(
+            "UPDATE thread_list_snapshots SET expires_at=0 WHERE id=?",
+            [&snapshot_id],
+        )
+        .unwrap();
+    assert_eq!(expired_rows, 1);
+    assert_eq!(
+        db.query_row(
+            "SELECT expires_at FROM thread_list_snapshots WHERE id=?",
+            [&snapshot_id],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    let expired = h.error(
+        &h.a,
+        Some(&a),
+        &["history", &format!("--cursor={cursor}")],
+        "INVALID_CURSOR",
+    );
+    assert_eq!(malformed["error"], expired["error"]);
+
+    let cap = Harness::new();
+    let owner = cap.register(&cap.a, "snapshot-cap");
+    let peer = cap.register(&cap.a, "snapshot-peer");
+    cap.send(&owner, &peer.id, "first thread");
+    cap.send(&owner, &peer.id, "second thread");
+    let mut cursors = Vec::new();
+    for _ in 0..9 {
+        cursors.push(
+            cap.ok(&cap.a, Some(&owner), &["history", "--limit=1"])["next_cursor"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+    let cap_db = rusqlite::Connection::open(cap.home.join("tala.sqlite3")).unwrap();
+    let count: u64 = cap_db
+        .query_row(
+            "SELECT COUNT(*) FROM thread_list_snapshots WHERE agent=?",
+            [&owner.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 8);
+    let evicted = cap.error(
+        &cap.a,
+        Some(&owner),
+        &["history", &format!("--cursor={}", cursors[0])],
+        "INVALID_CURSOR",
+    );
+    let still_valid = cap.ok(
+        &cap.a,
+        Some(&owner),
+        &["history", &format!("--cursor={}", cursors[1])],
+    );
+    assert!(!still_valid["threads"].as_array().unwrap().is_empty());
+    assert_eq!(evicted["error"]["message"], malformed["error"]["message"]);
 }
 #[test]
 fn multiline_stdin_file_and_usage_errors() {
@@ -2909,7 +3326,9 @@ fn board_reply_reaches_the_posts_author() {
     let h = Harness::new();
     let a = h.register(&h.a, "a");
     let b = h.register(&h.a, "b");
-    let plan = id(&h.ok(&h.a, Some(&a), &["post", "changing parser"]));
+    let posted = h.ok(&h.a, Some(&a), &["post", "changing parser"]);
+    let plan = id(&posted);
+    let board_thread = posted["message"]["thread_id"].as_str().unwrap();
     let waiter = h
         .command(&h.a, Some(&a), &["inbox", "--wait", "--timeout=10"])
         .stdout(Stdio::piped())
@@ -2924,6 +3343,17 @@ fn board_reply_reaches_the_posts_author() {
     assert_eq!(v["data"]["messages"][0]["reply_to"].to_string(), plan);
     // The reply stays on the board, and reading the board acknowledges nothing.
     let second = id(&h.ok(&h.a, Some(&b), &["reply", &plan, "one more"]));
+    let b_threads = h.ok(&h.a, Some(&b), &["history"]);
+    let b_board_row = b_threads["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["thread"] == board_thread)
+        .unwrap();
+    assert_eq!(
+        b_board_row["last_message_id"].as_u64().unwrap().to_string(),
+        second
+    );
     assert_eq!(
         h.ok(&h.a, Some(&a), &["board"])["messages"]
             .as_array()

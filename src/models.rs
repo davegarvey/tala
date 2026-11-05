@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Every error code with its retry class, meaning and default next command.
 /// Retry classes: `safe` (repeat as is), `same_key` (repeat with the same
@@ -139,6 +139,12 @@ pub const ERRORS: &[(&str, Retry, &str, Option<&str>)] = &[
         Retry::AfterFix,
         "Thread is missing or not visible to this agent",
         Some("tala guide identity"),
+    ),
+    (
+        "INVALID_CURSOR",
+        Retry::AfterFix,
+        "History list cursor is invalid or expired",
+        Some("tala history"),
     ),
     (
         "NOT_RECIPIENT",
@@ -441,6 +447,10 @@ pub enum Operation {
     History {
         thread: String,
         after: u64,
+        limit: usize,
+    },
+    ListThreads {
+        cursor: Option<String>,
         limit: usize,
     },
     Search {

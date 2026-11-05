@@ -164,3 +164,41 @@ The system SHALL include a supersession target in message canonicalization and e
 #### Scenario: Existing ordinary-send retry remains compatible
 - **WHEN** an ordinary send without `--supersedes` is retried after upgrading storage
 - **THEN** the send retains its existing explicit and derived idempotency behavior
+
+### Requirement: Thread-list visibility follows participation and grants
+The thread list SHALL include direct threads visible through conversational participation or a direct handoff grant. It SHALL include board threads only when the identity authored a board post or reply.
+
+#### Scenario: Direct conversational participant
+- **WHEN** an identity sent or received a non-handoff message in a direct thread
+- **THEN** the thread appears with its conversational participants
+
+#### Scenario: Direct handoff-only recipient
+- **WHEN** an identity has only received a direct handoff grant for a thread
+- **THEN** the thread appears and handoff-only recipients are listed separately from conversational participants
+
+#### Scenario: Board author or replier
+- **WHEN** an identity authored a post or reply in a board thread
+- **THEN** that thread appears in its list
+
+#### Scenario: Same-project board bystander
+- **WHEN** an identity can browse a board through project context but did not author a post or reply in a thread
+- **THEN** that thread is absent from its history list
+
+#### Scenario: Identity without visible threads
+- **WHEN** an identity has no conversational participation or direct handoff grants
+- **THEN** the history list is empty
+
+### Requirement: Thread-list attention is canonical and non-consuming
+Thread summaries SHALL count unread messages and pending requests using Tala's canonical delivery and request rules without acknowledging or changing any delivery receipt.
+
+#### Scenario: Direct and board unread counts
+- **WHEN** an identity has unreceived direct messages, including handoffs, or unreceived board deliveries for a thread
+- **THEN** the thread unread count includes those deliveries
+
+#### Scenario: Fresh and stale requests
+- **WHEN** an identity has unanswered, uncancelled, nonsuperseded requests in a thread
+- **THEN** fresh and stale counts match `tala pending` and `tala pending --stale`, including the existing 24-hour and inactive-counterpart rules
+
+#### Scenario: Listing does not acknowledge deliveries
+- **WHEN** an identity lists threads with unread messages or board deliveries
+- **THEN** receipt state remains unchanged and inbox or board reads still return those deliveries as unread
