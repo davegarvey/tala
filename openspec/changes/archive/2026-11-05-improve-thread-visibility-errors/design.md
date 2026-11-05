@@ -18,7 +18,7 @@ Thread access is checked in several store operations. Some paths already use `TH
 ## Decisions
 
 - Centralize the code, message, hint, and next command in a store helper and use it for every failed `visible_thread` check. The existing generic message, “Thread is missing or not visible to this agent,” remains because distinguishing those cases could reveal thread existence.
-- The hint says the thread may be outside the current identity/project context, recommends selecting the original private identity or asking its owner to use `tala handoff`, and does not include any private handle or foreign project detail.
+- The hint says the thread may be outside the current identity/project context, recommends selecting the original private identity or asking a participant who can see the thread to hand it off to the caller's public ID, and does not include any private handle or foreign project detail.
 - Set `next` to `tala guide identity`, which is available without registration and explains selector-based identity selection. This gives the structured error one exact useful command while the hint handles the multiple recovery choices.
 
 ## Risks / Trade-offs

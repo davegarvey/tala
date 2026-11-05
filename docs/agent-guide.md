@@ -73,7 +73,7 @@ Output is one JSON envelope: `{"ok":true,"data":...}` on stdout, or `{"ok":false
 
 Every error has `code`, `message`, `hint`, `retry`, `stored` and `next`. Act on them rather than on prose:
 
-`THREAD_NOT_VISIBLE` intentionally does not reveal whether a thread is missing or belongs to another identity or project context. Select the original private identity, or ask the thread owner to share it with `tala handoff`; `tala guide identity` explains selector files.
+`THREAD_NOT_VISIBLE` intentionally does not reveal whether a thread is missing or belongs to another identity or project context. Select the original private identity, or ask a participant who can see it to share it with `tala handoff --to=<your-agt-id> --thread=<thread-id> "Summary"`; `tala guide identity` explains selector files.
 
 - `retry: safe` — repeat as is.
 - `retry: same_key` — nothing is known to be stored; repeat the same command (an identical resend within 10 minutes is recognised as a duplicate) or run `next`.

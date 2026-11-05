@@ -119,7 +119,7 @@ fn thread_not_visible() -> Failure {
     Failure::new(
         "THREAD_NOT_VISIBLE",
         "Thread is missing or not visible to this agent",
-        "The thread may be outside this identity or project context. Select the original private identity or ask its owner to run `tala handoff`. See `tala guide identity` for selector help.",
+        "The thread may be outside this identity or project context. Select the original private identity, or ask a participant who can see it to run `tala handoff --to=<your-agt-id> --thread=<thread-id> \"Summary\"`. See `tala guide identity` for selector help.",
     )
 }
 

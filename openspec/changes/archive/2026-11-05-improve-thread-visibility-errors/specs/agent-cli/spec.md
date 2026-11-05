@@ -20,5 +20,5 @@ Every error SHALL include `code`, `message`, `hint`, a `retry` class of `safe`, 
 #### Scenario: Thread outside the visible scope
 - **WHEN** an agent accesses a thread it cannot see through its selected identity and project context
 - **THEN** the error uses the generic `THREAD_NOT_VISIBLE` code and does not disclose whether the thread exists or who owns it
-- **AND** its hint explains safe recovery through the original private identity or the thread owner, without exposing handles or foreign project metadata
+- **AND** its hint explains safe recovery through the original private identity or a visible participant's handoff, without exposing handles or foreign project metadata
 - **AND** its `next` command is `tala guide identity`

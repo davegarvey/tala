@@ -308,7 +308,11 @@ fn cross_project_context_boards_and_handoff() {
         sent["message"]["context"]["project"],
         std::fs::canonicalize(&h.a).unwrap().display().to_string()
     );
-    let hidden = h.error(&h.b, Some(&c), &["history", &t], "THREAD_NOT_VISIBLE");
+    let hidden_output = h.raw(&h.b, Some(&c), &["history", &t]);
+    assert_eq!(hidden_output.status.code(), Some(1));
+    assert!(hidden_output.stdout.is_empty());
+    let hidden: Value = serde_json::from_slice(&hidden_output.stderr).unwrap();
+    assert_eq!(hidden["error"]["code"], "THREAD_NOT_VISIBLE");
     h.ok(&h.a, Some(&a), &["history", &t]);
     let missing = h.error(
         &h.b,
