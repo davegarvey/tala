@@ -141,6 +141,56 @@ fn same_checkout_agents_have_separate_inboxes_and_receipts() {
 }
 
 #[test]
+fn human_send_explains_that_an_unlistened_message_stays_queued() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "sender");
+    let recipient = h.register(&h.b, "recipient");
+    let output = h
+        .command(
+            &h.a,
+            Some(&sender),
+            &["send", "--to", &recipient.id, "--request", "Please review"],
+        )
+        .arg("--human")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Recipient was not listening when Tala accepted the message."));
+    assert!(stdout.contains("The message remains queued."));
+}
+
+#[test]
+fn human_reply_explains_that_an_unlistened_message_stays_queued() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "sender");
+    let recipient = h.register(&h.b, "recipient");
+    let request = h.send(&sender, &recipient.id, "Please review");
+    let message_id = request["message"]["id"].as_u64().unwrap().to_string();
+    let output = h
+        .command(
+            &h.b,
+            Some(&recipient),
+            &["reply", &message_id, "Review complete"],
+        )
+        .arg("--human")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Recipient was not listening when Tala accepted the message."));
+    assert!(stdout.contains("The message remains queued."));
+}
+
+#[test]
 fn project_list_hides_closed_projects_and_owner_can_reopen() {
     let h = Harness::new();
     let owner = h.register(&h.a, "owner");
@@ -524,6 +574,7 @@ fn send_wait_timeout_human_output_has_safe_recovery_guidance() {
     let stdout = String::from_utf8_lossy(&o.stdout);
     assert!(stdout.contains("the request was stored. Do not resend it."));
     assert!(stdout.contains("tala inbox --wait --reply-to=1 --timeout=1"));
+    assert!(stdout.contains("The message remains queued."));
 }
 #[test]
 fn blocking_send_matches_only_correlated_reply_and_preserves_other_messages() {

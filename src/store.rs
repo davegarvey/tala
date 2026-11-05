@@ -127,16 +127,24 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version != 0 && version != 1 {
+        if version != 0 && version != 1 && version != 2 {
             return Err(Failure::new(
                 "DATABASE_VERSION",
                 format!("Unsupported database schema {version}"),
                 "Use a matching Tala binary; do not delete the database.",
             ));
         }
+        if version == 1 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE messages ADD COLUMN recipient_listening INTEGER;
+                 PRAGMA user_version=2;
+                 COMMIT;",
+            )?;
+        }
         db.execute_batch("BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY, name TEXT NOT NULL, tool TEXT NOT NULL, context TEXT NOT NULL, token TEXT NOT NULL, last_seen INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1, listening_until INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL, sender TEXT NOT NULL REFERENCES agents(id), recipient TEXT REFERENCES agents(id), project TEXT, context TEXT NOT NULL, parts TEXT NOT NULL, kind TEXT NOT NULL, reply_to INTEGER REFERENCES messages(id), expects_reply INTEGER NOT NULL, created_at INTEGER NOT NULL, received_at INTEGER, answered_by INTEGER REFERENCES messages(id), cancelled INTEGER NOT NULL DEFAULT 0, key TEXT NOT NULL, canonical TEXT NOT NULL, UNIQUE(sender,key));
+CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL, sender TEXT NOT NULL REFERENCES agents(id), recipient TEXT REFERENCES agents(id), project TEXT, context TEXT NOT NULL, parts TEXT NOT NULL, kind TEXT NOT NULL, reply_to INTEGER REFERENCES messages(id), expects_reply INTEGER NOT NULL, created_at INTEGER NOT NULL, received_at INTEGER, answered_by INTEGER REFERENCES messages(id), cancelled INTEGER NOT NULL DEFAULT 0, key TEXT NOT NULL, canonical TEXT NOT NULL, recipient_listening INTEGER, UNIQUE(sender,key));
 CREATE TABLE IF NOT EXISTS projects(project TEXT PRIMARY KEY, owner_agent TEXT NOT NULL REFERENCES agents(id), closed INTEGER NOT NULL DEFAULT 0, last_activity INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS inbox ON messages(recipient,received_at,id);
 CREATE INDEX IF NOT EXISTS thread_messages ON messages(thread,id);
@@ -169,7 +177,7 @@ SET last_activity=MAX(last_activity, COALESCE((
   WHERE json_extract(messages.context,'$.project')=projects.project
      OR messages.project=projects.project
 ),last_activity));
-PRAGMA user_version=1; COMMIT;")?;
+PRAGMA user_version=2; COMMIT;")?;
         let check: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
         if check != "ok" {
             return Err(Failure::new(
@@ -846,6 +854,48 @@ fn visible_thread(tx: &Transaction<'_>, id: &str, thread: &str) -> Result<bool> 
     let p = agent(tx, id)?.context.project;
     Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM participants WHERE thread=? AND agent=?) OR EXISTS(SELECT 1 FROM messages WHERE thread=? AND project=?)",params![thread,id,thread,p],|r|r.get(0))?)
 }
+fn recipient_is_listening(tx: &Transaction<'_>, recipient: &str) -> Result<bool> {
+    let (active, listening_until): (bool, i64) = tx.query_row(
+        "SELECT active,listening_until FROM agents WHERE id=?",
+        [recipient],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(active && listening_until > now())
+}
+/// Return the point-in-time listener observation persisted with a direct
+/// message. Rows created before this field existed are frozen on first replay.
+fn recipient_presence(tx: &Transaction<'_>, message_id: u64) -> Result<Option<Value>> {
+    let (recipient, observed): (Option<String>, Option<bool>) = tx.query_row(
+        "SELECT recipient,recipient_listening FROM messages WHERE id=?",
+        [message_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let Some(recipient) = recipient else {
+        return Ok(None);
+    };
+    let listening = match observed {
+        Some(listening) => listening,
+        None => {
+            let listening = recipient_is_listening(tx, &recipient)?;
+            tx.execute(
+                "UPDATE messages SET recipient_listening=? WHERE id=? AND recipient_listening IS NULL",
+                params![listening, message_id],
+            )?;
+            listening
+        }
+    };
+    Ok(Some(json!({"listening": listening})))
+}
+fn send_result(tx: &Transaction<'_>, message_id: u64, duplicate: bool) -> Result<Value> {
+    let mut result = json!({
+        "message": message(tx, message_id)?,
+        "duplicate": duplicate,
+    });
+    if let Some(presence) = recipient_presence(tx, message_id)? {
+        result["recipient_presence"] = presence;
+    }
+    Ok(result)
+}
 fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Value> {
     let Operation::Send {
         to,
@@ -882,14 +932,14 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
         );
         match prior {
             Ok((id, created)) if now() - created <= AUTO_KEY_WINDOW => {
-                return Ok(json!({"message":message(tx,id)?,"duplicate":true}));
+                return send_result(tx, id, true);
             }
             Ok(_) => stored_key = format!("{key}:{}", Uuid::new_v4().simple()),
             Err(rusqlite::Error::QueryReturnedNoRows) => {}
             Err(e) => return Err(e.into()),
         }
     } else if let Some(id) = explicit_key(tx, sender, key, &canonical)? {
-        return Ok(json!({"message":message(tx,id)?,"duplicate":true}));
+        return send_result(tx, id, true);
     }
     // `notify` is the author of an answered board message, who receives the
     // reply in their inbox while it stays public on the board.
@@ -966,7 +1016,11 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
         return Err(invalid("Choose a different recipient"));
     }
     let created_at = now();
-    tx.execute("INSERT INTO messages(thread,sender,recipient,project,context,parts,kind,reply_to,expects_reply,created_at,key,canonical) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",params![thread_id,sender,recipient,board,encode(context)?,encode(parts)?,kind,reply_to,request,created_at,stored_key,canonical])?;
+    let recipient_listening = recipient
+        .as_deref()
+        .map(|recipient| recipient_is_listening(tx, recipient))
+        .transpose()?;
+    tx.execute("INSERT INTO messages(thread,sender,recipient,project,context,parts,kind,reply_to,expects_reply,created_at,key,canonical,recipient_listening) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",params![thread_id,sender,recipient,board,encode(context)?,encode(parts)?,kind,reply_to,request,created_at,stored_key,canonical,recipient_listening])?;
     let id = tx.last_insert_rowid() as u64;
     tx.execute(
         "UPDATE projects SET last_activity=? WHERE project=?",
@@ -1017,7 +1071,7 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
         )?;
         tx.execute("UPDATE messages SET answered_by=? WHERE id=? AND expects_reply=1 AND cancelled=0 AND answered_by IS NULL",params![id,parent])?;
     }
-    Ok(json!({"message":message(tx,id)?,"duplicate":false}))
+    send_result(tx, id, false)
 }
 
 /// Explicit keys deduplicate without a window and reject changed content.
@@ -1314,6 +1368,126 @@ mod tests {
             .execute(&rpc(auto(&b.agent, "same"), Some(a)))
             .unwrap();
         assert_eq!(repeat["message"]["id"], later["message"]["id"]);
+    }
+    #[test]
+    fn direct_message_presence_is_saved_and_reused_for_retries() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let sender = register(&mut store, "sender");
+        let recipient = register(&mut store, "recipient");
+
+        store
+            .db
+            .execute(
+                "UPDATE agents SET listening_until=? WHERE id=?",
+                params![now() + 30, recipient.agent],
+            )
+            .unwrap();
+        let request = send(&recipient.agent, "listening-key");
+        let first = store
+            .execute(&rpc(request.clone(), Some(sender.clone())))
+            .unwrap();
+        assert_eq!(first["recipient_presence"]["listening"], true);
+
+        // The recipient stops listening before the retry; a key-based
+        // duplicate must retain the observation attached to the first send.
+        store
+            .db
+            .execute(
+                "UPDATE agents SET listening_until=0 WHERE id=?",
+                [&recipient.agent],
+            )
+            .unwrap();
+        let duplicate = store.execute(&rpc(request, Some(sender.clone()))).unwrap();
+        assert_eq!(duplicate["duplicate"], true);
+        assert_eq!(duplicate["recipient_presence"]["listening"], true);
+
+        store
+            .db
+            .execute(
+                "UPDATE agents SET active=1,listening_until=? WHERE id=?",
+                params![now() - 1, recipient.agent],
+            )
+            .unwrap();
+        let expired = store
+            .execute(&rpc(
+                send(&recipient.agent, "expired-key"),
+                Some(sender.clone()),
+            ))
+            .unwrap();
+        assert_eq!(expired["recipient_presence"]["listening"], false);
+
+        // An inactive row cannot be reported as listening even if a stale
+        // lease value remains in storage.
+        store
+            .db
+            .execute(
+                "UPDATE agents SET active=0,listening_until=? WHERE id=?",
+                params![now() + 30, recipient.agent],
+            )
+            .unwrap();
+        let inactive = store
+            .execute(&rpc(
+                send(&recipient.agent, "inactive-key"),
+                Some(sender.clone()),
+            ))
+            .unwrap();
+        assert_eq!(inactive["recipient_presence"]["listening"], false);
+
+        // A direct reply observes the original sender's listener lease.
+        store
+            .db
+            .execute(
+                "UPDATE agents SET active=1,listening_until=? WHERE id=?",
+                params![now() + 30, sender.agent],
+            )
+            .unwrap();
+        let mut reply = send("unused", "reply-key");
+        if let Operation::Send {
+            to,
+            reply_to,
+            kind,
+            request,
+            ..
+        } = &mut reply
+        {
+            *to = None;
+            *reply_to = Some(first["message"]["id"].as_u64().unwrap());
+            *kind = "reply".into();
+            *request = false;
+        }
+        let replied = store
+            .execute(&rpc(reply.clone(), Some(recipient.clone())))
+            .unwrap();
+        assert_eq!(replied["message"]["recipient"], sender.agent);
+        assert_eq!(replied["recipient_presence"]["listening"], true);
+        store
+            .db
+            .execute(
+                "UPDATE agents SET listening_until=0 WHERE id=?",
+                [&sender.agent],
+            )
+            .unwrap();
+        let duplicate_reply = store.execute(&rpc(reply, Some(recipient))).unwrap();
+        assert_eq!(duplicate_reply["duplicate"], true);
+        assert_eq!(duplicate_reply["recipient_presence"]["listening"], true);
+
+        let mut board_post = send("unused", "board-key");
+        if let Operation::Send {
+            to,
+            project,
+            kind,
+            request,
+            ..
+        } = &mut board_post
+        {
+            *to = None;
+            *project = Some("/test/project".into());
+            *kind = "post".into();
+            *request = false;
+        }
+        let posted = store.execute(&rpc(board_post, Some(sender))).unwrap();
+        assert!(posted.get("recipient_presence").is_none());
     }
     #[test]
     fn ambient_attention_reflects_the_operations_own_effects() {
@@ -1802,6 +1976,13 @@ mod tests {
             .unwrap();
         assert_eq!(owner, "agt_first");
         assert_eq!(activity, 300);
+        assert_eq!(
+            store
+                .db
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
         assert_eq!(
             store
                 .db
