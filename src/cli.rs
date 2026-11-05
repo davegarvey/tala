@@ -89,6 +89,11 @@ pub enum Commands {
         )]
         reissue: Option<String>,
     },
+    /// Read the bundled agent guide, optionally for one topic
+    Guide {
+        #[arg(value_parser = ["listening", "requests", "identity", "worktrees", "errors"])]
+        topic: Option<String>,
+    },
     /// Mark your instance inactive; preserve inbox and history
     Unregister,
     /// Change the name of your selected identity without changing its history
@@ -1024,6 +1029,7 @@ async fn reissue(id: &str) -> Result<Value> {
     std::fs::remove_file(&path)?;
     data["handle"] = json!(handle);
     data["select"] = json!(format!("--agent={handle}"));
+    data["next"] = json!("tala guide listening");
     Ok(data)
 }
 
@@ -1210,8 +1216,10 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                 data["handle"] = json!(handle);
                 data["select"] = json!(format!("--agent={handle}"));
             }
+            data["next"] = json!("tala guide listening");
             data
         }
+        Commands::Guide { topic } => integration::guide(topic.as_deref())?,
         Commands::Agents {
             project,
             after,
@@ -1643,7 +1651,9 @@ pub fn human_age(seconds: i64) -> String {
     }
 }
 pub fn render(data: &Value, attention: Option<&Value>) {
-    if data["events"].is_array() {
+    if let Some(content) = data["content"].as_str() {
+        print!("{content}");
+    } else if data["events"].is_array() {
         render_wait(data);
     } else if data["incoming_requests"].is_array() {
         render_summary(data);
@@ -1704,6 +1714,9 @@ pub fn render(data: &Value, attention: Option<&Value>) {
             data["agent"]["id"].as_str().unwrap_or(""),
             data["agent"]["name"].as_str().unwrap_or("")
         );
+        if let Some(next) = data["next"].as_str() {
+            println!("Next: {next}");
+        }
     } else if let Some(handle) = data["handle"].as_str() {
         if let Some(error) = data["selector_file_error"].as_str() {
             println!(
@@ -1718,6 +1731,9 @@ pub fn render(data: &Value, attention: Option<&Value>) {
             data["agent"]["id"].as_str().unwrap_or(""),
             data["agent"]["name"].as_str().unwrap_or("")
         );
+        if let Some(next) = data["next"].as_str() {
+            println!("Next: {next}");
+        }
     } else if let Some(agents) = data["agents"].as_array() {
         for a in agents {
             println!(

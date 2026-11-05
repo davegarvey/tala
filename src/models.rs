@@ -197,6 +197,8 @@ pub fn help_text() -> String {
     let mut text = String::from(
         "Start: tala register --name=codex --tool=codex\n\
 Pass the returned private handle with --agent=<handle> or TALA_AGENT. For a protected file, use register --save-handle-to=<path>, then --agent-file=<path> or TALA_AGENT_FILE.\n\
+Guide: tala guide [listening|requests|identity|worktrees|errors] (start with tala guide listening).\n\
+Background loop: run tala wait; fetch with its next.inbox/next.board commands, then restart with next.listen_again. tala init writes project instructions.\n\
 Then: tala (what needs attention); tala agents; tala send --to=<id> --request 'Review this'; tala inbox; tala reply <id> 'Done'\n\
 Projects: tala list-projects [--stale|--closed|--all] (no registration required); owner lifecycle: tala close-project / tala reopen-project\n\
 Output is one JSON envelope; --human renders text.\n\n\

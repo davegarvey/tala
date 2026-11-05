@@ -2,12 +2,58 @@ use crate::{cli, models::*, store};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 const GUIDE: &str = include_str!("../docs/agent-guide.md");
+const GUIDE_TOPICS: &[(&str, &str)] = &[
+    ("listening", "Listening"),
+    ("requests", "Requests"),
+    ("identity", "Identity"),
+    ("worktrees", "Worktrees"),
+    ("errors", "Errors"),
+];
+
+pub fn guide(topic: Option<&str>) -> Result<Value> {
+    let topics: Vec<_> = GUIDE_TOPICS.iter().map(|(slug, _)| *slug).collect();
+    let Some(topic) = topic else {
+        return Ok(json!({"topic":"all","topics":topics,"content":GUIDE}));
+    };
+    let title = GUIDE_TOPICS
+        .iter()
+        .find(|(slug, _)| *slug == topic)
+        .map(|(_, title)| *title)
+        .ok_or_else(|| {
+            Failure::new(
+                "USAGE_ERROR",
+                format!("Unknown guide topic: {topic}"),
+                "Choose listening, requests, identity, worktrees or errors.",
+            )
+            .with_next("tala guide --help")
+        })?;
+    let heading = format!("## {title}");
+    let start = GUIDE
+        .lines()
+        .position(|line| line == heading)
+        .ok_or_else(|| {
+            Failure::new(
+                "SERIALIZATION_ERROR",
+                "Guide topic is missing",
+                "Check the bundled guide.",
+            )
+        })?;
+    let lines: Vec<_> = GUIDE.lines().collect();
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| line.starts_with("## "))
+        .map_or(lines.len(), |offset| start + 1 + offset);
+    let content = lines[start..end].join("\n") + "\n";
+    Ok(json!({"topic":topic,"topics":topics,"content":content}))
+}
+
 struct Planned {
     path: PathBuf,
     old: Option<String>,
     action: &'static str,
     stage: Option<PathBuf>,
 }
+
 pub fn init(check: bool, refresh: bool, dry_run: bool) -> Result<Value> {
     let root = cli::context(None)?.project;
     let root = Path::new(&root);
@@ -95,4 +141,40 @@ pub fn init(check: bool, refresh: bool, dry_run: bool) -> Result<Value> {
     Ok(
         json!({"project":root,"version":env!("CARGO_PKG_VERSION"),"check":check,"dry_run":dry_run,"actions":actions}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guide_returns_full_content_and_supported_topics() {
+        let result = guide(None).unwrap();
+        assert_eq!(result["topic"], "all");
+        assert_eq!(
+            result["topics"],
+            json!(["listening", "requests", "identity", "worktrees", "errors"])
+        );
+        assert!(result["content"].as_str().unwrap().contains("## Listening"));
+    }
+
+    #[test]
+    fn guide_returns_requested_topic_from_bundled_markdown() {
+        for (slug, title) in GUIDE_TOPICS {
+            let result = guide(Some(slug)).unwrap();
+            assert_eq!(result["topic"], *slug);
+            let expected_heading = format!("## {title}");
+            assert_eq!(
+                result["content"].as_str().unwrap().lines().next(),
+                Some(expected_heading.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn guide_rejects_unknown_topic_with_usage_error() {
+        let error = guide(Some("unknown")).unwrap_err();
+        assert_eq!(error.code, "USAGE_ERROR");
+        assert!(error.message.contains("unknown"));
+    }
 }
