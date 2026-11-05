@@ -90,6 +90,11 @@ pub enum Commands {
     },
     /// Mark your instance inactive; preserve inbox and history
     Unregister,
+    /// Change the name of your selected identity without changing its history
+    Rename {
+        #[arg(long)]
+        name: String,
+    },
     /// Show your selected identity and project context
     Whoami,
     /// Find registered peers, with observed presence and exact IDs
@@ -1008,6 +1013,13 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
         Commands::Unregister => {
             client::call(Operation::Unregister, Some(client::credential(selected)?)).await?
         }
+        Commands::Rename { name } => {
+            client::call(
+                Operation::Rename { name },
+                Some(client::credential(selected)?),
+            )
+            .await?
+        }
         Commands::Inbox {
             peek,
             wait,
@@ -1318,6 +1330,17 @@ pub fn render(data: &Value, attention: Option<&Value>) {
                 " (no change)"
             }
         );
+    } else if data["agent"].is_object() && data["previous_name"].is_string() {
+        let id = data["agent"]["id"].as_str().unwrap_or("");
+        let name = data["agent"]["name"].as_str().unwrap_or("");
+        if data["changed"] == true {
+            println!(
+                "Renamed agent {id} from {} to {name}.",
+                data["previous_name"].as_str().unwrap_or("")
+            );
+        } else {
+            println!("Agent {id} is already named {name}.");
+        }
     } else if let Some(path) = data["selector_file"].as_str() {
         let quoted = shell_quote_selector_path(path);
         println!(

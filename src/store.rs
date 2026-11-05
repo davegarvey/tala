@@ -207,6 +207,7 @@ PRAGMA user_version=1; COMMIT;")?;
                 | Operation::CloseProject
                 | Operation::ReopenProject
                 | Operation::Unregister
+                | Operation::Rename { .. }
         );
         let canonical = encode(rpc)?;
         if cache {
@@ -285,6 +286,23 @@ PRAGMA user_version=1; COMMIT;")?;
                     [id],
                 )?;
                 json!({"agent_id":id,"registered":false})
+            }
+            Operation::Rename { name } => {
+                if name.trim().is_empty() {
+                    return Err(invalid("Name is required"));
+                }
+                let id = require()?;
+                let previous_name: String =
+                    tx.query_row("SELECT name FROM agents WHERE id=?", [id], |r| r.get(0))?;
+                let changed = previous_name != *name;
+                if changed {
+                    tx.execute("UPDATE agents SET name=? WHERE id=?", params![name, id])?;
+                }
+                json!({
+                    "agent": agent(&tx, id)?,
+                    "previous_name": previous_name,
+                    "changed": changed,
+                })
             }
             Operation::Agents {
                 project,
@@ -1059,6 +1077,96 @@ mod tests {
             .unwrap();
         serde_json::from_value(v["credential"].clone()).unwrap()
     }
+    #[test]
+    fn rename_preserves_identity_and_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let credential = register(&mut store, "before");
+        let request = rpc(
+            Operation::Rename {
+                name: "after".into(),
+            },
+            Some(credential.clone()),
+        );
+        let renamed = store.execute(&request).unwrap();
+        assert_eq!(renamed["agent"]["id"], credential.agent);
+        assert_eq!(renamed["agent"]["name"], "after");
+        assert_eq!(renamed["previous_name"], "before");
+        assert_eq!(renamed["changed"], true);
+
+        // A replay with the same request ID returns the original response.
+        assert_eq!(store.execute(&request).unwrap(), renamed);
+
+        let no_op = store
+            .execute(&rpc(
+                Operation::Rename {
+                    name: "after".into(),
+                },
+                Some(credential.clone()),
+            ))
+            .unwrap();
+        assert_eq!(no_op["agent"]["id"], credential.agent);
+        assert_eq!(no_op["changed"], false);
+        assert_eq!(no_op["previous_name"], "after");
+
+        let mut conflicting_retry = request.clone();
+        conflicting_retry.operation = Operation::Rename {
+            name: "different".into(),
+        };
+        assert_eq!(
+            store.execute(&conflicting_retry).unwrap_err().code,
+            "INVALID_OPERATION"
+        );
+        assert_eq!(
+            store
+                .execute(&rpc(Operation::Whoami, Some(credential)))
+                .unwrap()["agent"]["name"],
+            "after"
+        );
+    }
+
+    #[test]
+    fn rename_requires_valid_identity_and_nonempty_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let credential = register(&mut store, "before");
+        let no_identity = store
+            .execute(&rpc(
+                Operation::Rename {
+                    name: "after".into(),
+                },
+                None,
+            ))
+            .unwrap_err();
+        assert_eq!(no_identity.code, "IDENTITY_REQUIRED");
+
+        let invalid_identity = store
+            .execute(&rpc(
+                Operation::Rename {
+                    name: "after".into(),
+                },
+                Some(Credential {
+                    agent: credential.agent.clone(),
+                    token: "wrong".into(),
+                }),
+            ))
+            .unwrap_err();
+        assert_eq!(invalid_identity.code, "IDENTITY_ERROR");
+
+        let empty_name = store
+            .execute(&rpc(
+                Operation::Rename { name: "  ".into() },
+                Some(credential.clone()),
+            ))
+            .unwrap_err();
+        assert_eq!(empty_name.code, "INVALID_OPERATION");
+        assert_eq!(
+            store
+                .execute(&rpc(Operation::Whoami, Some(credential)))
+                .unwrap()["agent"]["name"],
+            "before"
+        );
+    }
     fn list_projects(include_stale: bool, include_closed: bool) -> Operation {
         Operation::ListProjects {
             include_stale,
@@ -1476,7 +1584,7 @@ mod tests {
             },
             None,
         );
-        for old in [1, 2] {
+        for old in [1, 2, 4] {
             req.protocol_version = old;
             assert_eq!(store.execute(&req).unwrap_err().code, "PROTOCOL_MISMATCH");
         }

@@ -1,6 +1,6 @@
 # Tala agent messaging
 
-Use the installed `tala` from PATH. Check `tala --version` and `tala --help` before following stale instructions. This guide describes protocol 4: private handles, JSON output by default and attention summaries.
+Use the installed `tala` from PATH. Check `tala --version` and `tala --help` before following stale instructions. This guide describes protocol 5: private handles, JSON output by default and attention summaries.
 
 ## Identity
 
@@ -23,7 +23,7 @@ tala register --name=codex --tool=codex --save-handle-to="$HOME/.tala/codex.sele
 tala --agent-file="$HOME/.tala/codex.selector" inbox
 ```
 
-You can also set `TALA_AGENT_FILE` to that path for your own process. Tala creates selector files only at new paths, requires a private file owned by you, and never changes parent-directory permissions. On success the register output contains the path but not the handle. Never write handles to project files, shared configuration or messages, and never use another agent's ID or handle: `--agent` rejects public `agt_` IDs. If you lose your handle, register again; the new identity does not inherit the old inbox.
+You can also set `TALA_AGENT_FILE` to that path for your own process. Tala creates selector files only at new paths, requires a private file owned by you, and never changes parent-directory permissions. On success the register output contains the path but not the handle. Never write handles to project files, shared configuration or messages, and never use another agent's ID or handle: `--agent` rejects public `agt_` IDs. To change your display name while keeping this identity and its history, run `tala rename --name=<new-name>` with your current handle selected. Rename requires that existing handle; it cannot recover a lost handle. If the handle is lost, use the available credential-recovery path when you still have its recovery credential, or register a genuinely new identity and remember that it has a separate inbox and history.
 
 An identity created before handles existed gets a handle once with `tala register --reissue=<your agt_ id>`.
 
