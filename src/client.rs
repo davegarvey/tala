@@ -424,32 +424,41 @@ pub async fn stop_daemon() -> Result<Value> {
         return Ok(serde_json::json!({"stopped":false,"running":false}));
     };
 
-    let info = daemon::read_info().filter(|info| info.instance == target);
-    if let Some(info) = info {
-        match probe(&info).await {
-            Liveness::Live => {
-                let _ = stop_instance(&info).await;
-            }
-            Liveness::Stale => {}
-            Liveness::Unreachable(_) => {
-                return Err(Failure::new(
-                    "STOP_TIMEOUT",
-                    "The daemon target is still recorded but cannot be reached",
-                    "Inspect tala status and daemon.log; retry stop when the daemon can be reached.",
-                ));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut stop_sent = false;
+    loop {
+        if let Some(info) = daemon::read_info().filter(|info| info.instance == target) {
+            match probe(&info).await {
+                Liveness::Live if !stop_sent => {
+                    let _ = stop_instance(&info).await;
+                    stop_sent = true;
+                }
+                Liveness::Live | Liveness::Stale => {}
+                Liveness::Unreachable(_) => {
+                    return Err(Failure::new(
+                        "STOP_TIMEOUT",
+                        "The daemon target is still recorded but cannot be reached",
+                        "Inspect tala status and daemon.log; retry stop when the daemon can be reached.",
+                    ));
+                }
             }
         }
-    }
-    if crate::lifecycle::wait_until_stopped(Duration::from_secs(5), &target).await? {
-        crate::lifecycle::finish_stop(Some(&target))?;
-        let _ = stop_guard.unlock();
-        Ok(serde_json::json!({"stopped":true,"instance":target}))
-    } else {
-        Err(Failure::new(
-            "STOP_TIMEOUT",
-            "Daemon has not completed shutdown",
-            "Check tala status and daemon.log.",
-        ))
+        // daemon.json may be published just after the startup barrier if Stop
+        // captured lifecycle.instance between lifecycle publication and the
+        // metadata write. Keep looking for that exact instance until it exits.
+        if daemon::daemon_lock_available()? {
+            crate::lifecycle::finish_stop(Some(&target))?;
+            let _ = stop_guard.unlock();
+            return Ok(serde_json::json!({"stopped":true,"instance":target}));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Failure::new(
+                "STOP_TIMEOUT",
+                "Daemon has not completed shutdown",
+                "Check tala status and daemon.log.",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

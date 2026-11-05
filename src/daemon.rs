@@ -38,8 +38,8 @@ pub fn read_info() -> Option<DaemonInfo> {
 }
 
 #[cfg(debug_assertions)]
-async fn test_startup_gate() -> Result<()> {
-    let Ok(path) = std::env::var("TALA_TEST_STARTUP_GATE") else {
+async fn test_startup_gate(name: &str) -> Result<()> {
+    let Ok(path) = std::env::var(name) else {
         return Ok(());
     };
     let path = std::path::PathBuf::from(path);
@@ -66,7 +66,7 @@ pub async fn run() -> Result<()> {
         return Err(crate::lifecycle::stopped());
     }
     #[cfg(debug_assertions)]
-    test_startup_gate().await?;
+    test_startup_gate("TALA_TEST_STARTUP_GATE").await?;
     if let Some(info) = read_info() {
         if info.protocol_version != PROTOCOL_VERSION && crate::client::live(&info).await {
             return Err(Failure::new(
@@ -98,6 +98,8 @@ pub async fn run() -> Result<()> {
     if !crate::lifecycle::publish(generation, &info.instance)? {
         return Err(crate::lifecycle::stopped());
     }
+    #[cfg(debug_assertions)]
+    test_startup_gate("TALA_TEST_METADATA_GATE").await?;
     store::private_write(
         &store::home().join("daemon.json"),
         &serde_json::to_vec(&info).expect("daemon metadata serializes"),

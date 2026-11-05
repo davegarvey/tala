@@ -7,7 +7,6 @@
 use crate::{daemon, models::*, store};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct State {
@@ -183,27 +182,4 @@ pub fn stopped() -> Failure {
         "The daemon was intentionally stopped while this wait was active",
         "Start a new wait after the stop completes.",
     )
-}
-
-pub async fn wait_until_stopped(timeout: Duration, target: &str) -> Result<bool> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(false);
-        }
-        let info = daemon::read_info().filter(|info| info.instance == target);
-        let exited = match info {
-            None => daemon::daemon_lock_available()?,
-            Some(info) => {
-                matches!(
-                    crate::client::probe(&info).await,
-                    crate::client::Liveness::Stale
-                ) && daemon::daemon_lock_available()?
-            }
-        };
-        if exited {
-            return Ok(true);
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
 }

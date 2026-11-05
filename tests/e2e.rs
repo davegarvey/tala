@@ -2388,6 +2388,84 @@ fn stop_drains_child_paused_after_initial_generation_check() {
 }
 
 #[test]
+fn stop_finds_instance_published_before_daemon_metadata() {
+    let h = Harness::new();
+    let identity = h.register(&h.a, "metadata-publish-stop");
+    h.ok(&h.a, None, &["stop"]);
+
+    let gate = h.temp.path().join("metadata-gate");
+    std::fs::create_dir_all(&gate).unwrap();
+    let starter = h
+        .command(&h.a, Some(&identity), &["whoami"])
+        .env("TALA_TEST_METADATA_GATE", &gate)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let ready_deadline = Instant::now() + Duration::from_secs(5);
+    while !gate.join("ready").exists() {
+        assert!(
+            Instant::now() < ready_deadline,
+            "daemon did not reach metadata gate"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!h.home.join("daemon.json").exists());
+    let lifecycle: Value =
+        serde_json::from_slice(&std::fs::read(h.home.join("lifecycle.json")).unwrap()).unwrap();
+    assert!(lifecycle["instance"].as_str().is_some());
+
+    let stopper = h
+        .command(&h.a, None, &["stop"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stop_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = std::fs::read(h.home.join("lifecycle.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        if state.is_some_and(|state| state["stop_in_progress"] == true) {
+            break;
+        }
+        assert!(
+            Instant::now() < stop_deadline,
+            "stop did not reserve shutdown"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::fs::write(gate.join("release"), b"release").unwrap();
+
+    let starter = wait_child(starter, Duration::from_secs(5), "metadata-gated starter");
+    assert_eq!(starter.status.code(), Some(5));
+    let starter_error: Value = serde_json::from_slice(&starter.stderr).unwrap();
+    assert_eq!(starter_error["error"]["code"], "DAEMON_STOPPED");
+    let stopped = wait_child(
+        stopper,
+        Duration::from_secs(5),
+        "stop after lifecycle publish",
+    );
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&stopped.stdout).unwrap()["data"]["stopped"],
+        true
+    );
+    assert!(!h.home.join("daemon.json").exists());
+    let daemon_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(h.home.join("daemon.lock"))
+        .unwrap();
+    assert!(fs2::FileExt::try_lock_exclusive(&daemon_lock).is_ok());
+    let _ = fs2::FileExt::unlock(&daemon_lock);
+}
+
+#[test]
 fn ordinary_command_waits_for_stop_operation_then_starts() {
     use fs2::FileExt;
 
