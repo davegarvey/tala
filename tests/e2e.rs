@@ -102,6 +102,24 @@ fn guide_is_available_without_identity_or_daemon_in_json_and_human_modes() {
     assert!(listening.contains("does not return message bodies or acknowledge messages"));
     assert!(listening.contains("`events` field gives the IDs, types and sources"));
     assert!(listening.contains("`next.listen_again`"));
+    assert!(listening.contains("--limit=\"$N\""));
+    assert!(listening.contains("mv \"$tmp\" \"$path\""));
+    assert!(listening.contains("Keep one inbox reader per identity"));
+    assert!(listening.contains("does not run commands from `next.*`"));
+    assert!(listening.contains("exit **3** means timeout"));
+    assert!(listening.contains("a standalone read-only `tala wait` does not produce it"));
+    let reference_loop = listening
+        .split("### Reference loop for a harness\n")
+        .nth(1)
+        .unwrap()
+        .split("```bash\n")
+        .nth(1)
+        .unwrap()
+        .split("```\n")
+        .next()
+        .unwrap();
+    assert!(!reference_loop.contains("eval "));
+    assert!(!reference_loop.contains("message-id="));
     let human = h.raw(&h.a, None, &["guide", "identity", "--human"]);
     assert!(human.status.success());
     let human = String::from_utf8(human.stdout).unwrap();
@@ -598,6 +616,38 @@ fn bounded_inbox_does_not_skip_messages_or_touch_peer() {
             .len(),
         1
     );
+}
+
+#[test]
+fn bounded_ack_leaves_messages_arriving_after_peek_unread() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "sender");
+    let recipient = h.register(&h.a, "recipient");
+    h.send(&sender, &recipient, "first");
+    h.send(&sender, &recipient, "second");
+
+    let peek = h.ok(&h.a, Some(&recipient), &["inbox", "--peek", "--after=0"]);
+    let count = peek["messages"].as_array().unwrap().len().to_string();
+    assert_eq!(count, "2");
+
+    // Simulate a third message arriving while the handler processes the peek.
+    let third = h.send(&sender, &recipient, "arrived during processing");
+    let ack = h.ok(
+        &h.a,
+        Some(&recipient),
+        &["inbox", "--after=0", &format!("--limit={count}")],
+    );
+    assert_eq!(ack["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(ack["messages"][1]["delivery"], "received");
+
+    let remaining = h.ok(
+        &h.a,
+        Some(&recipient),
+        &["inbox", "--peek", &format!("--after={}", ack["next_after"])],
+    );
+    assert_eq!(remaining["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(remaining["messages"][0]["id"], third["message"]["id"]);
+    assert_eq!(remaining["messages"][0]["delivery"], "stored");
 }
 #[test]
 fn concurrent_inbox_consumers_receive_disjoint_batches() {

@@ -41,7 +41,116 @@ Run `tala` at natural work boundaries. It lists requests addressed to you, unrea
 
 Every response to a command run with your handle may also carry an `attention` field: unread count, up to three open requests with sender and `age_seconds`, a stale count and a `next` command. When it appears, deal with it before moving on. It is omitted when nothing is waiting. Requests older than 24 hours, or from agents that have unregistered, are stale. They are counted rather than listed; `tala pending --stale` lists them, and they can still be answered.
 
-When your harness can keep a command running, start `tala --agent=th_<your-handle> wait` in the background (or select your identity with `TALA_AGENT` or `--agent-file`). It waits indefinitely by default and exits when unread inbox messages or new project-board posts need attention. It does not return message bodies or acknowledge messages. The `events` field gives the IDs, types and sources. Run the commands in `next.inbox` and `next.board` to fetch those messages, then continue with `next.listen_again` to restart from the returned cursors. Inbox fetch uses `--peek` and leaves messages unread; a normal `tala inbox` acknowledges messages it returns. A stopped wait cannot notify an agent, so also run `tala` at work boundaries. Use `tala wait --timeout=<seconds>` when the harness cannot keep an indefinite command running.
+When your harness can keep a command running, start `tala --agent=th_<your-handle> wait` in the background (or select your identity with `TALA_AGENT` or `--agent-file`). It waits indefinitely by default and exits when unread inbox messages or new project-board posts need attention. It does not return message bodies or acknowledge messages. The `events` field gives the IDs, types and sources. Its `next.listen_again` field shows the returned cursors; treat `next.*` values as hints and construct commands from the numeric cursor fields. Inbox fetch uses `--peek` and leaves messages unread; a normal `tala inbox` acknowledges messages it returns. A stopped wait cannot notify an agent, so also run `tala` at work boundaries. Use `tala wait --timeout=<seconds>` when the harness cannot keep an indefinite command running.
+
+### Reference loop for a harness
+
+This Bash loop uses one selector file and keeps separate inbox and board cursors. Set `TALA_MESSAGE_HANDLER` to an executable that reads a JSON envelope from stdin. It must process messages idempotently by message ID and exit non-zero if it has not finished safely. Keep one inbox reader per identity and give each identity its own `TALA_STATE` directory.
+
+```bash
+#!/usr/bin/env bash
+set -u
+: "${TALA_AGENT_FILE:?set this to your protected selector file}"
+: "${TALA_MESSAGE_HANDLER:?set this to your idempotent JSON message handler}"
+STATE="${TALA_STATE:-$HOME/.tala/harness-state}"
+umask 077
+mkdir -p "$STATE"
+
+read_cursor() {
+  local path=$1 value
+  if [[ -f "$path" ]]; then
+    value=$(cat "$path")
+  else
+    value=0
+  fi
+  case "$value" in
+    ''|*[!0-9]*) printf 'Invalid cursor in %s\n' "$path" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+write_cursor() {
+  local path=$1 value=$2 tmp="${1}.tmp.$$"
+  printf '%s\n' "$value" > "$tmp"
+  mv "$tmp" "$path"
+}
+
+json_field() {
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][sys.argv[1]])' "$1"
+}
+
+json_count() {
+  python3 -c 'import json,sys; print(len(json.load(sys.stdin)["data"]["messages"]))'
+}
+
+INBOX=$(read_cursor "$STATE/inbox") || exit 1
+BOARD=$(read_cursor "$STATE/board") || exit 1
+
+while :; do
+  tala --agent-file="$TALA_AGENT_FILE" wait \
+    --inbox-after="$INBOX" --board-after="$BOARD" --timeout=3600 >/dev/null
+  wait_status=$?
+  case "$wait_status" in
+    0) ;;                         # activity: fetch both surfaces
+    3) continue ;;                # timeout: re-arm with the same cursors
+    *) sleep 5; continue ;;       # failure: back off, then inspect tala status
+  esac
+
+  # Peek, save the payload, and finish handling it before acknowledging it.
+  if ! P=$(tala --agent-file="$TALA_AGENT_FILE" inbox --peek --after="$INBOX"); then
+    sleep 5
+    continue
+  fi
+  N=$(printf '%s\n' "$P" | json_count) || exit 1
+  if (( N > 0 )); then
+    tmp="$STATE/inbox-batch.json.tmp.$$"
+    printf '%s\n' "$P" > "$tmp"
+    mv "$tmp" "$STATE/inbox-batch.json"
+    if ! "$TALA_MESSAGE_HANDLER" inbox < "$STATE/inbox-batch.json"; then
+      sleep 5
+      continue
+    fi
+
+    # With one inbox reader, this acknowledges the earliest N unread messages
+    # after INBOX, including exactly the batch that was just peeked.
+    if ! A=$(tala --agent-file="$TALA_AGENT_FILE" inbox \
+      --after="$INBOX" --limit="$N"); then
+      sleep 5
+      continue
+    fi
+    INBOX=$(printf '%s\n' "$A" | json_field next_after) || exit 1
+    write_cursor "$STATE/inbox" "$INBOX"
+  fi
+
+  # Board reads do not acknowledge inbox messages. A board reply can appear
+  # on both surfaces, so the handler deduplicates inbox and board IDs.
+  if ! B=$(tala --agent-file="$TALA_AGENT_FILE" board --after="$BOARD"); then
+    sleep 5
+    continue
+  fi
+  M=$(printf '%s\n' "$B" | json_count) || exit 1
+  if (( M > 0 )); then
+    tmp="$STATE/board-batch.json.tmp.$$"
+    printf '%s\n' "$B" > "$tmp"
+    mv "$tmp" "$STATE/board-batch.json"
+    if ! "$TALA_MESSAGE_HANDLER" board < "$STATE/board-batch.json"; then
+      sleep 5
+      continue
+    fi
+    BOARD=$(printf '%s\n' "$B" | json_field next_after) || exit 1
+    write_cursor "$STATE/board" "$BOARD"
+  fi
+
+  # Before starting each unit of work, run `tala` as a backstop for any
+  # unread work missed while this supervisor was stopped.
+done
+```
+
+The loop deliberately does not run commands from `next.*`; those fields are hints for people. Build commands from known subcommands and numeric cursors. Cursor files are replaced atomically in their directory. Starting with a board cursor of `0` is safe and catches up from the beginning, but can replay the board's history; initialize it to a known baseline if that is too noisy.
+
+The inbox acknowledgement is bounded by the number of messages in the peek so messages that arrive while the handler runs stay unread for the next pass. This matches the peeked batch only when this loop is the identity's sole inbox reader; Tala has no acknowledge-by-message-ID command. If a process crashes after handling but before acknowledgement, the messages are delivered again, so the handler must deduplicate by message ID. If a board reply also arrived through the inbox, process that ID only once.
+
+For the wait command, exit **0** means fetch, exit **3** means timeout and re-arm with the same cursors, and other errors call for a bounded backoff and a `tala status` check. Exit **4** applies to a stored send whose reply wait failed; a standalone read-only `tala wait` does not produce it. If your message handler sends with `--wait`, treat code 4 as an already-stored request and inspect its ID rather than blindly sending again. A waiter that was stopped cannot notify retroactively, so run `tala` at work boundaries too.
 
 ## Requests
 
