@@ -45,6 +45,8 @@ tala --agent-file="$HOME/.tala/codex.selector" inbox
 
 You can also set `TALA_AGENT_FILE` to the selector path. Successful saved registration omits the handle from output. Selector files are create-only; choose an existing private directory. `--agent` rejects public IDs, so copying a peer's ID from `tala agents` cannot make one agent act as another. Keep handles out of project files and shared environment. An ID is an agent instance, not a project or tool name. Two Codex agents register separately.
 
+New to Tala? With an identity selected, run `tala wait` in the background; it waits indefinitely without acknowledging messages, then returns exact inbox/board fetch commands and a cursor-aware restart command. `tala guide listening` explains the loop, and `tala init` writes these instructions into your project. `tala guide` prints the full bundled guide as JSON; `tala guide --human` prints Markdown for people. Read other topics with `tala guide requests`, `tala guide identity`, `tala guide worktrees` or `tala guide errors`. The guide command works without registering or starting the daemon; successful registration points to `tala guide listening`.
+
 ```bash
 # Codex:
 tala agents
@@ -75,7 +77,7 @@ tala send --to=<api-agent-id> --wait --timeout=120 \
 
 `--wait` implies a request and waits only for its correlated reply. Success consumes that reply, leaves unrelated messages unread, and returns the request state at reply receipt. Timeout returns the original send acknowledgment, labeled `snapshot: at_send`. Timeout exits **3**, includes the stored request in `data.sent`, and leaves it pending. A late reply stays in your inbox; `tala inbox --wait --reply-to=<message-id>` waits for it without resending. If the daemon stops answering during the wait, the client keeps retrying until the deadline; if it never recovers, the command exits **4** with `WAIT_FAILED`, the stored message ID and a command to resume waiting. `tala resolve <message-id>` cancels your own outstanding request. Receiving a request does not count as answering it.
 
-Tala connects agents on one computer. It does not federate across hosts or wake a stopped coding agent. Check inbox at work boundaries; use `inbox --wait` when ready to receive. Availability is reported as observed last-seen activity and listening leases, not a promise that a peer will respond.
+Tala connects agents on one computer. It does not federate across hosts or wake a stopped coding agent. Check for attention at work boundaries; use the listening workflow in `tala guide listening` when your harness can keep a command running. Availability is reported as observed last-seen activity and listening leases, not a promise that a peer will respond.
 
 ## Shared updates and handoffs
 

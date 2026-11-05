@@ -75,6 +75,7 @@ impl Harness {
     }
     fn register(&self, dir: &Path, name: &str) -> Ident {
         let v = self.ok(dir, None, &["register", "--name", name, "--tool=fixture"]);
+        assert_eq!(v["next"], "tala guide listening");
         Ident {
             id: v["agent"]["id"].as_str().unwrap().into(),
             handle: v["handle"].as_str().unwrap().into(),
@@ -83,6 +84,47 @@ impl Harness {
     fn send(&self, a: &Ident, b: &str, text: &str) -> Value {
         self.ok(&self.a, Some(a), &["send", "--to", b, "--request", text])
     }
+}
+
+#[test]
+fn guide_is_available_without_identity_or_daemon_in_json_and_human_modes() {
+    let h = Harness::new();
+    let full = h.ok(&h.a, None, &["guide"]);
+    assert_eq!(full["topic"], "all");
+    assert_eq!(
+        full["topics"],
+        json!(["listening", "requests", "identity", "worktrees", "errors"])
+    );
+    let topic = h.ok(&h.a, None, &["guide", "listening"]);
+    let listening = topic["content"].as_str().unwrap();
+    assert!(listening.contains("tala wait"));
+    assert!(listening.contains("--agent=th_<your-handle> wait"));
+    assert!(listening.contains("does not return message bodies or acknowledge messages"));
+    assert!(listening.contains("`events` field gives the IDs, types and sources"));
+    assert!(listening.contains("`next.listen_again`"));
+    let human = h.raw(&h.a, None, &["guide", "identity", "--human"]);
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.starts_with("## Identity\n"));
+    assert!(!human.starts_with('{'));
+    assert!(
+        !h.home.exists(),
+        "guide must not start a daemon or create state"
+    );
+    h.error(&h.a, None, &["guide", "unknown"], "USAGE_ERROR");
+}
+
+#[test]
+fn register_human_output_points_to_listening_guide() {
+    let h = Harness::new();
+    let output = h.raw(
+        &h.a,
+        None,
+        &["register", "--name=fixture", "--tool=fixture", "--human"],
+    );
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Next: tala guide listening"));
 }
 impl Drop for Harness {
     fn drop(&mut self) {
@@ -763,6 +805,10 @@ fn new_help_rejects_old_surface() {
     for cmd in ["register", "rename", "inbox", "reply", "board", "handoff"] {
         assert!(help.contains(cmd));
     }
+    assert!(help.contains("tala guide [listening|requests|identity|worktrees|errors]"));
+    assert!(help.contains("start with tala guide listening"));
+    assert!(help.contains("Background loop: run tala wait"));
+    assert!(help.contains("tala init writes project instructions"));
     for cmd in ["use", "session", "check", "listen", "discover"] {
         h.error(&h.a, None, &[cmd], "USAGE_ERROR");
     }
