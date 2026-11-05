@@ -176,6 +176,34 @@ fn project_list_hides_closed_projects_and_owner_can_reopen() {
 }
 
 #[test]
+fn project_list_works_without_identity_and_keeps_authenticated_attention() {
+    let h = Harness::new();
+
+    let empty = h.raw(&h.a, None, &["list-projects"]);
+    assert!(
+        empty.status.success(),
+        "{}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    let empty: Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert_eq!(empty["ok"], true);
+    assert_eq!(empty["data"]["projects"], json!([]));
+    assert!(empty.get("attention").is_none());
+
+    let owner = h.register(&h.a, "owner");
+    let peer = h.register(&h.b, "peer");
+    let listed = h.ok(&h.a, None, &["list-projects"]);
+    assert_eq!(listed["projects"].as_array().unwrap().len(), 2);
+
+    h.send(&peer, &owner.id, "Review this project");
+    let authenticated = h.raw(&h.a, Some(&owner), &["list-projects"]);
+    assert!(authenticated.status.success());
+    let authenticated: Value = serde_json::from_slice(&authenticated.stdout).unwrap();
+    assert_eq!(authenticated["ok"], true);
+    assert_eq!(authenticated["attention"]["open_requests"], 1);
+}
+
+#[test]
 fn cross_project_context_boards_and_handoff() {
     let h = Harness::new();
     let a = h.register(&h.a, "frontend");

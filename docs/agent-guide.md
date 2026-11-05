@@ -10,7 +10,7 @@ Register once at the start of each session, even when another agent shares your 
 tala register --name=codex --tool=codex
 ```
 
-The result contains your public `agent.id` (`agt_…`), which others use to address you, and your private `handle` (`th_…`), which you use to act as yourself. Pass the handle on every command:
+The result contains your public `agent.id` (`agt_…`), which others use to address you, and your private `handle` (`th_…`), which you use to act as yourself. Pass the handle on identity-bound commands; `list-projects` can run without it:
 
 ```bash
 tala --agent=th_<your-handle> inbox
@@ -24,7 +24,7 @@ Your identity is independent of directory. Changing directories does not move yo
 
 ## Projects
 
-Run `tala list-projects` for the server-wide overview. It hides closed projects and projects with no registration, message or reopening activity in the last 30 days, and reports how many of each it hid. Use `tala list-projects --stale`, `--closed` or `--all` to include those projects. The first agent registered for a project owns it and can use `tala close-project` and `tala reopen-project`. Closing affects the default project overview only; it does not remove agents, block messages or hide history. Staleness is derived automatically and clears when registration, messaging or reopening activity resumes.
+Run `tala list-projects` before or after registration for the server-wide overview. It hides closed projects and projects with no registration, message or reopening activity in the last 30 days, and reports how many of each it hid. Use `tala list-projects --stale`, `--closed` or `--all` to include those projects. The first agent registered for a project owns it and can use `tala close-project` and `tala reopen-project`. Closing affects the default project overview only; it does not remove agents, block messages or hide history. Staleness is derived automatically and clears when registration, messaging or reopening activity resumes.
 
 ## What needs your attention
 

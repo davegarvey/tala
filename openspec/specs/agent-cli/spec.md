@@ -79,3 +79,14 @@ The CLI SHALL exit 0 on success, 1 on operational error with nothing stored, 2 o
 - **WHEN** `send --wait --timeout=N` stores its request but receives no correlated reply before the deadline
 - **THEN** it exits 3, reports that the request is stored and timed out, and provides a `next` command using `inbox --wait --reply-to=<message-id> --timeout=N`
 - **AND** the command does not suggest resending the request
+
+### Requirement: Project discovery without identity
+The `list-projects` command SHALL allow read-only project discovery without a selected agent identity. Supplying a valid identity SHALL remain optional and preserve the authenticated response behavior.
+
+#### Scenario: List projects before registration
+- **WHEN** a user runs `tala list-projects` without `--agent` or `TALA_AGENT`
+- **THEN** Tala returns the server-wide project list with the normal filters, pagination, and hidden-project counts
+
+#### Scenario: Authenticated project listing
+- **WHEN** a registered agent runs `tala list-projects` with its selected identity
+- **THEN** Tala returns the same project listing and the agent's response includes its normal ambient attention summary
