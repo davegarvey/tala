@@ -6,7 +6,7 @@ use std::{
     fs::{File, OpenOptions},
     io::Read,
     path::Path,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::Mutex,
     time::Duration,
 };
@@ -203,6 +203,7 @@ async fn ensure_reserved(generation: u64) -> Result<DaemonInfo> {
         let _ = lock.unlock();
         return Err(crate::lifecycle::stopped());
     }
+    let instance_before_spawn = crate::lifecycle::snapshot()?.instance;
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -221,7 +222,7 @@ async fn ensure_reserved(generation: u64) -> Result<DaemonInfo> {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x00000008 | 0x00000200); // Detached, new process group.
     }
-    command
+    let mut child = command
         .arg("daemon")
         .env("TALA_START_GENERATION", generation.to_string())
         .stdin(Stdio::null())
@@ -231,20 +232,31 @@ async fn ensure_reserved(generation: u64) -> Result<DaemonInfo> {
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if !crate::lifecycle::can_publish(generation)? {
+            let state = crate::lifecycle::snapshot()?;
+            if state.instance != instance_before_spawn {
+                // The daemon published immediately before Stop advanced the
+                // generation. Stop captured this instance and must acquire
+                // startup.lock before sending its own RPC.
+                let _ = lock.unlock();
+                return Err(crate::lifecycle::stopped());
+            }
+            // The child may have passed its first generation check but not
+            // yet acquired daemon.lock. Reap that exact child before
+            // releasing startup.lock, so Stop's barrier covers hidden starts.
+            wait_for_start_child_exit(&mut child).await?;
             let _ = lock.unlock();
             return Err(crate::lifecycle::stopped());
         }
         if let Some(i) = usable().await? {
             if !crate::lifecycle::publish(generation, &i.instance)? {
-                // Stop advanced the generation after this reservation. Shut
-                // down only the instance created here before releasing the
-                // startup barrier, so Stop can safely finish its barrier.
-                let _ = stop_instance(&i).await;
-                let _ =
-                    crate::lifecycle::wait_until_stopped(Duration::from_secs(5), &i.instance).await;
-                if daemon::read_info().is_some_and(|current| current.instance == i.instance) {
-                    let _ = std::fs::remove_file(store::home().join("daemon.json"));
+                let state = crate::lifecycle::snapshot()?;
+                if state.instance != instance_before_spawn {
+                    // Stop already captured the just-published daemon as its
+                    // target. Let it acquire startup.lock and perform shutdown.
+                    let _ = lock.unlock();
+                    return Err(crate::lifecycle::stopped());
                 }
+                wait_for_start_child_exit(&mut child).await?;
                 let _ = lock.unlock();
                 return Err(crate::lifecycle::stopped());
             }
@@ -252,11 +264,30 @@ async fn ensure_reserved(generation: u64) -> Result<DaemonInfo> {
             return Ok(i);
         }
     }
+    wait_for_start_child_exit(&mut child).await?;
     Err(Failure::new(
         "DAEMON_START_FAILED",
         "Daemon did not start within five seconds",
         "Read TALA_HOME/daemon.log for storage, lock or startup errors.",
     ))
+}
+
+async fn wait_for_start_child_exit(child: &mut Child) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            // This child has no valid startup reservation anymore (or failed
+            // to publish within the startup deadline), so it cannot be left
+            // running after startup.lock is released.
+            let _ = child.kill();
+            child.wait()?;
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 pub async fn ensure() -> Result<DaemonInfo> {

@@ -36,6 +36,21 @@ pub fn daemon_lock_available() -> std::io::Result<bool> {
 pub fn read_info() -> Option<DaemonInfo> {
     serde_json::from_slice(&std::fs::read(store::home().join("daemon.json")).ok()?).ok()
 }
+
+#[cfg(debug_assertions)]
+async fn test_startup_gate() -> Result<()> {
+    let Ok(path) = std::env::var("TALA_TEST_STARTUP_GATE") else {
+        return Ok(());
+    };
+    let path = std::path::PathBuf::from(path);
+    std::fs::create_dir_all(&path)?;
+    store::private_write(&path.join("ready"), b"ready")?;
+    while !path.join("release").exists() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Ok(())
+}
+
 pub async fn run() -> Result<()> {
     let generation = std::env::var("TALA_START_GENERATION")
         .ok()
@@ -50,6 +65,8 @@ pub async fn run() -> Result<()> {
     if !crate::lifecycle::can_publish(generation)? {
         return Err(crate::lifecycle::stopped());
     }
+    #[cfg(debug_assertions)]
+    test_startup_gate().await?;
     if let Some(info) = read_info() {
         if info.protocol_version != PROTOCOL_VERSION && crate::client::live(&info).await {
             return Err(Failure::new(
