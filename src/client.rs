@@ -115,6 +115,20 @@ async fn usable() -> Result<Option<DaemonInfo>> {
         Liveness::Unreachable(reason) => Err(unreachable(info.port, &reason)),
     }
 }
+fn startup_lock_contended(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // LockFileEx reports lock/sharing contention with these Win32 codes.
+        matches!(error.raw_os_error(), Some(32) | Some(33))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
 pub async fn ensure() -> Result<DaemonInfo> {
     if let Some(i) = usable().await? {
         return Ok(i);
@@ -124,7 +138,7 @@ pub async fn ensure() -> Result<DaemonInfo> {
     loop {
         match lock.try_lock_exclusive() {
             Ok(()) => break,
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if startup_lock_contended(&error) => {
                 // Another client may be starting a replacement. Let it make
                 // progress on this runtime thread, and reuse the daemon as
                 // soon as its health check succeeds.
@@ -185,6 +199,7 @@ pub async fn ensure() -> Result<DaemonInfo> {
         "Read TALA_HOME/daemon.log for storage, lock or startup errors.",
     ))
 }
+
 fn compatible(i: DaemonInfo) -> Result<DaemonInfo> {
     if i.protocol_version != PROTOCOL_VERSION {
         return Err(Failure::new(
@@ -773,6 +788,30 @@ pub async fn existing(op: Operation) -> Result<Option<Value>> {
         return Err(response.error.unwrap_or_else(|| network("Missing error")));
     }
     Ok(response.data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::startup_lock_contended;
+
+    #[test]
+    fn would_block_is_startup_lock_contention() {
+        let error = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        assert!(startup_lock_contended(&error));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lock_contention_codes_are_retryable_but_other_errors_are_not() {
+        for code in [32, 33] {
+            assert!(startup_lock_contended(&std::io::Error::from_raw_os_error(
+                code
+            )));
+        }
+        assert!(!startup_lock_contended(&std::io::Error::from_raw_os_error(
+            5
+        )));
+    }
 }
 
 #[cfg(windows)]

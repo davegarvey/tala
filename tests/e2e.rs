@@ -859,7 +859,7 @@ fn wait_recovers_after_daemon_crash_without_blocking_a_concurrent_client() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    std::thread::sleep(Duration::from_secs(3));
     assert!(waiter.try_wait().unwrap().is_none());
 
     let pid = daemon_pid(&h);
@@ -868,7 +868,7 @@ fn wait_recovers_after_daemon_crash_without_blocking_a_concurrent_client() {
         .status()
         .unwrap()
         .success());
-    std::thread::sleep(Duration::from_secs(1));
+    std::thread::sleep(Duration::from_secs(3));
 
     let mut inbox = h
         .command(&h.a, Some(&a), &["inbox", "--peek"])
@@ -918,6 +918,33 @@ fn wait_recovers_after_daemon_crash_without_blocking_a_concurrent_client() {
         lock.try_lock_exclusive().is_ok(),
         "startup lock should be available after the waiter and inbox complete"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn graceful_stop_during_wait_allows_the_next_client_to_restart_the_daemon() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let mut waiter = h
+        .command(&h.a, Some(&a), &["wait", "--timeout=30"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(waiter.try_wait().unwrap().is_none());
+
+    h.ok(&h.a, None, &["stop"]);
+    assert!(waiter.try_wait().unwrap().is_none());
+    assert_eq!(
+        h.ok(&h.a, Some(&a), &["inbox", "--peek"])["messages"],
+        json!([])
+    );
+    assert!(waiter.try_wait().unwrap().is_none());
+    assert_eq!(h.ok(&h.a, None, &["status"])["running"], true);
+
+    let _ = waiter.kill();
+    waiter.wait().unwrap();
 }
 
 #[test]
