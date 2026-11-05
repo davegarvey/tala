@@ -280,6 +280,58 @@ fn duplicate_names_unknown_recipients_and_explicit_identity() {
     std::fs::create_dir(&nested).unwrap();
     assert_eq!(h.ok(&nested, Some(&a), &["whoami"])["agent"]["id"], a.id);
 }
+
+#[test]
+fn rename_preserves_identity_threads_and_duplicate_name_behavior() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "codex");
+    let target = h.register(&h.a, "reviewer");
+    h.error(&h.a, None, &["rename", "--name=other"], "IDENTITY_REQUIRED");
+
+    let direct = h.send(&sender, &target, "Review this change");
+    let direct_thread = thread(&direct);
+    let board = h.ok(&h.a, Some(&target), &["post", "Shared project note"]);
+    let board_thread = thread(&board);
+
+    let renamed = h.ok(&h.a, Some(&target), &["rename", "--name=codex"]);
+    assert_eq!(renamed["agent"]["id"], target.id);
+    assert_eq!(renamed["agent"]["name"], "codex");
+    assert_eq!(renamed["previous_name"], "reviewer");
+    assert_eq!(renamed["changed"], true);
+
+    let whoami = h.ok(&h.a, Some(&target), &["whoami"]);
+    assert_eq!(whoami["agent"]["id"], target.id);
+    assert_eq!(whoami["agent"]["name"], "codex");
+    for history_thread in [&direct_thread, &board_thread] {
+        let history = h.ok(&h.a, Some(&target), &["history", history_thread]);
+        assert!(!history["messages"].as_array().unwrap().is_empty());
+    }
+
+    // The original credential remains valid, and exact IDs remain unambiguous.
+    let addressed = h.send(&sender, &target, "Still the same identity");
+    assert_eq!(addressed["message"]["recipient"], target.id);
+    h.error(
+        &h.a,
+        Some(&sender),
+        &["send", "--to=codex", "Ambiguous by name"],
+        "AMBIGUOUS_RECIPIENT",
+    );
+
+    let no_op = h.ok(&h.a, Some(&target), &["rename", "--name=codex"]);
+    assert_eq!(no_op["agent"]["id"], target.id);
+    assert_eq!(no_op["changed"], false);
+    assert_eq!(no_op["previous_name"], "codex");
+    let human = h.raw(&h.a, Some(&target), &["rename", "--name=codex", "--human"]);
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stdout).contains("already named codex"));
+    h.error(
+        &h.a,
+        Some(&target),
+        &["rename", "--name="],
+        "INVALID_OPERATION",
+    );
+}
+
 #[test]
 fn bounded_inbox_does_not_skip_messages_or_touch_peer() {
     let h = Harness::new();
@@ -657,7 +709,7 @@ fn new_help_rejects_old_surface() {
     let h = Harness::new();
     let o = Command::new(bin()).arg("--help").output().unwrap();
     let help = String::from_utf8(o.stdout).unwrap();
-    for cmd in ["register", "inbox", "reply", "board", "handoff"] {
+    for cmd in ["register", "rename", "inbox", "reply", "board", "handoff"] {
         assert!(help.contains(cmd));
     }
     for cmd in ["use", "session", "check", "listen", "discover"] {

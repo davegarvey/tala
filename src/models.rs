@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Every error code with its retry class, meaning and default next command.
 /// Retry classes: `safe` (repeat as is), `same_key` (repeat with the same
@@ -378,6 +378,9 @@ pub enum Operation {
         name: String,
         tool: String,
         context: Context,
+    },
+    Rename {
+        name: String,
     },
     Whoami,
     Unregister,

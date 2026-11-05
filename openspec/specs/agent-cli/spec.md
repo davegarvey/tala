@@ -5,11 +5,12 @@ Defines agent cli for reliable local collaboration between distinct coding agent
 ## Requirements
 
 ### Requirement: Complete clean command surface
-The system SHALL expose init, register, unregister, whoami, agents, list-projects, close-project, reopen-project, send, inbox, reply, post, board, history, search, pending, resolve, handoff, status and stop, and SHALL return the attention summary when run with no subcommand. Retired session commands and aliases SHALL be absent.
+The system SHALL expose init, register, rename, unregister, whoami, agents, list-projects, close-project, reopen-project, send, inbox, reply, post, board, history, search, pending, resolve, handoff, status and stop, and SHALL return the attention summary when run with no subcommand. Retired session commands and aliases SHALL be absent.
 
 #### Scenario: Clean help
 - **WHEN** an agent runs --help
 - **THEN** the new surface is listed and use/session/check/listen are absent
+- **AND** rename is listed
 
 #### Scenario: Bare invocation
 - **WHEN** an agent with a selected identity runs `tala` with no subcommand
@@ -90,3 +91,15 @@ The `list-projects` command SHALL allow read-only project discovery without a se
 #### Scenario: Authenticated project listing
 - **WHEN** a registered agent runs `tala list-projects` with its selected identity
 - **THEN** Tala returns the same project listing and the agent's response includes its normal ambient attention summary
+
+### Requirement: Rename command
+The CLI SHALL expose `tala rename --name=<new-name>` to rename the selected identity. It SHALL use the selected private handle, return the updated public agent record with the previous name and a `changed` flag, and SHALL provide a human-readable confirmation under `--human`. The command SHALL reject a blank name. It SHALL not issue or change a private handle.
+
+#### Scenario: Rename command output
+- **WHEN** an agent runs `tala rename --name=<new-name>` with a selected identity
+- **THEN** the JSON response reports the same public agent ID, the new name, previous name, and `changed:true`
+- **AND** `--human` confirms the rename without exposing a private handle
+
+#### Scenario: Rename requires identity
+- **WHEN** an agent runs `tala rename` without selecting an identity
+- **THEN** the command returns the standard identity-required error
