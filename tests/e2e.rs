@@ -2222,6 +2222,76 @@ fn stop_invalidates_a_start_reserved_before_daemon_publication() {
 }
 
 #[test]
+fn targetless_stop_waits_for_a_hidden_starting_child_to_release_daemon_lock() {
+    use fs2::FileExt;
+
+    let h = Harness::new();
+    std::fs::create_dir_all(&h.home).unwrap();
+    let daemon_lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(h.home.join("daemon.lock"))
+        .unwrap();
+    daemon_lock.lock_exclusive().unwrap();
+
+    let mut stopper = h
+        .command(&h.a, None, &["stop"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = std::fs::read(h.home.join("lifecycle.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        if state.is_some_and(|state| state["stop_in_progress"] == true) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "stop did not begin");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        stopper.try_wait().unwrap().is_none(),
+        "targetless stop returned while a hidden daemon still held daemon.lock"
+    );
+
+    let _ = FileExt::unlock(&daemon_lock);
+    let output = wait_child(stopper, Duration::from_secs(5), "targetless stop");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!h.home.join("daemon.json").exists());
+    assert!(
+        !h.home.join("lifecycle.json").exists() || {
+            let state: Value =
+                serde_json::from_slice(&std::fs::read(h.home.join("lifecycle.json")).unwrap())
+                    .unwrap();
+            state["stop_in_progress"] == false
+        }
+    );
+}
+
+#[test]
+fn invalid_wait_identity_fails_before_starting_daemon() {
+    let h = Harness::new();
+    let output = h
+        .command(&h.a, None, &["--agent=invalid", "wait", "--timeout=1"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "IDENTITY_ERROR");
+    assert!(!h.home.join("daemon.json").exists());
+    assert!(!h.home.join("daemon.lock").exists());
+}
+
+#[test]
 fn child_with_stale_generation_cannot_publish_daemon_metadata() {
     let h = Harness::new();
     std::fs::create_dir_all(&h.home).unwrap();

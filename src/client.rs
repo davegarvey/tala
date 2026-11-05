@@ -374,6 +374,20 @@ pub async fn stop_daemon() -> Result<Value> {
     });
     let _ = barrier.unlock();
     let Some(target) = target else {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if daemon::daemon_lock_available()? {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Failure::new(
+                    "STOP_TIMEOUT",
+                    "A daemon process has not finished startup or shutdown",
+                    "Check tala status and daemon.log, then retry tala stop.",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         crate::lifecycle::finish_stop(None)?;
         let _ = stop_guard.unlock();
         return Ok(serde_json::json!({"stopped":false,"running":false}));

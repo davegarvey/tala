@@ -1533,15 +1533,18 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             inbox_after,
             board_after,
         } => {
-            let (_, generation) = client::begin_wait().await?;
-            let wait_started = Instant::now();
             let c = client::credential(selected)?;
             let explicit_project = project.is_some();
-            let project_key = project
+            let explicit_project_key = project
                 .as_deref()
                 .map(|path| context(Some(path)).map(|ctx| ctx.project))
-                .transpose()?
-                .unwrap_or(wait_identity_context(&c, generation).await?.project);
+                .transpose()?;
+            let (_, generation) = client::begin_wait().await?;
+            let wait_started = Instant::now();
+            let project_key = match explicit_project_key {
+                Some(project) => project,
+                None => wait_identity_context(&c, generation).await?.project,
+            };
             let project_arg = explicit_project.then(|| project_key.clone());
             if human {
                 eprintln!(
