@@ -145,6 +145,194 @@ fn register_human_output_points_to_listening_guide() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Next: tala guide listening"));
 }
+
+#[test]
+fn purpose_registration_normalizes_and_validates_public_metadata() {
+    let h = Harness::new();
+    let registered = h.ok(
+        &h.a,
+        None,
+        &[
+            "register",
+            "--name=purpose-agent",
+            "--tool=fixture",
+            "--purpose=  handles agent onboarding  ",
+        ],
+    );
+    assert_eq!(registered["agent"]["purpose"], "handles agent onboarding");
+    assert!(registered["agent"]["purpose_updated_at"].as_i64().is_some());
+
+    let absent = h.ok(
+        &h.a,
+        None,
+        &[
+            "register",
+            "--name=empty-purpose",
+            "--tool=fixture",
+            "--purpose=   ",
+        ],
+    );
+    assert!(absent["agent"]["purpose"].is_null());
+    assert!(absent["agent"]["purpose_updated_at"].is_null());
+
+    let maximum = "🧭".repeat(160);
+    let max_args = [
+        "register",
+        "--name=max-purpose",
+        "--tool=fixture",
+        &format!("--purpose={maximum}"),
+    ];
+    let max = h.ok(&h.a, None, &max_args);
+    assert_eq!(
+        max["agent"]["purpose"].as_str().unwrap().chars().count(),
+        160
+    );
+    for invalid in [
+        "é".repeat(161),
+        "line\nbreak".into(),
+        "safe\u{202e}spoof".into(),
+        "safe\u{2067}spoof\u{2069}".into(),
+    ] {
+        h.error(
+            &h.a,
+            None,
+            &[
+                "register",
+                "--name=invalid-purpose",
+                "--tool=fixture",
+                &format!("--purpose={invalid}"),
+            ],
+            "INVALID_OPERATION",
+        );
+    }
+
+    let whoami = h.ok(
+        &h.a,
+        Some(&Ident {
+            id: registered["agent"]["id"].as_str().unwrap().into(),
+            handle: registered["handle"].as_str().unwrap().into(),
+        }),
+        &["whoami"],
+    );
+    assert_eq!(whoami["agent"]["purpose"], "handles agent onboarding");
+    assert_eq!(
+        whoami["agent"]["purpose_updated_at"],
+        registered["agent"]["purpose_updated_at"]
+    );
+    let agents = h.ok(&h.a, None, &["agents"]);
+    assert!(agents["agents"].as_array().unwrap().iter().any(|agent| {
+        agent["id"] == registered["agent"]["id"]
+            && agent["purpose"] == "handles agent onboarding"
+            && agent["purpose_updated_at"] == registered["agent"]["purpose_updated_at"]
+    }));
+    let project = h.a.to_str().unwrap();
+    let filtered = h.ok(&h.a, None, &["agents", "--project", project]);
+    assert!(filtered["agents"].as_array().unwrap().iter().any(|agent| {
+        agent["id"] == registered["agent"]["id"] && agent["purpose"] == "handles agent onboarding"
+    }));
+}
+
+#[test]
+fn purpose_update_and_clear_preserve_last_seen_identity_and_history() {
+    let h = Harness::new();
+    let author = h.register(&h.a, "author");
+    let recipient = h.register(&h.a, "recipient");
+    let sent = h.send(&author, &recipient.id, "keep this history");
+    let thread = sent["message"]["thread_id"].as_str().unwrap().to_owned();
+    let before_history = h.ok(&h.a, Some(&author), &["history", &thread]);
+    let db = rusqlite::Connection::open(h.home.join("tala.sqlite3")).unwrap();
+    let before_last_seen: i64 = db
+        .query_row(
+            "SELECT last_seen FROM agents WHERE id=?",
+            [&author.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let messages_before: u64 = db
+        .query_row("SELECT count(*) FROM messages", [], |row| row.get(0))
+        .unwrap();
+
+    let set = h.ok(
+        &h.a,
+        Some(&author),
+        &[
+            "update-purpose",
+            "--purpose=  reviews database migrations  ",
+        ],
+    );
+    assert_eq!(set["agent"]["purpose"], "reviews database migrations");
+    assert!(set["agent"]["purpose_updated_at"].as_i64().is_some());
+    assert_eq!(
+        db.query_row(
+            "SELECT last_seen FROM agents WHERE id=?",
+            [&author.id],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        before_last_seen
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM messages", [], |row| row
+            .get::<_, u64>(0))
+            .unwrap(),
+        messages_before
+    );
+
+    let cleared = h.ok(&h.a, Some(&author), &["update-purpose", "--clear"]);
+    assert!(cleared["agent"]["purpose"].is_null());
+    assert!(cleared["agent"]["purpose_updated_at"].as_i64().is_some());
+    assert_eq!(
+        db.query_row(
+            "SELECT last_seen FROM agents WHERE id=?",
+            [&author.id],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        before_last_seen
+    );
+    let after_history = h.ok(&h.a, Some(&author), &["history", &thread]);
+    assert_eq!(
+        after_history["messages"][0]["id"],
+        before_history["messages"][0]["id"]
+    );
+    assert_eq!(
+        after_history["messages"][0]["parts"],
+        before_history["messages"][0]["parts"]
+    );
+
+    let selector = h.register(&h.a, "human-purpose");
+    h.ok(
+        &h.a,
+        Some(&selector),
+        &["update-purpose", "--purpose=handles deployments"],
+    );
+    let whoami = h.raw(&h.a, Some(&selector), &["whoami", "--human"]);
+    assert!(whoami.status.success());
+    let whoami = String::from_utf8(whoami.stdout).unwrap();
+    assert!(whoami.contains("Purpose: handles deployments"));
+    let agents = h.raw(&h.a, Some(&selector), &["agents", "--human"]);
+    assert!(agents.status.success());
+    let agents = String::from_utf8(agents.stdout).unwrap();
+    assert!(agents.contains("Purpose: handles deployments"));
+}
+
+#[test]
+fn update_purpose_requires_one_mutually_exclusive_value() {
+    let h = Harness::new();
+    h.error(
+        &h.a,
+        None,
+        &["update-purpose", "--clear"],
+        "IDENTITY_REQUIRED",
+    );
+    h.error(&h.a, None, &["update-purpose"], "USAGE_ERROR");
+    h.error(
+        &h.a,
+        None,
+        &["update-purpose", "--clear", "--purpose=operator"],
+        "USAGE_ERROR",
+    );
+}
 impl Drop for Harness {
     fn drop(&mut self) {
         let _ = self.raw(&self.a, None, &["stop"]);

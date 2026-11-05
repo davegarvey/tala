@@ -5,7 +5,7 @@ Defines agent cli for reliable local collaboration between distinct coding agent
 ## Requirements
 
 ### Requirement: Complete clean command surface
-The system SHALL expose init, register, rename, unregister, whoami, agents, list-projects, close-project, reopen-project, send, inbox, wait, reply, post, board, history, search, pending, resolve, handoff, guide, status and stop, and SHALL return the attention summary when run with no subcommand. Retired session commands and aliases SHALL be absent.
+The system SHALL expose init, register, update-purpose, rename, unregister, whoami, agents, list-projects, close-project, reopen-project, send, inbox, wait, reply, post, board, history, search, pending, resolve, handoff, guide, status and stop, and SHALL return the attention summary when run with no subcommand. Retired session commands and aliases SHALL be absent.
 
 #### Scenario: Clean help
 - **WHEN** an agent runs --help
@@ -50,6 +50,36 @@ The system SHALL expose init, register, rename, unregister, whoami, agents, list
 - **WHEN** an agent registers successfully
 - **THEN** registration output includes `data.next` with `tala guide listening`
 - **AND** human-readable registration output prints that next command without repeating the private handle
+
+### Requirement: Purpose CLI operations and rendering
+The CLI SHALL accept optional purpose at registration and expose an identity-bound `update-purpose` command to set or clear it. `whoami` and `agents` SHALL return the same nullable purpose fields in JSON; human output SHALL safely display purpose, escape controls, and truncate at 80 Unicode scalar values.
+
+#### Scenario: Register with a purpose
+- **WHEN** an agent registers with `--purpose=<text>`
+- **THEN** the returned agent record includes the normalized purpose and update time
+- **AND** user-facing help explains that peers can see the purpose and it must not contain secrets, personal data, or instructions
+
+#### Scenario: Set or clear purpose
+- **WHEN** an agent runs `tala update-purpose --purpose=<text>` or `tala update-purpose --clear`
+- **THEN** Tala updates only that identity's purpose metadata and returns its current purpose and update time
+- **AND** the command requires the selected private identity
+
+#### Scenario: Purpose appears in identity and peer listings
+- **WHEN** an agent runs `tala whoami` or `tala agents`, including a project-filtered listing
+- **THEN** each returned agent record includes `purpose` and `purpose_updated_at`, using null when no purpose is set
+
+#### Scenario: Human purpose is safe and bounded
+- **WHEN** an agent runs `whoami --human` or `agents --human`
+- **THEN** Tala prints a readable identity or listing and displays a purpose of at most 80 Unicode scalar values
+- **AND** any control characters in stored purpose text are escaped
+
+#### Scenario: JSON purpose is complete
+- **WHEN** an agent requests JSON from `whoami` or `agents`
+- **THEN** Tala returns the full purpose without the human-output truncation
+
+#### Scenario: Rename remains display-name-only
+- **WHEN** an agent runs `tala rename --name=<new-name>`
+- **THEN** the display name changes without changing purpose
 
 ### Requirement: Input and output contract
 Send, reply, post and handoff SHALL accept exactly one positional text, message-file, stdin or ordered typed parts input; piped stdin SHALL work implicitly. Direct `send` SHALL accept `--supersedes=<message-id>` to amend an earlier eligible message. JSON message output SHALL expose nullable `supersedes` and `superseded_by` relationships; human output SHALL identify when a message supersedes or has been superseded by another message. Output SHALL default to one JSON envelope with ok and data or error, including usage failures; `--human` SHALL select text rendering and `--json` SHALL be accepted without effect and hidden from help. List output SHALL default to 50 items, cap at 500, and support incremental reads.

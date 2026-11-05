@@ -82,6 +82,12 @@ pub enum Commands {
         save_handle_to: Option<PathBuf>,
         #[arg(
             long,
+            conflicts_with = "reissue",
+            help = "Short public purpose visible to peers; do not include secrets, personal data, or instructions"
+        )]
+        purpose: Option<String>,
+        #[arg(
+            long,
             value_name = "AGENT_ID",
             conflicts_with_all = ["name", "tool"],
             hide = true,
@@ -100,6 +106,18 @@ pub enum Commands {
     Rename {
         #[arg(long)]
         name: String,
+    },
+    /// Set or clear the public purpose of your selected identity
+    UpdatePurpose {
+        #[arg(
+            long,
+            conflicts_with = "clear",
+            required_unless_present = "clear",
+            help = "Short public purpose visible to peers; do not include secrets, personal data, or instructions"
+        )]
+        purpose: Option<String>,
+        #[arg(long, conflicts_with = "purpose", required_unless_present = "purpose")]
+        clear: bool,
     },
     /// Show your selected identity and project context
     Whoami,
@@ -1263,6 +1281,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             tool,
             project,
             save_handle_to,
+            purpose,
             reissue: None,
         } => {
             let save_path_text = save_handle_to
@@ -1278,6 +1297,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                     name: name.unwrap_or_default(),
                     tool: tool.unwrap_or_default(),
                     context: context(project.as_deref())?,
+                    purpose,
                 },
                 None,
             )
@@ -1462,6 +1482,14 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
         Commands::Rename { name } => {
             client::call(
                 Operation::Rename { name },
+                Some(client::credential(selected)?),
+            )
+            .await?
+        }
+        Commands::UpdatePurpose { purpose, clear } => {
+            let purpose = if clear { None } else { purpose };
+            client::call(
+                Operation::UpdatePurpose { purpose },
                 Some(client::credential(selected)?),
             )
             .await?
@@ -1775,6 +1803,51 @@ pub fn human_age(seconds: i64) -> String {
         (d, h, _) => format!("{d}d {h}h"),
     }
 }
+fn bidi_formatting_control(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x061c | 0x200e..=0x200f | 0x202a..=0x202e | 0x2066..=0x2069
+    )
+}
+fn escape_purpose_scalar(c: char) -> String {
+    if c.is_control() || bidi_formatting_control(c) {
+        c.escape_default().to_string()
+    } else {
+        c.to_string()
+    }
+}
+fn human_purpose(purpose: Option<&str>) -> Option<String> {
+    let purpose = purpose?;
+    let mut chars = purpose.chars();
+    let mut rendered = String::new();
+    for _ in 0..80 {
+        let Some(c) = chars.next() else {
+            return Some(rendered);
+        };
+        rendered.push_str(&escape_purpose_scalar(c));
+    }
+    if chars.next().is_some() {
+        rendered.push('…');
+    }
+    Some(rendered)
+}
+fn render_agent(agent: &Value) {
+    println!(
+        "Agent: {} ({})",
+        agent["name"].as_str().unwrap_or(""),
+        agent["id"].as_str().unwrap_or("")
+    );
+    if let Some(tool) = agent["tool"].as_str() {
+        println!("Tool: {tool}");
+    }
+    if let Some(project) = agent["context"]["project"].as_str() {
+        println!("Project: {project}");
+    }
+    println!(
+        "Purpose: {}",
+        human_purpose(agent["purpose"].as_str()).unwrap_or_else(|| "(not set)".into())
+    );
+}
 pub fn render(data: &Value, attention: Option<&Value>) {
     if let Some(content) = data["content"].as_str() {
         print!("{content}");
@@ -1841,6 +1914,9 @@ pub fn render(data: &Value, attention: Option<&Value>) {
             data["agent"]["id"].as_str().unwrap_or(""),
             data["agent"]["name"].as_str().unwrap_or("")
         );
+        if let Some(purpose) = human_purpose(data["agent"]["purpose"].as_str()) {
+            println!("Purpose: {purpose}");
+        }
         if let Some(next) = data["next"].as_str() {
             println!("Next: {next}");
         }
@@ -1858,12 +1934,20 @@ pub fn render(data: &Value, attention: Option<&Value>) {
             data["agent"]["id"].as_str().unwrap_or(""),
             data["agent"]["name"].as_str().unwrap_or("")
         );
+        if let Some(purpose) = human_purpose(data["agent"]["purpose"].as_str()) {
+            println!("Purpose: {purpose}");
+        }
         if let Some(next) = data["next"].as_str() {
             println!("Next: {next}");
         }
+    } else if data["agent"].is_object() {
+        render_agent(&data["agent"]);
+        if let Some(updated_at) = data["agent"]["purpose_updated_at"].as_i64() {
+            println!("Purpose updated at: {updated_at}");
+        }
     } else if let Some(agents) = data["agents"].as_array() {
         for a in agents {
-            println!(
+            let mut row = format!(
                 "{}  {} ({})  {}  {}",
                 a["id"].as_str().unwrap_or(""),
                 a["name"].as_str().unwrap_or(""),
@@ -1877,6 +1961,11 @@ pub fn render(data: &Value, attention: Option<&Value>) {
                     "inactive"
                 }
             );
+            if let Some(purpose) = human_purpose(a["purpose"].as_str()) {
+                row.push_str("  Purpose: ");
+                row.push_str(&purpose);
+            }
+            println!("{row}");
         }
         if agents.is_empty() {
             println!("No registered agents. Run tala register.");
@@ -2328,6 +2417,24 @@ mod tests {
         assert_eq!(
             escape_status_text("first\nsecond\t\u{1b}"),
             "first\\nsecond\\t\\u{1b}"
+        );
+    }
+    #[test]
+    fn human_purpose_escapes_controls_bidi_and_truncates_by_scalar() {
+        assert_eq!(
+            human_purpose(Some("team\nreviewer\u{202e}")),
+            Some("team\\nreviewer\\u{202e}".into())
+        );
+        assert_eq!(
+            human_purpose(Some(&"é".repeat(81))),
+            Some(format!("{}…", "é".repeat(80)))
+        );
+        assert_eq!(
+            human_purpose(Some(&"🧭".repeat(80)))
+                .unwrap()
+                .chars()
+                .count(),
+            80
         );
     }
 }

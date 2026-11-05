@@ -162,6 +162,30 @@ fn invalid(message: impl Into<String>) -> Failure {
         "Check tala --help and use explicit agent/message IDs.",
     )
 }
+fn is_bidi_formatting_control(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x061c | 0x200e..=0x200f | 0x202a..=0x202e | 0x2066..=0x2069
+    )
+}
+fn normalize_purpose(purpose: Option<&str>) -> Result<Option<String>> {
+    let Some(purpose) = purpose else {
+        return Ok(None);
+    };
+    if purpose
+        .chars()
+        .any(|c| c.is_control() || is_bidi_formatting_control(c))
+    {
+        return Err(invalid(
+            "Purpose cannot contain control or bidi formatting characters",
+        ));
+    }
+    let purpose = purpose.trim();
+    if purpose.chars().count() > 160 {
+        return Err(invalid("Purpose must be at most 160 Unicode scalar values"));
+    }
+    Ok((!purpose.is_empty()).then(|| purpose.to_string()))
+}
 fn thread_not_visible() -> Failure {
     Failure::new(
         "THREAD_NOT_VISIBLE",
@@ -181,7 +205,7 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let mut version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if !(0..=3).contains(&version) {
+        if !(0..=4).contains(&version) {
             return Err(Failure::new(
                 "DATABASE_VERSION",
                 format!("Unsupported database schema {version}"),
@@ -242,6 +266,15 @@ COMMIT;")?;
                  COMMIT;",
             )?;
         }
+        if version < 4 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE agents ADD COLUMN purpose TEXT;
+                 ALTER TABLE agents ADD COLUMN purpose_updated_at INTEGER;
+                 PRAGMA user_version=4;
+                 COMMIT;",
+            )?;
+        }
         let check: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
         if check != "ok" {
             return Err(Failure::new(
@@ -280,6 +313,7 @@ COMMIT;")?;
                 | Operation::ReopenProject
                 | Operation::Unregister
                 | Operation::Rename { .. }
+                | Operation::UpdatePurpose { .. }
         );
         let canonical = encode(rpc)?;
         if cache {
@@ -307,10 +341,12 @@ COMMIT;")?;
                         "Register an agent and pass its private handle with --agent or TALA_AGENT.",
                     )),
                 }
-                tx.execute(
-                    "UPDATE agents SET last_seen=?, active=1 WHERE id=?",
-                    params![now(), c.agent],
-                )?;
+                if !matches!(&rpc.operation, Operation::UpdatePurpose { .. }) {
+                    tx.execute(
+                        "UPDATE agents SET last_seen=?, active=1 WHERE id=?",
+                        params![now(), c.agent],
+                    )?;
+                }
                 Some(c.agent.as_str())
             } else {
                 None
@@ -329,16 +365,19 @@ COMMIT;")?;
                 name,
                 tool,
                 context,
+                purpose,
             } => {
                 if name.trim().is_empty() || tool.trim().is_empty() || context.project.is_empty() {
                     return Err(invalid("Name, tool and project are required"));
                 }
+                let purpose = normalize_purpose(purpose.as_deref())?;
                 let id = format!("agt_{}", Uuid::new_v4().simple());
                 let token = Uuid::new_v4().to_string();
                 let created_at = now();
+                let purpose_updated_at = purpose.as_ref().map(|_| created_at);
                 tx.execute(
-                    "INSERT INTO agents(id,name,tool,context,token,last_seen) VALUES(?,?,?,?,?,?)",
-                    params![id, name, tool, encode(context)?, token, created_at],
+                    "INSERT INTO agents(id,name,tool,context,token,last_seen,purpose,purpose_updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                    params![id, name, tool, encode(context)?, token, created_at, purpose, purpose_updated_at],
                 )?;
                 tx.execute(
                     "INSERT OR IGNORE INTO projects(project,owner_agent,closed,last_activity) VALUES(?,?,0,?)",
@@ -375,6 +414,15 @@ COMMIT;")?;
                     "previous_name": previous_name,
                     "changed": changed,
                 })
+            }
+            Operation::UpdatePurpose { purpose } => {
+                let id = require()?;
+                let purpose = normalize_purpose(purpose.as_deref())?;
+                tx.execute(
+                    "UPDATE agents SET purpose=?,purpose_updated_at=? WHERE id=?",
+                    params![purpose, now(), id],
+                )?;
+                json!({"agent": agent(&tx, id)?})
             }
             Operation::Agents {
                 project,
@@ -787,16 +835,18 @@ fn bounds(limit: usize) -> Result<()> {
 }
 fn agent(tx: &Transaction<'_>, id: &str) -> Result<Agent> {
     let row = tx.query_row(
-        "SELECT name,tool,context,last_seen,active,listening_until FROM agents WHERE id=?",
+        "SELECT name,tool,purpose,purpose_updated_at,context,last_seen,active,listening_until FROM agents WHERE id=?",
         [id],
         |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, bool>(4)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+                r.get::<_, String>(4)?,
                 r.get::<_, i64>(5)?,
+                r.get::<_, bool>(6)?,
+                r.get::<_, i64>(7)?,
             ))
         },
     )?;
@@ -804,10 +854,12 @@ fn agent(tx: &Transaction<'_>, id: &str) -> Result<Agent> {
         id: id.into(),
         name: row.0,
         tool: row.1,
-        context: decode(&row.2)?,
-        last_seen: row.3,
-        active: row.4 && now() - row.3 < 300,
-        listening: row.5 > now(),
+        purpose: row.2,
+        purpose_updated_at: row.3,
+        context: decode(&row.4)?,
+        last_seen: row.5,
+        active: row.6 && now() - row.5 < 300,
+        listening: row.7 > now(),
     })
 }
 fn resolve(tx: &Transaction<'_>, name: &str) -> Result<String> {
@@ -1246,11 +1298,217 @@ mod tests {
                     name: name.into(),
                     tool: "test".into(),
                     context: context(),
+                    purpose: None,
                 },
                 None,
             ))
             .unwrap();
         serde_json::from_value(v["credential"].clone()).unwrap()
+    }
+    #[test]
+    fn purpose_validation_trims_and_counts_unicode_scalars() {
+        assert_eq!(normalize_purpose(None).unwrap(), None);
+        assert_eq!(normalize_purpose(Some("  ")).unwrap(), None);
+        assert_eq!(
+            normalize_purpose(Some("  reviews agent handoffs  ")).unwrap(),
+            Some("reviews agent handoffs".into())
+        );
+        assert_eq!(
+            normalize_purpose(Some(&"é".repeat(160)))
+                .unwrap()
+                .unwrap()
+                .chars()
+                .count(),
+            160
+        );
+        assert_eq!(
+            normalize_purpose(Some(&"🧭".repeat(160)))
+                .unwrap()
+                .unwrap()
+                .len(),
+            160 * 4
+        );
+        assert_eq!(
+            normalize_purpose(Some(&"é".repeat(161))).unwrap_err().code,
+            "INVALID_OPERATION"
+        );
+        for invalid in ["line\nbreak", "\n", "tab\tcontrol", "c1\u{0085}"] {
+            assert_eq!(
+                normalize_purpose(Some(invalid)).unwrap_err().code,
+                "INVALID_OPERATION",
+                "accepted {invalid:?}"
+            );
+        }
+        for bidi in [
+            '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}',
+            '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ] {
+            assert_eq!(
+                normalize_purpose(Some(&format!("safe{bidi}text")))
+                    .unwrap_err()
+                    .code,
+                "INVALID_OPERATION",
+                "accepted bidi control U+{:04X}",
+                bidi as u32
+            );
+        }
+    }
+    #[test]
+    fn purpose_updates_are_cached_and_preserve_identity_presence_and_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let author = register(&mut store, "author");
+        let recipient = register(&mut store, "recipient");
+        store
+            .execute(&rpc(
+                send(&recipient.agent, "before-update"),
+                Some(author.clone()),
+            ))
+            .unwrap();
+        let thread: String = store
+            .db
+            .query_row("SELECT thread FROM messages LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        let history_before = store
+            .execute(&rpc(
+                Operation::History {
+                    thread: thread.clone(),
+                    after: 0,
+                    limit: 50,
+                },
+                Some(author.clone()),
+            ))
+            .unwrap();
+        store
+            .db
+            .execute(
+                "UPDATE agents SET last_seen=12345 WHERE id=?",
+                [&author.agent],
+            )
+            .unwrap();
+        let identity_before: (String, String, String, String, i64) = store
+            .db
+            .query_row(
+                "SELECT name,tool,context,token,last_seen FROM agents WHERE id=?",
+                [&author.agent],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let messages_before: Vec<(i64, String, String, Option<String>, String)> = store
+            .db
+            .prepare("SELECT id,thread,sender,recipient,kind FROM messages ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+
+        let request = rpc(
+            Operation::UpdatePurpose {
+                purpose: Some("  reviews incoming requests  ".into()),
+            },
+            Some(author.clone()),
+        );
+        let set = store.execute(&request).unwrap();
+        assert_eq!(set["agent"]["purpose"], "reviews incoming requests");
+        assert!(set["agent"]["purpose_updated_at"].as_i64().is_some());
+        assert_eq!(store.execute(&request).unwrap(), set);
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT purpose FROM agents WHERE id=?",
+                    [&author.agent],
+                    |row| row.get::<_, Option<String>>(0)
+                )
+                .unwrap()
+                .as_deref(),
+            Some("reviews incoming requests")
+        );
+
+        store
+            .db
+            .execute(
+                "UPDATE agents SET purpose_updated_at=1 WHERE id=?",
+                [&author.agent],
+            )
+            .unwrap();
+        let cleared = store
+            .execute(&rpc(
+                Operation::UpdatePurpose { purpose: None },
+                Some(author.clone()),
+            ))
+            .unwrap();
+        assert!(cleared["agent"]["purpose"].is_null());
+        assert!(cleared["agent"]["purpose_updated_at"].as_i64().unwrap() > 1);
+        let identity_after: (String, String, String, String, i64) = store
+            .db
+            .query_row(
+                "SELECT name,tool,context,token,last_seen FROM agents WHERE id=?",
+                [&author.agent],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(identity_after, identity_before);
+        let messages_after: Vec<(i64, String, String, Option<String>, String)> = store
+            .db
+            .prepare("SELECT id,thread,sender,recipient,kind FROM messages ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(messages_after, messages_before);
+        let history_after = store
+            .execute(&rpc(
+                Operation::History {
+                    thread,
+                    after: 0,
+                    limit: 50,
+                },
+                Some(author),
+            ))
+            .unwrap();
+        assert_eq!(
+            history_after["messages"][0]["id"],
+            history_before["messages"][0]["id"]
+        );
+        assert_eq!(
+            history_after["messages"][0]["parts"],
+            history_before["messages"][0]["parts"]
+        );
     }
     #[test]
     fn rename_preserves_identity_and_is_idempotent() {
@@ -2356,10 +2614,11 @@ mod tests {
                 name: "a".into(),
                 tool: "test".into(),
                 context: context(),
+                purpose: None,
             },
             None,
         );
-        for old in [1, 2, 4] {
+        for old in [1, 2, 4, 6] {
             req.protocol_version = old;
             assert_eq!(store.execute(&req).unwrap_err().code, "PROTOCOL_MISMATCH");
         }
@@ -2582,7 +2841,7 @@ mod tests {
                 .db
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            3
+            4
         );
         assert_eq!(
             store
@@ -2631,7 +2890,7 @@ mod tests {
                 .db
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            3
+            4
         );
         assert_eq!(
             store
@@ -2655,5 +2914,110 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn migration_adds_purpose_to_version_three_without_changing_existing_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("db");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE agents(id TEXT PRIMARY KEY, name TEXT NOT NULL, tool TEXT NOT NULL, context TEXT NOT NULL, token TEXT NOT NULL, last_seen INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1, listening_until INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL, sender TEXT NOT NULL REFERENCES agents(id), recipient TEXT REFERENCES agents(id), project TEXT, context TEXT NOT NULL, parts TEXT NOT NULL, kind TEXT NOT NULL, reply_to INTEGER REFERENCES messages(id), expects_reply INTEGER NOT NULL, created_at INTEGER NOT NULL, received_at INTEGER, answered_by INTEGER REFERENCES messages(id), cancelled INTEGER NOT NULL DEFAULT 0, key TEXT NOT NULL, canonical TEXT NOT NULL, recipient_listening INTEGER, supersedes INTEGER REFERENCES messages(id), UNIQUE(sender,key));
+             PRAGMA user_version=3;",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO agents(id,name,tool,context,token,last_seen) VALUES('agt_old','old','fixture','{\"project\":\"/legacy\",\"branch\":null,\"revision\":null}','secret-token',123)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO messages(thread,sender,project,context,parts,kind,expects_reply,created_at,key,canonical) VALUES('thr_old','agt_old',NULL,'{\"project\":\"/legacy\",\"branch\":null,\"revision\":null}','[{\"type\":\"text\",\"text\":\"history survives\"}]','message',0,456,'old-key','old-canonical')",
+            [],
+        )
+        .unwrap();
+        drop(db);
+
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .db
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT name,purpose,purpose_updated_at,last_seen FROM agents WHERE id='agt_old'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, i64>(3)?)),
+                )
+                .unwrap(),
+            ("old".into(), None, None, 123)
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM messages WHERE thread='thr_old' AND canonical='old-canonical'",
+                    [],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info('agents') WHERE name IN ('purpose','purpose_updated_at')",
+                    [],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        let old_agent = store
+            .execute(&rpc(
+                Operation::Whoami,
+                Some(Credential {
+                    agent: "agt_old".into(),
+                    token: "secret-token".into(),
+                }),
+            ))
+            .unwrap();
+        assert!(old_agent["agent"]["purpose"].is_null());
+        assert!(old_agent["agent"]["purpose_updated_at"].is_null());
+    }
+
+    #[test]
+    fn fresh_database_runs_all_migrations_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("db")).unwrap();
+        assert_eq!(
+            store
+                .db
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        for column in ["purpose", "purpose_updated_at"] {
+            assert_eq!(
+                store
+                    .db
+                    .query_row(
+                        "SELECT count(*) FROM pragma_table_info('agents') WHERE name=?",
+                        [column],
+                        |row| row.get::<_, u64>(0),
+                    )
+                    .unwrap(),
+                1
+            );
+        }
+        drop(store);
+        assert!(Store::open(&temp.path().join("db")).is_ok());
     }
 }

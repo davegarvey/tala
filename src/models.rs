@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Every error code with its retry class, meaning and default next command.
 /// Retry classes: `safe` (repeat as is), `same_key` (repeat with the same
@@ -321,6 +321,8 @@ pub struct Agent {
     pub id: String,
     pub name: String,
     pub tool: String,
+    pub purpose: Option<String>,
+    pub purpose_updated_at: Option<i64>,
     pub context: Context,
     pub last_seen: i64,
     pub active: bool,
@@ -388,6 +390,10 @@ pub enum Operation {
         name: String,
         tool: String,
         context: Context,
+        purpose: Option<String>,
+    },
+    UpdatePurpose {
+        purpose: Option<String>,
     },
     Rename {
         name: String,
