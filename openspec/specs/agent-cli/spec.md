@@ -92,6 +92,12 @@ Every error SHALL include `code`, `message`, `hint`, a `retry` class of `safe`, 
 - **WHEN** a send names an unknown recipient
 - **THEN** the error has `retry` of `after_fix` and `next` lists agents
 
+#### Scenario: Thread outside the visible scope
+- **WHEN** an agent accesses a thread it cannot see through its selected identity and project context
+- **THEN** the error uses the generic `THREAD_NOT_VISIBLE` code and does not disclose whether the thread exists or who owns it
+- **AND** its hint explains safe recovery through the original private identity or a visible participant's handoff, without exposing handles or foreign project metadata
+- **AND** its `next` command is `tala guide identity`
+
 ### Requirement: Exit codes
 The CLI SHALL exit 0 on success, 1 on operational error with nothing stored, 2 on usage error, 3 on wait timeout and 4 when a message was stored but a subsequent wait failed. Help output SHALL list these codes. When `send --wait` times out after storing its request, its result SHALL identify the stored request and provide one exact command to resume waiting for that request without resending it.
 

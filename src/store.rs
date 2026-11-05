@@ -115,6 +115,13 @@ fn invalid(message: impl Into<String>) -> Failure {
         "Check tala --help and use explicit agent/message IDs.",
     )
 }
+fn thread_not_visible() -> Failure {
+    Failure::new(
+        "THREAD_NOT_VISIBLE",
+        "Thread is missing or not visible to this agent",
+        "The thread may be outside this identity or project context. Select the original private identity, or ask a participant who can see it to run `tala handoff --to=<your-agt-id> --thread=<thread-id> \"Summary\"`. See `tala guide identity` for selector help.",
+    )
+}
 
 pub struct Store {
     db: Connection,
@@ -498,11 +505,7 @@ PRAGMA user_version=2; COMMIT;")?;
             } => {
                 let id = require()?;
                 if !visible_thread(&tx, id, thread)? {
-                    return Err(Failure::new(
-                        "THREAD_NOT_VISIBLE",
-                        "Thread is missing or not visible to this agent",
-                        "Use tala inbox or board to find an accessible thread ID.",
-                    ));
+                    return Err(thread_not_visible());
                 }
                 json!(page(&tx, "thread=?", [thread], *after, *limit)?)
             }
@@ -570,7 +573,7 @@ PRAGMA user_version=2; COMMIT;")?;
             Operation::MessageStatus { message: id } => {
                 let m = message(&tx, *id)?;
                 if !visible_thread(&tx, require()?, &m.thread_id)? {
-                    return Err(invalid("Message is not visible to this agent"));
+                    return Err(thread_not_visible());
                 }
                 json!({"message":m})
             }
@@ -972,7 +975,7 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
                 ));
             }
             if !visible_thread(tx, sender, &parent.thread_id)? {
-                return Err(invalid("Board thread is not visible to this agent"));
+                return Err(thread_not_visible());
             }
             let notify = (parent.sender != sender).then_some(parent.sender);
             (None, parent.project, parent.thread_id, notify)
@@ -1001,7 +1004,7 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
         let thread_id = match thread {
             Some(t) => {
                 if !visible_thread(tx, sender, t)? {
-                    return Err(invalid("Thread is not visible to the sender"));
+                    return Err(thread_not_visible());
                 }
                 let board: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM messages WHERE thread=? AND project IS NOT NULL)",
