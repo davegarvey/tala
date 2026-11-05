@@ -385,17 +385,15 @@ async fn identity_context(credential: &Credential) -> Result<Context> {
     let identity = client::call(Operation::Whoami, Some(credential.clone())).await?;
     let registered: Agent =
         serde_json::from_value(identity["agent"].clone()).map_err(|e| usage(e.to_string()))?;
-    // Rebuild from the registered worktree, not the project root: in a linked
-    // worktree the project is the main checkout, but messages must record the
-    // sender's own worktree, branch and revision.
+    // Keep the registered project as the agent's identity and board context,
+    // but record Git metadata from the directory where this message command
+    // runs. In particular, an agent may move between linked worktrees.
+    let invocation = context(None)?;
     let mut context = registered.context;
-    context.working_directory = Some(
-        std::fs::canonicalize(std::env::current_dir()?)?
-            .display()
-            .to_string(),
-    );
-    // Preserve identity and board context while recording where this specific
-    // message command was invoked.
+    context.working_directory = invocation.working_directory;
+    context.worktree = invocation.worktree;
+    context.branch = invocation.branch;
+    context.revision = invocation.revision;
     Ok(context)
 }
 /// Fills an empty send key with one derived from sender, routing and

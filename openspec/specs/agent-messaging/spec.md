@@ -5,7 +5,7 @@ Defines agent messaging for reliable local collaboration between distinct coding
 ## Requirements
 
 ### Requirement: Addressed durable messages
-The system SHALL require a known recipient for direct sends, attach sender context, return a globally unique message ID and thread ID, and distinguish stored, received, answered and cancelled states. Unknown recipients SHALL fail before storage. Outgoing messages SHALL also identify the canonical working directory from which the command was issued when available. Changing directories SHALL NOT change the selected identity or project-board membership.
+The system SHALL require a known recipient for direct sends, attach sender context, return a globally unique message ID and thread ID, and distinguish stored, received, answered and cancelled states. Unknown recipients SHALL fail before storage. Outgoing messages SHALL identify the canonical working directory and Git worktree, branch and revision from which the command was issued when available. Changing directories SHALL NOT change the selected identity or project-board membership.
 
 #### Scenario: Offline delivery
 - **WHEN** a registered inactive recipient is sent a message
@@ -14,7 +14,12 @@ The system SHALL require a known recipient for direct sends, attach sender conte
 #### Scenario: Current working directory is visible
 - **WHEN** an agent registered in one checkout changes to another working directory and sends a message
 - **THEN** the message retains the agent's registered project context and records the canonical directory used for that command
+- **AND** the message's Git worktree, branch and revision reflect the invocation directory when it is in a Git worktree
 - **AND** the selected agent identity and project-board membership remain unchanged
+
+#### Scenario: Git context is absent outside a worktree
+- **WHEN** an agent registered in a Git checkout sends a message from a directory outside any Git worktree
+- **THEN** the message retains the registered project context and records no worktree, branch or revision
 
 ### Requirement: Replies and obligations
 The system SHALL route reply automatically to the original sender within its thread and permit replies only by the addressed recipient. Requests SHALL remain pending after receipt until explicitly replied to or cancelled by their sender. A follow-up request SHALL not settle another request.
