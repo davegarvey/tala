@@ -183,6 +183,99 @@ fn same_checkout_agents_have_separate_inboxes_and_receipts() {
 }
 
 #[test]
+fn superseding_messages_remain_visible_without_leaving_old_requests_pending() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "sender");
+    let recipient = h.register(&h.a, "recipient");
+    let original = h.send(&sender, &recipient.id, "Use the old plan");
+    let original_id = id(&original);
+    let thread_id = thread(&original);
+    let correction = h.ok(
+        &h.a,
+        Some(&sender),
+        &[
+            "send",
+            "--to",
+            &recipient.id,
+            "--supersedes",
+            &original_id,
+            "Use the revised plan",
+        ],
+    );
+    let correction_id = id(&correction);
+    assert_eq!(correction["message"]["thread_id"], thread_id);
+    assert_eq!(
+        correction["message"]["supersedes"],
+        original["message"]["id"]
+    );
+
+    let inbox = h.ok(&h.a, Some(&recipient), &["inbox", "--peek"]);
+    assert_eq!(inbox["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        inbox["messages"][0]["superseded_by"],
+        correction["message"]["id"]
+    );
+    assert_eq!(
+        inbox["messages"][1]["supersedes"],
+        original["message"]["id"]
+    );
+    assert!(inbox["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|message| message["received_at"].is_null()));
+    assert_eq!(
+        h.ok(&h.a, Some(&recipient), &["pending", "--direction=incoming"])["messages"],
+        json!([])
+    );
+
+    let attention = h.ok(&h.a, Some(&recipient), &[]);
+    assert_eq!(attention["incoming_requests"], json!([]));
+    assert_eq!(attention["unread"]["count"], 2);
+    assert_eq!(
+        attention["unread"]["messages"][0]["superseded_by"],
+        correction["message"]["id"]
+    );
+    assert_eq!(
+        attention["unread"]["messages"][1]["supersedes"],
+        original["message"]["id"]
+    );
+
+    let output = h
+        .command(&h.a, Some(&recipient), &[])
+        .arg("--human")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let output = String::from_utf8(output.stdout).unwrap();
+    assert!(output.contains(&format!("Superseded by message {correction_id}")));
+    assert!(output.contains(&format!("Supersedes message {original_id}")));
+
+    let history = h
+        .command(&h.a, Some(&recipient), &["history", &thread_id])
+        .arg("--human")
+        .output()
+        .unwrap();
+    assert!(history.status.success());
+    let history = String::from_utf8(history.stdout).unwrap();
+    assert!(history.contains(&format!("Superseded by message {correction_id}")));
+    assert!(history.contains(&format!("Supersedes message {original_id}")));
+
+    let error = h.error(
+        &h.a,
+        Some(&recipient),
+        &["reply", &original_id, "I will follow the old plan"],
+        "REQUEST_SUPERSEDED",
+    );
+    assert_eq!(error["error"]["stored"], Value::Null);
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains(&correction_id));
+    assert_eq!(error["error"]["next"], format!("tala history {thread_id}"));
+}
+
+#[test]
 fn human_send_explains_that_an_unlistened_message_stays_queued() {
     let h = Harness::new();
     let sender = h.register(&h.a, "sender");

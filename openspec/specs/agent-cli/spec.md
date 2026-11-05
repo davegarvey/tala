@@ -52,7 +52,7 @@ The system SHALL expose init, register, rename, unregister, whoami, agents, list
 - **AND** human-readable registration output prints that next command without repeating the private handle
 
 ### Requirement: Input and output contract
-Send, reply, post and handoff SHALL accept exactly one positional text, message-file, stdin or ordered typed parts input; piped stdin SHALL work implicitly. Output SHALL default to one JSON envelope with ok and data or error, including usage failures; `--human` SHALL select text rendering and `--json` SHALL be accepted without effect and hidden from help. List output SHALL default to 50 items, cap at 500, and support incremental reads.
+Send, reply, post and handoff SHALL accept exactly one positional text, message-file, stdin or ordered typed parts input; piped stdin SHALL work implicitly. Direct `send` SHALL accept `--supersedes=<message-id>` to amend an earlier eligible message. JSON message output SHALL expose nullable `supersedes` and `superseded_by` relationships; human output SHALL identify when a message supersedes or has been superseded by another message. Output SHALL default to one JSON envelope with ok and data or error, including usage failures; `--human` SHALL select text rendering and `--json` SHALL be accepted without effect and hidden from help. List output SHALL default to 50 items, cap at 500, and support incremental reads.
 
 #### Scenario: Invalid JSON input
 - **WHEN** an invocation has conflicting content sources
@@ -65,6 +65,15 @@ Send, reply, post and handoff SHALL accept exactly one positional text, message-
 #### Scenario: Human rendering on request
 - **WHEN** an agent runs `tala inbox --human`
 - **THEN** stdout is the text rendering
+
+#### Scenario: Send superseding message
+- **WHEN** an agent runs `tala send --to=<recipient> --supersedes=<message-id> <text>`
+- **THEN** the result identifies the target in `message.supersedes`
+- **AND** the predecessor's `superseded_by` identifies the new message
+
+#### Scenario: Superseding message in human output
+- **WHEN** an agent renders an amended message or its predecessor with `--human`
+- **THEN** output states which message supersedes which
 
 ### Requirement: Agent integration
 Init SHALL generate versioned generic agent instructions and OpenCode integrations when present, preserve customized documents unless refresh is explicit, and support check and dry-run. Instructions SHALL require distinct per-session registration, keeping the private handle out of project files and shared environment, checking `tala` at work boundaries, CLI-only messaging and retention of user authorization boundaries. Init SHALL not install harness hooks or change harness configuration.
@@ -97,6 +106,11 @@ Every error SHALL include `code`, `message`, `hint`, a `retry` class of `safe`, 
 - **THEN** the error uses the generic `THREAD_NOT_VISIBLE` code and does not disclose whether the thread exists or who owns it
 - **AND** its hint explains safe recovery through the original private identity or a visible participant's handoff, without exposing handles or foreign project metadata
 - **AND** its `next` command is `tala guide identity`
+
+#### Scenario: Reply to a superseded request
+- **WHEN** an agent runs `tala reply <message-id>` for a request with a successor
+- **THEN** Tala returns `REQUEST_SUPERSEDED` with `retry` of `after_fix` and no stored message ID
+- **AND** the error names the successor ID and provides one exact command to inspect the thread
 
 ### Requirement: Exit codes
 The CLI SHALL exit 0 on success, 1 on operational error with nothing stored, 2 on usage error, 3 on wait timeout and 4 when a message was stored but a subsequent wait failed. Help output SHALL list these codes. When `send --wait` times out after storing its request, its result SHALL identify the stored request and provide one exact command to resume waiting for that request without resending it.

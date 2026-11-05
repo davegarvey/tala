@@ -133,8 +133,8 @@ impl Store {
         db.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
-        let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version != 0 && version != 1 && version != 2 {
+        let mut version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if !(0..=3).contains(&version) {
             return Err(Failure::new(
                 "DATABASE_VERSION",
                 format!("Unsupported database schema {version}"),
@@ -148,6 +148,7 @@ impl Store {
                  PRAGMA user_version=2;
                  COMMIT;",
             )?;
+            version = 2;
         }
         db.execute_batch("BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY, name TEXT NOT NULL, tool TEXT NOT NULL, context TEXT NOT NULL, token TEXT NOT NULL, last_seen INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1, listening_until INTEGER NOT NULL DEFAULT 0);
@@ -184,7 +185,16 @@ SET last_activity=MAX(last_activity, COALESCE((
   WHERE json_extract(messages.context,'$.project')=projects.project
      OR messages.project=projects.project
 ),last_activity));
-PRAGMA user_version=2; COMMIT;")?;
+COMMIT;")?;
+        if version < 3 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE messages ADD COLUMN supersedes INTEGER REFERENCES messages(id);
+                 CREATE UNIQUE INDEX messages_supersedes_unique ON messages(supersedes);
+                 PRAGMA user_version=3;
+                 COMMIT;",
+            )?;
+        }
         let check: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
         if check != "ok" {
             return Err(Failure::new(
@@ -602,8 +612,7 @@ pub const STALE_AFTER: u64 = 24 * 60 * 60;
 const AUTO_KEY_WINDOW: i64 = 10 * 60;
 /// Unread for agent ?1: direct messages and board replies delivered to it.
 const UNREAD: &str = "(messages.recipient=?1 AND messages.received_at IS NULL) OR messages.id IN (SELECT message FROM board_deliveries WHERE agent=?1 AND received_at IS NULL)";
-const OPEN: &str =
-    "messages.expects_reply=1 AND messages.answered_by IS NULL AND messages.cancelled=0";
+const OPEN: &str = "messages.expects_reply=1 AND messages.answered_by IS NULL AND messages.cancelled=0 AND NOT EXISTS(SELECT 1 FROM messages superseder WHERE superseder.supersedes=messages.id)";
 /// Stale for agent ?1 with cutoff ?2: too old, or the counterpart unregistered.
 const STALE: &str = "(messages.created_at < ?2 OR EXISTS(SELECT 1 FROM agents x WHERE x.id = CASE WHEN messages.recipient=?1 THEN messages.sender ELSE messages.recipient END AND x.active=0))";
 fn cutoff(stale_after: u64) -> i64 {
@@ -811,18 +820,20 @@ fn row_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         })?,
         kind: r.get(7)?,
         reply_to: r.get(8)?,
-        expects_reply: r.get(9)?,
-        created_at: r.get(10)?,
-        received_at: r.get(11)?,
-        answered_by: r.get(12)?,
-        cancelled: r.get(13)?,
+        supersedes: r.get(9)?,
+        superseded_by: r.get(10)?,
+        expects_reply: r.get(11)?,
+        created_at: r.get(12)?,
+        received_at: r.get(13)?,
+        answered_by: r.get(14)?,
+        cancelled: r.get(15)?,
         delivery: String::new(),
-        age_seconds: (now() - r.get::<_, i64>(10)?).max(0),
+        age_seconds: (now() - r.get::<_, i64>(12)?).max(0),
     };
     msg.delivery = delivery(&msg);
     Ok(msg)
 }
-const COLUMNS:&str="id,thread,sender,recipient,project,context,parts,kind,reply_to,expects_reply,created_at,received_at,answered_by,cancelled";
+const COLUMNS:&str="id,thread,sender,recipient,project,context,parts,kind,reply_to,supersedes,(SELECT id FROM messages successor WHERE successor.supersedes=messages.id),expects_reply,created_at,received_at,answered_by,cancelled";
 fn message(tx: &Transaction<'_>, id: u64) -> Result<Message> {
     tx.query_row(
         &format!("SELECT {COLUMNS} FROM messages WHERE id=?"),
@@ -918,6 +929,7 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
         kind,
         key,
         context,
+        supersedes,
     } = operation
     else {
         unreachable!()
@@ -952,6 +964,31 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
     } else if let Some(id) = explicit_key(tx, sender, key, &canonical)? {
         return send_result(tx, id, true);
     }
+    let supersedes_parent = if let Some(id) = supersedes {
+        if kind != "message" || reply_to.is_some() || project.is_some() {
+            return Err(invalid(
+                "Only direct messages can supersede an earlier message",
+            ));
+        }
+        let parent = message(tx, *id)?;
+        if parent.sender != sender
+            || parent.recipient.is_none()
+            || parent.project.is_some()
+            || parent.kind == "handoff"
+        {
+            return Err(invalid(
+                "Supersession target must be your earlier direct message in the same thread",
+            ));
+        }
+        if let Some(successor) = parent.superseded_by {
+            return Err(invalid(format!(
+                "Message {id} is already superseded by {successor}; supersede the latest message in the chain"
+            )));
+        }
+        Some(parent)
+    } else {
+        None
+    };
     // `notify` is the author of an answered board message, who receives the
     // reply in their inbox while it stays public on the board.
     let (recipient, board, thread_id, notify) = if let Some(id) = reply_to {
@@ -966,6 +1003,16 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
                     "Only the addressed recipient can reply",
                     "Select the recipient identity with --agent.",
                 ));
+            }
+            if parent.expects_reply {
+                if let Some(successor) = parent.superseded_by {
+                    return Err(Failure::new(
+                        "REQUEST_SUPERSEDED",
+                        format!("Request {id} was superseded by message {successor}"),
+                        "Read the updated thread before replying.",
+                    )
+                    .with_next(format!("tala history {}", parent.thread_id)));
+                }
             }
             (Some(parent.sender), None, parent.thread_id, None)
         } else {
@@ -1001,22 +1048,38 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
             to.as_deref()
                 .ok_or_else(|| invalid("Direct send requires --to"))?,
         )?;
-        let thread_id = match thread {
-            Some(t) => {
-                if !visible_thread(tx, sender, t)? {
-                    return Err(thread_not_visible());
+        let thread_id = if let Some(parent) = &supersedes_parent {
+            if parent.recipient.as_deref() != Some(recipient.as_str()) {
+                return Err(invalid(
+                    "Supersession target must have the same resolved recipient",
+                ));
+            }
+            if let Some(explicit_thread) = thread {
+                if explicit_thread != &parent.thread_id {
+                    return Err(invalid(
+                        "Supersession target must be in the same direct thread",
+                    ));
                 }
-                let board: bool = tx.query_row(
+            }
+            parent.thread_id.clone()
+        } else {
+            match thread {
+                Some(t) => {
+                    if !visible_thread(tx, sender, t)? {
+                        return Err(thread_not_visible());
+                    }
+                    let board: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM messages WHERE thread=? AND project IS NOT NULL)",
                     [t],
                     |r| r.get(0),
                 )?;
-                if board {
-                    return Err(invalid("Direct messages and handoffs cannot continue a board thread; use reply for public discussion or start a new direct thread"));
+                    if board {
+                        return Err(invalid("Direct messages and handoffs cannot continue a board thread; use reply for public discussion or start a new direct thread"));
+                    }
+                    t.clone()
                 }
-                t.clone()
+                None => format!("thr_{}", Uuid::new_v4().simple()),
             }
-            None => format!("thr_{}", Uuid::new_v4().simple()),
         };
         (Some(recipient), None, thread_id, None)
     };
@@ -1031,7 +1094,7 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
         .as_deref()
         .map(|recipient| recipient_is_listening(tx, recipient))
         .transpose()?;
-    tx.execute("INSERT INTO messages(thread,sender,recipient,project,context,parts,kind,reply_to,expects_reply,created_at,key,canonical,recipient_listening) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",params![thread_id,sender,recipient,board,encode(context)?,encode(parts)?,kind,reply_to,request,created_at,stored_key,canonical,recipient_listening])?;
+    tx.execute("INSERT INTO messages(thread,sender,recipient,project,context,parts,kind,reply_to,expects_reply,created_at,key,canonical,recipient_listening,supersedes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",params![thread_id,sender,recipient,board,encode(context)?,encode(parts)?,kind,reply_to,request,created_at,stored_key,canonical,recipient_listening,supersedes])?;
     let id = tx.last_insert_rowid() as u64;
     tx.execute(
         "UPDATE projects SET last_activity=? WHERE project=?",
@@ -1253,6 +1316,7 @@ mod tests {
             kind: "message".into(),
             key: key.into(),
             context: context(),
+            supersedes: None,
         }
     }
     fn age(store: &Store, id: u64, seconds: i64) {
@@ -1278,6 +1342,485 @@ mod tests {
             *parts = vec![Part::Text { text: text.into() }];
         }
         op
+    }
+    fn amendment(to: &str, key: &str, target: u64, request: bool) -> Operation {
+        let mut op = send(to, key);
+        if let Operation::Send {
+            thread,
+            parts,
+            request: wants_reply,
+            supersedes,
+            ..
+        } = &mut op
+        {
+            *thread = None;
+            *parts = vec![Part::Text {
+                text: format!("correction to {target}"),
+            }];
+            *wants_reply = request;
+            *supersedes = Some(target);
+        }
+        op
+    }
+    #[test]
+    fn supersession_preserves_history_and_linear_request_obligations() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("db");
+        let mut store = Store::open(&path).unwrap();
+        let sender = register(&mut store, "sender");
+        let recipient = register(&mut store, "recipient");
+        let original = store
+            .execute(&rpc(
+                send(&recipient.agent, "original"),
+                Some(sender.clone()),
+            ))
+            .unwrap();
+        let original_id = id_of(&original);
+        let original_thread = original["message"]["thread_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let correction = store
+            .execute(&rpc(
+                amendment(&recipient.agent, "correction", original_id, true),
+                Some(sender.clone()),
+            ))
+            .unwrap();
+        let correction_id = id_of(&correction);
+        assert_eq!(correction["message"]["thread_id"], original_thread);
+        assert_eq!(correction["message"]["supersedes"], original_id);
+        let old = store
+            .execute(&rpc(
+                Operation::MessageStatus {
+                    message: original_id,
+                },
+                Some(sender.clone()),
+            ))
+            .unwrap()["message"]
+            .clone();
+        assert_eq!(old["superseded_by"], correction_id);
+        assert_eq!(old["received_at"], Value::Null);
+        assert_eq!(old["answered_by"], Value::Null);
+
+        let active = store
+            .execute(&rpc(pending(false), Some(recipient.clone())))
+            .unwrap();
+        assert_eq!(active["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(active["messages"][0]["id"], correction_id);
+        let outgoing = store
+            .execute(&rpc(
+                Operation::Pending {
+                    direction: "outgoing".into(),
+                    stale: false,
+                    after: 0,
+                    limit: 50,
+                },
+                Some(sender.clone()),
+            ))
+            .unwrap();
+        assert_eq!(outgoing["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(outgoing["messages"][0]["id"], correction_id);
+
+        let second = store
+            .execute(&rpc(
+                amendment(&recipient.agent, "second-correction", correction_id, true),
+                Some(sender.clone()),
+            ))
+            .unwrap();
+        let second_id = id_of(&second);
+        assert_eq!(second["message"]["thread_id"], original_thread);
+        assert_eq!(second["message"]["supersedes"], correction_id);
+        assert_eq!(second["message"]["expects_reply"], true);
+        let old = store
+            .execute(&rpc(
+                Operation::MessageStatus {
+                    message: original_id,
+                },
+                Some(sender.clone()),
+            ))
+            .unwrap()["message"]
+            .clone();
+        assert_eq!(old["superseded_by"], correction_id);
+        let middle = store
+            .execute(&rpc(
+                Operation::MessageStatus {
+                    message: correction_id,
+                },
+                Some(sender.clone()),
+            ))
+            .unwrap()["message"]
+            .clone();
+        assert_eq!(middle["supersedes"], original_id);
+        assert_eq!(middle["superseded_by"], second_id);
+
+        let active = store
+            .execute(&rpc(pending(false), Some(recipient.clone())))
+            .unwrap();
+        assert_eq!(active["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(active["messages"][0]["id"], second_id);
+        let unread = store
+            .execute(&rpc(inbox(true), Some(recipient.clone())))
+            .unwrap();
+        assert_eq!(unread["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(unread["messages"][0]["superseded_by"], correction_id);
+        assert_eq!(unread["messages"][1]["supersedes"], original_id);
+        assert_eq!(unread["messages"][1]["superseded_by"], second_id);
+        assert_eq!(unread["messages"][2]["supersedes"], correction_id);
+        assert!(unread["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["received_at"].is_null()));
+        let attention = store
+            .execute(&rpc(Operation::Attention, Some(recipient.clone())))
+            .unwrap();
+        assert_eq!(attention["incoming_requests"].as_array().unwrap().len(), 1);
+        assert_eq!(attention["incoming_requests"][0]["id"], second_id);
+        assert_eq!(
+            attention["unread"]["messages"][0]["superseded_by"],
+            correction_id
+        );
+
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let persisted = store
+            .execute(&rpc(
+                Operation::MessageStatus {
+                    message: original_id,
+                },
+                Some(sender),
+            ))
+            .unwrap();
+        assert_eq!(persisted["message"]["superseded_by"], correction_id);
+    }
+
+    #[test]
+    fn supersession_after_fetch_preserves_receipt_and_exposes_successor() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let sender = register(&mut store, "sender");
+        let recipient = register(&mut store, "recipient");
+        let original = store
+            .execute(&rpc(
+                send(&recipient.agent, "original"),
+                Some(sender.clone()),
+            ))
+            .unwrap();
+        let original_id = id_of(&original);
+
+        let fetched = store
+            .execute(&rpc(inbox(false), Some(recipient.clone())))
+            .unwrap();
+        assert_eq!(fetched["messages"][0]["id"], original_id);
+        let receipt = fetched["messages"][0]["received_at"].clone();
+        assert!(!receipt.is_null());
+
+        let correction = store
+            .execute(&rpc(
+                amendment(&recipient.agent, "correction", original_id, true),
+                Some(sender),
+            ))
+            .unwrap();
+        let correction_id = id_of(&correction);
+        let old = store
+            .execute(&rpc(
+                Operation::MessageStatus {
+                    message: original_id,
+                },
+                Some(recipient.clone()),
+            ))
+            .unwrap()["message"]
+            .clone();
+        assert_eq!(old["received_at"], receipt);
+        assert_eq!(old["superseded_by"], correction_id);
+
+        let unread = store
+            .execute(&rpc(inbox(true), Some(recipient.clone())))
+            .unwrap();
+        assert_eq!(unread["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(unread["messages"][0]["id"], correction_id);
+        assert_eq!(unread["messages"][0]["supersedes"], original_id);
+    }
+    #[test]
+    fn supersession_rejects_invalid_targets_and_branches() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let sender = register(&mut store, "sender");
+        let other = register(&mut store, "other");
+        let recipient = register(&mut store, "recipient");
+        let other_recipient = register(&mut store, "other-recipient");
+        let original = store
+            .execute(&rpc(
+                send(&recipient.agent, "original"),
+                Some(sender.clone()),
+            ))
+            .unwrap();
+        let original_id = id_of(&original);
+        let thread = original["message"]["thread_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        store
+            .execute(&rpc(
+                amendment(&recipient.agent, "first", original_id, false),
+                Some(sender.clone()),
+            ))
+            .unwrap();
+
+        let branch = store
+            .execute(&rpc(
+                amendment(&recipient.agent, "branch", original_id, false),
+                Some(sender.clone()),
+            ))
+            .unwrap_err();
+        assert_eq!(branch.code, "INVALID_OPERATION");
+        assert!(branch.message.contains("already superseded"));
+
+        for (credential, to, key, explicit_thread, target) in [
+            (
+                other.clone(),
+                recipient.agent.as_str(),
+                "wrong-sender",
+                None,
+                original_id,
+            ),
+            (
+                sender.clone(),
+                other_recipient.agent.as_str(),
+                "wrong-recipient",
+                None,
+                original_id,
+            ),
+            (
+                sender.clone(),
+                recipient.agent.as_str(),
+                "wrong-thread",
+                Some("thr_other".to_string()),
+                original_id,
+            ),
+        ] {
+            let mut op = amendment(to, key, target, false);
+            if let Operation::Send { thread, .. } = &mut op {
+                *thread = explicit_thread;
+            }
+            assert_eq!(
+                store.execute(&rpc(op, Some(credential))).unwrap_err().code,
+                "INVALID_OPERATION"
+            );
+        }
+        assert_eq!(
+            store
+                .execute(&rpc(
+                    amendment(&recipient.agent, "missing", 9_999_999, false),
+                    Some(sender.clone()),
+                ))
+                .unwrap_err()
+                .code,
+            "MESSAGE_NOT_FOUND"
+        );
+
+        let mut handoff = send(&recipient.agent, "handoff");
+        if let Operation::Send {
+            kind, thread: t, ..
+        } = &mut handoff
+        {
+            *kind = "handoff".into();
+            *t = Some(thread.clone());
+        }
+        let handoff_id = id_of(&store.execute(&rpc(handoff, Some(sender.clone()))).unwrap());
+        assert_eq!(
+            store
+                .execute(&rpc(
+                    amendment(&recipient.agent, "supersede-handoff", handoff_id, false),
+                    Some(sender.clone()),
+                ))
+                .unwrap_err()
+                .code,
+            "INVALID_OPERATION"
+        );
+
+        let board_id = id_of(
+            &store
+                .execute(&rpc(post("board"), Some(sender.clone())))
+                .unwrap(),
+        );
+        assert_eq!(
+            store
+                .execute(&rpc(
+                    amendment(&recipient.agent, "supersede-board", board_id, false),
+                    Some(sender.clone()),
+                ))
+                .unwrap_err()
+                .code,
+            "INVALID_OPERATION"
+        );
+        let board_reply_id = id_of(
+            &store
+                .execute(&rpc(reply(board_id, "board reply"), Some(other.clone())))
+                .unwrap(),
+        );
+        assert_eq!(
+            store
+                .execute(&rpc(
+                    amendment(
+                        &sender.agent,
+                        "supersede-board-reply",
+                        board_reply_id,
+                        false
+                    ),
+                    Some(other),
+                ))
+                .unwrap_err()
+                .code,
+            "INVALID_OPERATION"
+        );
+    }
+    #[test]
+    fn replies_to_superseded_requests_fail_but_informational_messages_remain_replyable() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let sender = register(&mut store, "sender");
+        let recipient = register(&mut store, "recipient");
+        let request = store
+            .execute(&rpc(
+                send(&recipient.agent, "request"),
+                Some(sender.clone()),
+            ))
+            .unwrap();
+        let request_id = id_of(&request);
+        let thread = request["message"]["thread_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let replacement = store
+            .execute(&rpc(
+                amendment(&recipient.agent, "replacement", request_id, false),
+                Some(sender.clone()),
+            ))
+            .unwrap();
+        let replacement_id = id_of(&replacement);
+        let before = store
+            .db
+            .query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, u64>(0))
+            .unwrap();
+
+        let mut reply = send("unused", "stale-reply");
+        if let Operation::Send {
+            to,
+            reply_to,
+            kind,
+            request,
+            ..
+        } = &mut reply
+        {
+            *to = None;
+            *reply_to = Some(request_id);
+            *kind = "reply".into();
+            *request = false;
+        }
+        let error = store
+            .execute(&rpc(reply, Some(recipient.clone())))
+            .unwrap_err();
+        assert_eq!(error.code, "REQUEST_SUPERSEDED");
+        assert!(error.message.contains(&replacement_id.to_string()));
+        let expected_next = format!("tala history {thread}");
+        assert_eq!(error.next.as_deref(), Some(expected_next.as_str()));
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            before
+        );
+
+        let mut info_op = send(&recipient.agent, "info");
+        if let Operation::Send { request, .. } = &mut info_op {
+            *request = false;
+        }
+        let informational = store.execute(&rpc(info_op, Some(sender.clone()))).unwrap();
+        let informational_id = id_of(&informational);
+        store
+            .execute(&rpc(
+                amendment(
+                    &recipient.agent,
+                    "info-replacement",
+                    informational_id,
+                    false,
+                ),
+                Some(sender),
+            ))
+            .unwrap();
+        let mut informational_reply = send("unused", "info-reply");
+        if let Operation::Send {
+            to,
+            reply_to,
+            kind,
+            request,
+            ..
+        } = &mut informational_reply
+        {
+            *to = None;
+            *reply_to = Some(informational_id);
+            *kind = "reply".into();
+            *request = false;
+        }
+        assert!(store
+            .execute(&rpc(informational_reply, Some(recipient)))
+            .is_ok());
+    }
+    #[test]
+    fn supersession_preserves_explicit_and_derived_retry_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let sender = register(&mut store, "sender");
+        let recipient = register(&mut store, "recipient");
+        let first = id_of(
+            &store
+                .execute(&rpc(send(&recipient.agent, "first"), Some(sender.clone())))
+                .unwrap(),
+        );
+        let second = id_of(
+            &store
+                .execute(&rpc(send(&recipient.agent, "second"), Some(sender.clone())))
+                .unwrap(),
+        );
+
+        let first_operation = amendment(&recipient.agent, "stable-amendment", first, false);
+        let first_result = store
+            .execute(&rpc(first_operation.clone(), Some(sender.clone())))
+            .unwrap();
+        let first_successor = id_of(&first_result);
+        let duplicate = store
+            .execute(&rpc(first_operation.clone(), Some(sender.clone())))
+            .unwrap();
+        assert_eq!(duplicate["duplicate"], true);
+        assert_eq!(id_of(&duplicate), first_successor);
+
+        let changed_target = amendment(&recipient.agent, "stable-amendment", second, false);
+        assert_eq!(
+            store
+                .execute(&rpc(changed_target, Some(sender.clone())))
+                .unwrap_err()
+                .code,
+            "IDEMPOTENCY_CONFLICT"
+        );
+
+        let third = id_of(
+            &store
+                .execute(&rpc(send(&recipient.agent, "third"), Some(sender.clone())))
+                .unwrap(),
+        );
+        let mut derived = amendment(&recipient.agent, "auto:amend-derived", third, false);
+        if let Operation::Send { key, .. } = &mut derived {
+            *key = "auto:amend-derived".into();
+        }
+        let first_derived = store
+            .execute(&rpc(derived.clone(), Some(sender.clone())))
+            .unwrap();
+        let duplicate_derived = store.execute(&rpc(derived, Some(sender))).unwrap();
+        assert_eq!(duplicate_derived["duplicate"], true);
+        assert_eq!(id_of(&duplicate_derived), id_of(&first_derived));
     }
     #[test]
     fn ages_and_staleness_are_computed_at_response_time() {
@@ -1992,7 +2535,7 @@ mod tests {
                 .db
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            2
+            3
         );
         assert_eq!(
             store
@@ -2005,6 +2548,63 @@ mod tests {
             store
                 .db
                 .query_row("SELECT count(*) FROM messages", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT supersedes FROM messages WHERE id=1", [], |r| r
+                    .get::<_, Option<
+                    u64,
+                >>(
+                    0
+                ))
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn migration_adds_supersedes_to_version_two_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("db");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE agents(id TEXT PRIMARY KEY, name TEXT NOT NULL, tool TEXT NOT NULL, context TEXT NOT NULL, token TEXT NOT NULL, last_seen INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1, listening_until INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL, sender TEXT NOT NULL REFERENCES agents(id), recipient TEXT REFERENCES agents(id), project TEXT, context TEXT NOT NULL, parts TEXT NOT NULL, kind TEXT NOT NULL, reply_to INTEGER REFERENCES messages(id), expects_reply INTEGER NOT NULL, created_at INTEGER NOT NULL, received_at INTEGER, answered_by INTEGER REFERENCES messages(id), cancelled INTEGER NOT NULL DEFAULT 0, key TEXT NOT NULL, canonical TEXT NOT NULL, recipient_listening INTEGER, UNIQUE(sender,key));
+             PRAGMA user_version=2;",
+        )
+        .unwrap();
+        drop(db);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .db
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info('messages') WHERE name='supersedes'",
+                    [],
+                    |r| r.get::<_, u64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='messages_supersedes_unique'",
+                    [],
+                    |r| r.get::<_, u64>(0),
+                )
                 .unwrap(),
             1
         );
