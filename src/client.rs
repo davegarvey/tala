@@ -115,13 +115,51 @@ async fn usable() -> Result<Option<DaemonInfo>> {
         Liveness::Unreachable(reason) => Err(unreachable(info.port, &reason)),
     }
 }
+fn startup_lock_contended(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // LockFileEx reports lock/sharing contention with these Win32 codes.
+        matches!(error.raw_os_error(), Some(32) | Some(33))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
 pub async fn ensure() -> Result<DaemonInfo> {
     if let Some(i) = usable().await? {
         return Ok(i);
     }
+    let lock_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let lock = daemon::lock_file("startup.lock")?;
-    lock.lock_exclusive()?;
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(error) if startup_lock_contended(&error) => {
+                // Another client may be starting a replacement. Let it make
+                // progress on this runtime thread, and reuse the daemon as
+                // soon as its health check succeeds.
+                if let Some(i) = usable().await? {
+                    return Ok(i);
+                }
+                if tokio::time::Instant::now() >= lock_deadline {
+                    return Err(Failure::new(
+                        "DAEMON_START_FAILED",
+                        "Timed out waiting for another client to start the daemon",
+                        "Check tala status and TALA_HOME/daemon.log, then retry.",
+                    )
+                    .with_next("tala status"));
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     if let Some(i) = usable().await? {
+        let _ = lock.unlock();
         return Ok(i);
     }
     let mut options = OpenOptions::new();
@@ -151,6 +189,7 @@ pub async fn ensure() -> Result<DaemonInfo> {
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if let Some(i) = usable().await? {
+            let _ = lock.unlock();
             return Ok(i);
         }
     }
@@ -160,6 +199,7 @@ pub async fn ensure() -> Result<DaemonInfo> {
         "Read TALA_HOME/daemon.log for storage, lock or startup errors.",
     ))
 }
+
 fn compatible(i: DaemonInfo) -> Result<DaemonInfo> {
     if i.protocol_version != PROTOCOL_VERSION {
         return Err(Failure::new(
@@ -771,4 +811,28 @@ fn clear_standard_handle_inheritance() -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::startup_lock_contended;
+
+    #[test]
+    fn would_block_is_startup_lock_contention() {
+        let error = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        assert!(startup_lock_contended(&error));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lock_contention_codes_are_retryable_but_other_errors_are_not() {
+        for code in [32, 33] {
+            assert!(startup_lock_contended(&std::io::Error::from_raw_os_error(
+                code
+            )));
+        }
+        assert!(!startup_lock_contended(&std::io::Error::from_raw_os_error(
+            5
+        )));
+    }
 }

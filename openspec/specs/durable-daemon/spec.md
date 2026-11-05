@@ -5,7 +5,7 @@ Defines durable daemon for reliable local collaboration between distinct coding 
 ## Requirements
 
 ### Requirement: Exclusive durable service
-The system SHALL operate one loopback daemon per Tala home, automatically start it safely under concurrent clients, and commit messages and receipts transactionally before success. Storage failure or corruption SHALL report an error without replacing storage with empty state.
+The system SHALL operate one loopback daemon per Tala home, automatically start it safely under concurrent clients, and commit messages and receipts transactionally before success. Storage failure or corruption SHALL report an error without replacing storage with empty state. Clients SHALL acquire startup coordination without blocking their async executor, bound waits for another starter, and release the startup lock as soon as they confirm a healthy daemon before sending long-lived requests.
 
 #### Scenario: Concurrent startup
 - **WHEN** multiple commands start against a fresh home
@@ -18,6 +18,10 @@ The system SHALL operate one loopback daemon per Tala home, automatically start 
 #### Scenario: Existing stale metadata replaced on Windows
 - **WHEN** daemon metadata names a port on which connections are refused on Windows
 - **THEN** the replacement daemon updates the existing metadata file and the command succeeds
+
+#### Scenario: Wait recovers when the daemon dies
+- **WHEN** a daemon dies while a long-lived `wait` has concurrent inbox and board requests, and another command needs the daemon
+- **THEN** startup-lock contention yields while one client recovers the daemon, the other command uses the recovered daemon or returns a bounded actionable error, and no client requires manual process cleanup
 
 ### Requirement: Protocol and lifecycle
 The system SHALL reject incompatible wire versions before mutation, report status without starting a daemon, stop through the live service, and persist diagnostics. Blocking operations SHALL use an overall deadline and recover durable messages after restart.
