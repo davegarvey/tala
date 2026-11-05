@@ -108,7 +108,7 @@ pub fn accepts(generation: u64) -> Result<bool> {
 }
 
 /// Marks the currently published instance as stopping before any RPC is sent.
-/// The caller must acquire startup.lock as a barrier after this returns.
+/// The caller must acquire the current startup lock as a barrier after this returns.
 pub fn accept_stop() -> Result<(u64, Option<String>)> {
     locked(|state| {
         if let Some(target) = &state.stopping {

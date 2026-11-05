@@ -23,6 +23,11 @@ The system SHALL operate one loopback daemon per Tala home, automatically start 
 - **WHEN** a daemon dies while a long-lived `wait` has concurrent inbox and board requests, and another command needs the daemon
 - **THEN** startup-lock contention yields while one client recovers the daemon, the other command uses the recovered daemon or returns a bounded actionable error, and no client requires manual process cleanup
 
+#### Scenario: Legacy startup lock held after upgrade
+- **WHEN** a process from an older release still holds the legacy startup lock
+- **THEN** a current client can start or reach the daemon without waiting for that legacy lock
+- **AND** concurrent current clients still use one daemon per Tala home
+
 ### Requirement: Protocol and lifecycle
 The system SHALL reject incompatible wire versions before mutation, report status without starting a daemon, stop through the live service, and persist diagnostics. Blocking operations SHALL use an overall deadline and recover durable messages after restart.
 
