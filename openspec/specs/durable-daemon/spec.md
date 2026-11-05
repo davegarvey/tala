@@ -15,6 +15,10 @@ The system SHALL operate one loopback daemon per Tala home, automatically start 
 - **WHEN** daemon metadata names a port on which connections are refused
 - **THEN** the client starts a replacement daemon and the command succeeds
 
+#### Scenario: Existing stale metadata replaced on Windows
+- **WHEN** daemon metadata names a port on which connections are refused on Windows
+- **THEN** the replacement daemon updates the existing metadata file and the command succeeds
+
 ### Requirement: Protocol and lifecycle
 The system SHALL reject incompatible wire versions before mutation, report status without starting a daemon, stop through the live service, and persist diagnostics. Blocking operations SHALL use an overall deadline and recover durable messages after restart.
 

@@ -48,12 +48,52 @@ pub fn private_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let mut f = options.open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
-        std::fs::rename(&tmp, path)
+        replace_file(&tmp, path)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     result
+}
+/// Atomically moves a staged file into place, replacing an existing file.
+/// `std::fs::rename` has replacement semantics on Unix but fails when the
+/// destination exists on Windows.
+pub fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::{iter, os::windows::ffi::OsStrExt};
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            #[link_name = "MoveFileExW"]
+            fn move_file_ex_w(existing: *const u16, new: *const u16, flags: u32) -> i32;
+        }
+
+        const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+        let from: Vec<u16> = from
+            .as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect();
+        let to: Vec<u16> = to.as_os_str().encode_wide().chain(iter::once(0)).collect();
+        let result = unsafe {
+            move_file_ex_w(
+                from.as_ptr(),
+                to.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(from, to)
+    }
 }
 fn encode<T: serde::Serialize>(v: &T) -> Result<String> {
     serde_json::to_string(v)
