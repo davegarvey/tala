@@ -1,13 +1,40 @@
 use crate::models::*;
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
 const PROJECT_STALE_AFTER: i64 = 30 * 24 * 60 * 60;
+const THREAD_LIST_SNAPSHOT_TTL: i64 = 15 * 60;
+const THREAD_LIST_SNAPSHOT_LIMIT: usize = 8;
+const THREAD_LIST_SUMMARY_QUERY: &str =
+    "WITH attention AS (
+       SELECT thread,unread_count FROM thread_unread WHERE agent=?1
+     ), pending AS (
+       SELECT r.thread,
+         SUM(CASE WHEN r.direction='incoming' AND r.created_at>=?2 AND a.active=1 THEN 1 ELSE 0 END) AS fresh_incoming,
+         SUM(CASE WHEN r.direction='outgoing' AND r.created_at>=?2 AND a.active=1 THEN 1 ELSE 0 END) AS fresh_outgoing,
+         SUM(CASE WHEN r.direction='incoming' AND (r.created_at<?2 OR a.active=0) THEN 1 ELSE 0 END) AS stale_incoming,
+         SUM(CASE WHEN r.direction='outgoing' AND (r.created_at<?2 OR a.active=0) THEN 1 ELSE 0 END) AS stale_outgoing
+       FROM thread_open_requests r
+       JOIN agents a ON a.id=r.counterpart
+       WHERE r.agent=?1
+       GROUP BY r.thread
+     )
+     SELECT s.thread,s.kind,s.board_project,s.latest_message_id,s.latest_message_at,
+            s.message_count,s.excerpt,COALESCE(attention.unread_count,0),
+            COALESCE(pending.fresh_incoming,0),COALESCE(pending.fresh_outgoing,0),
+            COALESCE(pending.stale_incoming,0),COALESCE(pending.stale_outgoing,0)
+     FROM thread_list_access AS v INDEXED BY thread_list_access_order
+     JOIN thread_summaries s ON s.thread=v.thread
+     LEFT JOIN attention ON attention.thread=s.thread
+     LEFT JOIN pending ON pending.thread=s.thread
+     WHERE v.agent=?1
+     ORDER BY v.latest_message_id DESC,v.thread ASC";
 
 pub fn now() -> i64 {
     SystemTime::now()
@@ -205,7 +232,7 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let mut version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if !(0..=4).contains(&version) {
+        if !(0..=5).contains(&version) {
             return Err(Failure::new(
                 "DATABASE_VERSION",
                 format!("Unsupported database schema {version}"),
@@ -272,6 +299,148 @@ COMMIT;")?;
                  ALTER TABLE agents ADD COLUMN purpose TEXT;
                  ALTER TABLE agents ADD COLUMN purpose_updated_at INTEGER;
                  PRAGMA user_version=4;
+                 COMMIT;",
+            )?;
+        }
+        if version < 5 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE thread_summaries(
+                   thread TEXT PRIMARY KEY,
+                   kind TEXT NOT NULL CHECK(kind IN ('direct','board')),
+                   board_project TEXT,
+                   latest_message_id INTEGER NOT NULL,
+                   latest_message_at INTEGER NOT NULL,
+                   message_count INTEGER NOT NULL,
+                   excerpt TEXT NOT NULL
+                 );
+                 CREATE TABLE thread_conversation_participants(
+                   thread TEXT NOT NULL REFERENCES thread_summaries(thread) ON DELETE CASCADE,
+                   agent TEXT NOT NULL REFERENCES agents(id),
+                   PRIMARY KEY(thread,agent)
+                 );
+                 CREATE TABLE thread_handoff_grants(
+                   thread TEXT NOT NULL REFERENCES thread_summaries(thread) ON DELETE CASCADE,
+                   agent TEXT NOT NULL REFERENCES agents(id),
+                   grant_message INTEGER NOT NULL UNIQUE REFERENCES messages(id),
+                   granted_by TEXT NOT NULL REFERENCES agents(id),
+                   granted_at INTEGER NOT NULL,
+                   PRIMARY KEY(thread,agent,grant_message)
+                 );
+                 CREATE TABLE thread_list_access(
+                   agent TEXT NOT NULL REFERENCES agents(id),
+                   thread TEXT NOT NULL REFERENCES thread_summaries(thread) ON DELETE CASCADE,
+                   latest_message_id INTEGER NOT NULL,
+                   PRIMARY KEY(agent,thread)
+                 );
+                 CREATE INDEX thread_list_access_order ON thread_list_access(agent,latest_message_id DESC,thread ASC);
+                 CREATE TABLE thread_unread(
+                   thread TEXT NOT NULL REFERENCES thread_summaries(thread) ON DELETE CASCADE,
+                   agent TEXT NOT NULL REFERENCES agents(id),
+                   unread_count INTEGER NOT NULL CHECK(unread_count>0),
+                   PRIMARY KEY(thread,agent)
+                 );
+                 CREATE TABLE thread_open_requests(
+                   message INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                   thread TEXT NOT NULL REFERENCES thread_summaries(thread) ON DELETE CASCADE,
+                   agent TEXT NOT NULL REFERENCES agents(id),
+                   counterpart TEXT NOT NULL REFERENCES agents(id),
+                   direction TEXT NOT NULL CHECK(direction IN ('incoming','outgoing')),
+                   created_at INTEGER NOT NULL,
+                   PRIMARY KEY(message,agent)
+                 );
+                 CREATE INDEX thread_open_by_agent ON thread_open_requests(agent,thread,direction,created_at);
+                 CREATE TABLE thread_list_snapshots(
+                   id TEXT PRIMARY KEY,
+                   agent TEXT NOT NULL REFERENCES agents(id),
+                   high_water_id INTEGER NOT NULL,
+                   captured_at INTEGER NOT NULL,
+                   expires_at INTEGER NOT NULL
+                 );
+                 CREATE INDEX thread_list_snapshots_expiry ON thread_list_snapshots(expires_at);
+                 CREATE INDEX thread_list_snapshots_agent ON thread_list_snapshots(agent,captured_at);
+                 CREATE TABLE thread_list_snapshot_rows(
+                   snapshot_id TEXT NOT NULL REFERENCES thread_list_snapshots(id) ON DELETE CASCADE,
+                   latest_message_id INTEGER NOT NULL,
+                   thread TEXT NOT NULL,
+                   row_json TEXT NOT NULL,
+                   PRIMARY KEY(snapshot_id,thread)
+                 );
+                 CREATE INDEX thread_list_rows_order ON thread_list_snapshot_rows(snapshot_id,latest_message_id DESC,thread ASC);
+                 CREATE TABLE thread_list_cursors(
+                   token TEXT PRIMARY KEY,
+                   snapshot_id TEXT NOT NULL REFERENCES thread_list_snapshots(id) ON DELETE CASCADE,
+                   agent TEXT NOT NULL REFERENCES agents(id),
+                   last_message_id INTEGER NOT NULL,
+                   last_thread TEXT NOT NULL,
+                   UNIQUE(snapshot_id,last_message_id,last_thread)
+                 );
+                 CREATE INDEX thread_list_cursors_snapshot ON thread_list_cursors(snapshot_id);
+
+                 WITH bounds AS (
+                   SELECT thread,MIN(id) AS first_id,MAX(id) AS latest_id,COUNT(*) AS message_count
+                   FROM messages GROUP BY thread
+                 )
+                 INSERT INTO thread_summaries(thread,kind,board_project,latest_message_id,latest_message_at,message_count,excerpt)
+                 SELECT b.thread,
+                        CASE WHEN first.project IS NULL THEN 'direct' ELSE 'board' END,
+                        first.project,
+                        b.latest_id,
+                        latest.created_at,
+                        b.message_count,
+                        COALESCE((
+                          SELECT substr(
+                            CASE WHEN instr(text,char(10))>0 THEN substr(text,1,instr(text,char(10))-1) ELSE text END,
+                            1,160
+                          )
+                          FROM (
+                            SELECT json_extract(part.value,'$.text') AS text
+                            FROM json_each(latest.parts) AS part
+                            WHERE json_extract(part.value,'$.type')='text'
+                            LIMIT 1
+                          )
+                        ),'')
+                 FROM bounds b
+                 JOIN messages first ON first.id=b.first_id
+                 JOIN messages latest ON latest.id=b.latest_id;
+
+                 INSERT OR IGNORE INTO thread_conversation_participants(thread,agent)
+                   SELECT thread,sender FROM messages WHERE kind!='handoff';
+                 INSERT OR IGNORE INTO thread_conversation_participants(thread,agent)
+                   SELECT thread,recipient FROM messages WHERE kind!='handoff' AND recipient IS NOT NULL;
+                 INSERT OR IGNORE INTO thread_handoff_grants(thread,agent,grant_message,granted_by,granted_at)
+                   SELECT thread,recipient,id,sender,created_at FROM messages
+                   WHERE kind='handoff' AND recipient IS NOT NULL;
+                 INSERT INTO thread_list_access(agent,thread,latest_message_id)
+                   SELECT roles.agent,roles.thread,s.latest_message_id
+                   FROM (
+                     SELECT agent,thread FROM thread_conversation_participants
+                     UNION
+                     SELECT agent,thread FROM thread_handoff_grants
+                   ) roles
+                   JOIN thread_summaries s ON s.thread=roles.thread;
+                 INSERT INTO thread_unread(thread,agent,unread_count)
+                   SELECT thread,agent,COUNT(*) FROM (
+                     SELECT thread,recipient AS agent FROM messages
+                     WHERE recipient IS NOT NULL AND received_at IS NULL
+                     UNION ALL
+                     SELECT m.thread,d.agent FROM board_deliveries d
+                     JOIN messages m ON m.id=d.message
+                     WHERE d.received_at IS NULL
+                   ) unread GROUP BY thread,agent;
+                 INSERT INTO thread_open_requests(message,thread,agent,counterpart,direction,created_at)
+                   SELECT m.id,m.thread,m.sender,m.recipient,'outgoing',m.created_at
+                   FROM messages m
+                   WHERE m.expects_reply=1 AND m.recipient IS NOT NULL
+                     AND m.answered_by IS NULL AND m.cancelled=0
+                     AND NOT EXISTS(SELECT 1 FROM messages s WHERE s.supersedes=m.id);
+                 INSERT INTO thread_open_requests(message,thread,agent,counterpart,direction,created_at)
+                   SELECT m.id,m.thread,m.recipient,m.sender,'incoming',m.created_at
+                   FROM messages m
+                   WHERE m.expects_reply=1 AND m.recipient IS NOT NULL
+                     AND m.answered_by IS NULL AND m.cancelled=0
+                     AND NOT EXISTS(SELECT 1 FROM messages s WHERE s.supersedes=m.id);
+                 PRAGMA user_version=5;
                  COMMIT;",
             )?;
         }
@@ -560,19 +729,7 @@ COMMIT;")?;
                 )?;
                 if !peek {
                     for msg in &mut page.messages {
-                        // Direct mail is acknowledged on the message; a board
-                        // reply only on this agent's delivery.
-                        if msg.recipient.as_deref() == Some(id) {
-                            tx.execute(
-                                "UPDATE messages SET received_at=? WHERE id=?",
-                                params![now(), msg.id],
-                            )?;
-                        } else {
-                            tx.execute(
-                                "UPDATE board_deliveries SET received_at=? WHERE message=? AND agent=?",
-                                params![now(), msg.id, id],
-                            )?;
-                        }
+                        acknowledge_delivery(&tx, msg.id, &msg.thread_id, id)?;
                         msg.received_at = Some(now());
                         msg.delivery = delivery(msg);
                     }
@@ -613,6 +770,9 @@ COMMIT;")?;
                     return Err(thread_not_visible());
                 }
                 json!(page(&tx, "thread=?", [thread], *after, *limit)?)
+            }
+            Operation::ListThreads { cursor, limit } => {
+                list_threads(&tx, require()?, cursor.as_deref(), *limit)?
             }
             Operation::Search {
                 query,
@@ -673,6 +833,7 @@ COMMIT;")?;
                     return Err(invalid("Request is already answered"));
                 }
                 tx.execute("UPDATE messages SET cancelled=1 WHERE id=?", [id])?;
+                tx.execute("DELETE FROM thread_open_requests WHERE message=?", [id])?;
                 json!({"message":message(&tx,*id)?})
             }
             Operation::MessageStatus { message: id } => {
@@ -833,6 +994,303 @@ fn bounds(limit: usize) -> Result<()> {
     }
     Ok(())
 }
+
+fn list_threads(
+    tx: &Transaction<'_>,
+    agent_id: &str,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<Value> {
+    bounds(limit)?;
+    let at = now();
+    if let Some(cursor) = cursor {
+        let snapshot = tx
+            .query_row(
+                "SELECT c.snapshot_id,c.last_message_id,c.last_thread,s.high_water_id
+                 FROM thread_list_cursors c
+                 JOIN thread_list_snapshots s ON s.id=c.snapshot_id
+                 WHERE c.token=?1 AND c.agent=?2 AND s.agent=?2 AND s.expires_at>?3",
+                params![cursor, agent_id, at],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(invalid_cursor)?;
+        let mut rows = tx
+            .prepare(
+                "SELECT latest_message_id,thread,row_json
+                 FROM thread_list_snapshot_rows
+                 WHERE snapshot_id=?1
+                   AND (latest_message_id < ?2 OR (latest_message_id=?2 AND thread>?3))
+                 ORDER BY latest_message_id DESC,thread ASC
+                 LIMIT ?4",
+            )?
+            .query_map(
+                params![snapshot.0, snapshot.1, snapshot.2, limit + 1],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        let next_cursor = if has_more {
+            rows.last()
+                .map(|row| thread_list_cursor(tx, &snapshot.0, agent_id, row.0, &row.1))
+                .transpose()?
+        } else {
+            None
+        };
+        let threads = rows
+            .into_iter()
+            .map(|(_, _, value)| decode::<Value>(&value))
+            .collect::<Result<Vec<_>>>()?;
+        return Ok(json!({
+            "threads": threads,
+            "snapshot_high_water_id": snapshot.3,
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+        }));
+    }
+
+    let high_water_id: i64 =
+        tx.query_row("SELECT COALESCE(MAX(id),0) FROM messages", [], |row| {
+            row.get(0)
+        })?;
+    let rows = thread_list_rows(tx, agent_id, at)?;
+    let has_more = rows.len() > limit;
+    let page = &rows[..rows.len().min(limit)];
+    let next_cursor = if has_more {
+        let snapshot_id = format!("tls_{}", Uuid::new_v4().simple());
+        prune_thread_list_snapshots(tx, agent_id, at)?;
+        tx.execute(
+            "INSERT INTO thread_list_snapshots(id,agent,high_water_id,captured_at,expires_at)
+             VALUES(?1,?2,?3,?4,?5)",
+            params![
+                snapshot_id,
+                agent_id,
+                high_water_id,
+                at,
+                at + THREAD_LIST_SNAPSHOT_TTL
+            ],
+        )?;
+        for (latest_message_id, thread, row) in &rows {
+            tx.execute(
+                "INSERT INTO thread_list_snapshot_rows(snapshot_id,latest_message_id,thread,row_json)
+                 VALUES(?1,?2,?3,?4)",
+                params![snapshot_id, latest_message_id, thread, encode(row)?],
+            )?;
+        }
+        let last = page.last().expect("has_more requires a nonempty page");
+        Some(thread_list_cursor(
+            tx,
+            &snapshot_id,
+            agent_id,
+            last.0,
+            &last.1,
+        )?)
+    } else {
+        None
+    };
+    Ok(json!({
+        "threads": page.iter().map(|row| &row.2).collect::<Vec<_>>(),
+        "snapshot_high_water_id": high_water_id,
+        "has_more": has_more,
+        "next_cursor": next_cursor,
+    }))
+}
+
+fn thread_list_rows(
+    tx: &Transaction<'_>,
+    agent_id: &str,
+    captured_at: i64,
+) -> Result<Vec<(i64, String, Value)>> {
+    let summaries = tx
+        .prepare(THREAD_LIST_SUMMARY_QUERY)?
+        .query_map(params![agent_id, captured_at - STALE_AFTER as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
+                row.get::<_, i64>(11)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut rows = Vec::with_capacity(summaries.len());
+    let (mut participants_by_thread, mut handoff_only_by_thread) =
+        thread_list_people(tx, agent_id)?;
+    for (
+        thread,
+        kind,
+        project,
+        latest_message_id,
+        latest_message_at,
+        message_count,
+        excerpt,
+        unread,
+        pending_incoming,
+        pending_outgoing,
+        stale_pending_incoming,
+        stale_pending_outgoing,
+    ) in summaries
+    {
+        let participants = participants_by_thread.remove(&thread).unwrap_or_default();
+        let handoff_only_recipients = handoff_only_by_thread.remove(&thread).unwrap_or_default();
+        let row = json!({
+            "thread": thread,
+            "kind": kind,
+            "project": project,
+            "participants": participants,
+            "handoff_only_recipients": handoff_only_recipients,
+            "last_message_id": latest_message_id,
+            "last_message_at": latest_message_at,
+            "message_count": message_count,
+            "unread": unread,
+            "pending_incoming": pending_incoming,
+            "pending_outgoing": pending_outgoing,
+            "stale_pending_incoming": stale_pending_incoming,
+            "stale_pending_outgoing": stale_pending_outgoing,
+            "excerpt": excerpt,
+        });
+        rows.push((latest_message_id, thread, row));
+    }
+    Ok(rows)
+}
+
+type ThreadPeopleByThread = HashMap<String, Vec<Value>>;
+
+fn thread_list_people(
+    tx: &Transaction<'_>,
+    agent_id: &str,
+) -> Result<(ThreadPeopleByThread, ThreadPeopleByThread)> {
+    let mut participants = ThreadPeopleByThread::new();
+    let mut statement = tx.prepare(
+        "SELECT p.thread,p.agent,a.name
+         FROM thread_list_access AS v INDEXED BY thread_list_access_order
+         JOIN thread_conversation_participants p ON p.thread=v.thread
+         JOIN agents a ON a.id=p.agent
+         WHERE v.agent=?1
+         ORDER BY p.thread,p.agent",
+    )?;
+    let rows = statement
+        .query_map([agent_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                json!({"id": row.get::<_, String>(1)?, "name": row.get::<_, String>(2)?}),
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (thread, person) in rows {
+        participants.entry(thread).or_default().push(person);
+    }
+
+    let mut handoff_only = ThreadPeopleByThread::new();
+    let mut statement = tx.prepare(
+        "SELECT g.thread,g.agent,a.name
+         FROM thread_list_access AS v INDEXED BY thread_list_access_order
+         JOIN thread_handoff_grants g ON g.thread=v.thread
+         JOIN agents a ON a.id=g.agent
+         WHERE v.agent=?1
+           AND NOT EXISTS(
+           SELECT 1 FROM thread_conversation_participants p
+           WHERE p.thread=g.thread AND p.agent=g.agent
+         )
+         GROUP BY g.thread,g.agent
+         ORDER BY g.thread,g.agent",
+    )?;
+    let rows = statement
+        .query_map([agent_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                json!({"id": row.get::<_, String>(1)?, "name": row.get::<_, String>(2)?}),
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (thread, person) in rows {
+        handoff_only.entry(thread).or_default().push(person);
+    }
+    Ok((participants, handoff_only))
+}
+
+fn prune_thread_list_snapshots(tx: &Transaction<'_>, agent_id: &str, at: i64) -> Result<()> {
+    tx.execute(
+        "DELETE FROM thread_list_snapshots WHERE expires_at<=?",
+        [at],
+    )?;
+    let count: usize = tx.query_row(
+        "SELECT COUNT(*) FROM thread_list_snapshots WHERE agent=?",
+        [agent_id],
+        |row| row.get(0),
+    )?;
+    if count >= THREAD_LIST_SNAPSHOT_LIMIT {
+        let remove = count - THREAD_LIST_SNAPSHOT_LIMIT + 1;
+        let oldest = tx
+            .prepare(
+                "SELECT id FROM thread_list_snapshots WHERE agent=?
+                 ORDER BY rowid ASC LIMIT ?",
+            )?
+            .query_map(params![agent_id, remove], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for id in oldest {
+            tx.execute("DELETE FROM thread_list_snapshots WHERE id=?", [id])?;
+        }
+    }
+    Ok(())
+}
+
+fn thread_list_cursor(
+    tx: &Transaction<'_>,
+    snapshot_id: &str,
+    agent_id: &str,
+    last_message_id: i64,
+    last_thread: &str,
+) -> Result<String> {
+    let existing = tx
+        .query_row(
+            "SELECT token FROM thread_list_cursors
+             WHERE snapshot_id=?1 AND last_message_id=?2 AND last_thread=?3",
+            params![snapshot_id, last_message_id, last_thread],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        return Ok(existing);
+    }
+    let token = format!("v1_{}", Uuid::new_v4().simple());
+    tx.execute(
+        "INSERT INTO thread_list_cursors(token,snapshot_id,agent,last_message_id,last_thread)
+         VALUES(?1,?2,?3,?4,?5)",
+        params![token, snapshot_id, agent_id, last_message_id, last_thread],
+    )?;
+    Ok(token)
+}
+
+fn invalid_cursor() -> Failure {
+    Failure::new(
+        "INVALID_CURSOR",
+        "History list cursor is invalid or expired",
+        "Start a new thread listing with tala history.",
+    )
+}
+
 fn agent(tx: &Transaction<'_>, id: &str) -> Result<Agent> {
     let row = tx.query_row(
         "SELECT name,tool,purpose,purpose_updated_at,context,last_seen,active,listening_until FROM agents WHERE id=?",
@@ -1017,6 +1475,164 @@ fn send_result(tx: &Transaction<'_>, message_id: u64, duplicate: bool) -> Result
     }
     Ok(result)
 }
+
+fn thread_excerpt(parts: &[Part]) -> String {
+    let Some(text) = parts.iter().find_map(|part| match part {
+        Part::Text { text } => Some(text.as_str()),
+        Part::File { .. } | Part::Data { .. } => None,
+    }) else {
+        return String::new();
+    };
+    text.lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(160)
+        .collect()
+}
+
+fn update_thread_summary(
+    tx: &Transaction<'_>,
+    thread: &str,
+    message_id: u64,
+    created_at: i64,
+    project: Option<&str>,
+    parts: &[Part],
+) -> Result<()> {
+    let excerpt = thread_excerpt(parts);
+    tx.execute(
+        "INSERT INTO thread_summaries(thread,kind,board_project,latest_message_id,latest_message_at,message_count,excerpt)
+         VALUES(?1,?2,?3,?4,?5,1,?6)
+         ON CONFLICT(thread) DO UPDATE SET
+           latest_message_id=excluded.latest_message_id,
+           latest_message_at=excluded.latest_message_at,
+           message_count=thread_summaries.message_count+1,
+           excerpt=excluded.excerpt",
+        params![
+            thread,
+            if project.is_some() { "board" } else { "direct" },
+            project,
+            message_id,
+            created_at,
+            excerpt
+        ],
+    )?;
+    tx.execute(
+        "UPDATE thread_list_access SET latest_message_id=? WHERE thread=?",
+        params![message_id, thread],
+    )?;
+    Ok(())
+}
+
+fn add_thread_list_access(
+    tx: &Transaction<'_>,
+    thread: &str,
+    agent: &str,
+    latest_message_id: u64,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO thread_list_access(agent,thread,latest_message_id) VALUES(?,?,?)
+         ON CONFLICT(agent,thread) DO UPDATE SET latest_message_id=excluded.latest_message_id",
+        params![agent, thread, latest_message_id],
+    )?;
+    Ok(())
+}
+
+fn add_thread_unread(tx: &Transaction<'_>, thread: &str, agent: &str) -> Result<()> {
+    tx.execute(
+        "INSERT INTO thread_unread(thread,agent,unread_count) VALUES(?,?,1)
+         ON CONFLICT(thread,agent) DO UPDATE SET unread_count=thread_unread.unread_count+1",
+        params![thread, agent],
+    )?;
+    Ok(())
+}
+
+fn remove_thread_unread(tx: &Transaction<'_>, thread: &str, agent: &str) -> Result<()> {
+    let count: Option<u64> = tx
+        .query_row(
+            "SELECT unread_count FROM thread_unread WHERE thread=? AND agent=?",
+            params![thread, agent],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match count {
+        Some(1) => {
+            tx.execute(
+                "DELETE FROM thread_unread WHERE thread=? AND agent=?",
+                params![thread, agent],
+            )?;
+        }
+        Some(count) if count > 1 => {
+            tx.execute(
+                "UPDATE thread_unread SET unread_count=unread_count-1 WHERE thread=? AND agent=?",
+                params![thread, agent],
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn acknowledge_delivery(
+    tx: &Transaction<'_>,
+    message_id: u64,
+    thread: &str,
+    agent: &str,
+) -> Result<()> {
+    let direct_received = tx
+        .query_row(
+            "SELECT received_at FROM messages WHERE id=? AND recipient=?",
+            params![message_id, agent],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?;
+    if matches!(direct_received, Some(None)) {
+        let changed = tx.execute(
+            "UPDATE messages SET received_at=? WHERE id=? AND recipient=? AND received_at IS NULL",
+            params![now(), message_id, agent],
+        )?;
+        if changed > 0 {
+            remove_thread_unread(tx, thread, agent)?;
+        }
+        return Ok(());
+    }
+    if direct_received.is_some() {
+        return Ok(());
+    }
+    let board_received = tx
+        .query_row(
+            "SELECT received_at FROM board_deliveries WHERE message=? AND agent=?",
+            params![message_id, agent],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?;
+    if matches!(board_received, Some(None)) {
+        let changed = tx.execute(
+            "UPDATE board_deliveries SET received_at=? WHERE message=? AND agent=? AND received_at IS NULL",
+            params![now(), message_id, agent],
+        )?;
+        if changed > 0 {
+            remove_thread_unread(tx, thread, agent)?;
+        }
+    }
+    Ok(())
+}
+
+fn add_open_request(
+    tx: &Transaction<'_>,
+    message_id: u64,
+    thread: &str,
+    sender: &str,
+    recipient: &str,
+    created_at: i64,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO thread_open_requests(message,thread,agent,counterpart,direction,created_at)
+         VALUES(?1,?2,?3,?4,'outgoing',?5),(?1,?2,?4,?3,'incoming',?5)",
+        params![message_id, thread, sender, recipient, created_at],
+    )?;
+    Ok(())
+}
 fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Value> {
     let Operation::Send {
         to,
@@ -1195,6 +1811,7 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
         .transpose()?;
     tx.execute("INSERT INTO messages(thread,sender,recipient,project,context,parts,kind,reply_to,expects_reply,created_at,key,canonical,recipient_listening,supersedes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",params![thread_id,sender,recipient,board,encode(context)?,encode(parts)?,kind,reply_to,request,created_at,stored_key,canonical,recipient_listening,supersedes])?;
     let id = tx.last_insert_rowid() as u64;
+    update_thread_summary(tx, &thread_id, id, created_at, board.as_deref(), parts)?;
     tx.execute(
         "UPDATE projects SET last_activity=? WHERE project=?",
         params![created_at, context.project],
@@ -1220,10 +1837,43 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
         "INSERT OR IGNORE INTO participants(thread,agent) VALUES(?,?)",
         params![thread_id, sender],
     )?;
+    if kind == "handoff" {
+        if let Some(recipient_id) = recipient.as_deref() {
+            tx.execute(
+                "INSERT INTO thread_handoff_grants(thread,agent,grant_message,granted_by,granted_at)
+                 VALUES(?,?,?,?,?)",
+                params![thread_id, recipient_id, id, sender, created_at],
+            )?;
+            add_thread_list_access(tx, &thread_id, recipient_id, id)?;
+        }
+    } else {
+        tx.execute(
+            "INSERT OR IGNORE INTO thread_conversation_participants(thread,agent) VALUES(?,?)",
+            params![thread_id, sender],
+        )?;
+        add_thread_list_access(tx, &thread_id, sender, id)?;
+    }
     if let Some(recipient) = recipient {
         tx.execute(
             "INSERT OR IGNORE INTO participants(thread,agent) VALUES(?,?)",
             params![thread_id, recipient],
+        )?;
+        if kind != "handoff" {
+            tx.execute(
+                "INSERT OR IGNORE INTO thread_conversation_participants(thread,agent) VALUES(?,?)",
+                params![thread_id, recipient],
+            )?;
+            add_thread_list_access(tx, &thread_id, &recipient, id)?;
+        }
+        add_thread_unread(tx, &thread_id, &recipient)?;
+        if *request {
+            add_open_request(tx, id, &thread_id, sender, &recipient, created_at)?;
+        }
+    }
+    if let Some(superseded_message) = supersedes {
+        tx.execute(
+            "DELETE FROM thread_open_requests WHERE message=?",
+            [superseded_message],
         )?;
     }
     if let Some(author) = notify {
@@ -1231,18 +1881,22 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
             "INSERT INTO board_deliveries(message,agent) VALUES(?,?)",
             params![id, author],
         )?;
+        add_thread_unread(tx, &thread_id, &author)?;
     }
     if let Some(parent) = reply_to {
         // Replying counts as receipt, for direct mail and board deliveries.
-        tx.execute(
-            "UPDATE messages SET received_at=COALESCE(received_at,?) WHERE id=? AND recipient=?",
-            params![now(), parent, sender],
+        let parent_thread: String =
+            tx.query_row("SELECT thread FROM messages WHERE id=?", [parent], |row| {
+                row.get(0)
+            })?;
+        acknowledge_delivery(tx, *parent, &parent_thread, sender)?;
+        let answered = tx.execute(
+            "UPDATE messages SET answered_by=? WHERE id=? AND expects_reply=1 AND cancelled=0 AND answered_by IS NULL",
+            params![id,parent],
         )?;
-        tx.execute(
-            "UPDATE board_deliveries SET received_at=COALESCE(received_at,?) WHERE message=? AND agent=?",
-            params![now(), parent, sender],
-        )?;
-        tx.execute("UPDATE messages SET answered_by=? WHERE id=? AND expects_reply=1 AND cancelled=0 AND answered_by IS NULL",params![id,parent])?;
+        if answered > 0 {
+            tx.execute("DELETE FROM thread_open_requests WHERE message=?", [parent])?;
+        }
     }
     send_result(tx, id, false)
 }
@@ -2841,7 +3495,7 @@ mod tests {
                 .db
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            4
+            5
         );
         assert_eq!(
             store
@@ -2890,7 +3544,7 @@ mod tests {
                 .db
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            4
+            5
         );
         assert_eq!(
             store
@@ -2945,7 +3599,7 @@ mod tests {
                 .db
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            4
+            5
         );
         assert_eq!(
             store
@@ -2994,6 +3648,293 @@ mod tests {
     }
 
     #[test]
+    fn migration_v4_backfills_thread_summaries_roles_and_attention() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("db");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE agents(id TEXT PRIMARY KEY,name TEXT NOT NULL,tool TEXT NOT NULL,context TEXT NOT NULL,token TEXT NOT NULL,last_seen INTEGER NOT NULL,active INTEGER NOT NULL DEFAULT 1,listening_until INTEGER NOT NULL DEFAULT 0,purpose TEXT,purpose_updated_at INTEGER);
+             CREATE TABLE messages(id INTEGER PRIMARY KEY AUTOINCREMENT,thread TEXT NOT NULL,sender TEXT NOT NULL REFERENCES agents(id),recipient TEXT REFERENCES agents(id),project TEXT,context TEXT NOT NULL,parts TEXT NOT NULL,kind TEXT NOT NULL,reply_to INTEGER REFERENCES messages(id),expects_reply INTEGER NOT NULL,created_at INTEGER NOT NULL,received_at INTEGER,answered_by INTEGER REFERENCES messages(id),cancelled INTEGER NOT NULL DEFAULT 0,key TEXT NOT NULL,canonical TEXT NOT NULL,recipient_listening INTEGER,supersedes INTEGER REFERENCES messages(id),UNIQUE(sender,key));
+             CREATE TABLE projects(project TEXT PRIMARY KEY,owner_agent TEXT NOT NULL REFERENCES agents(id),closed INTEGER NOT NULL DEFAULT 0,last_activity INTEGER NOT NULL);
+             CREATE TABLE rpc_results(request_id TEXT PRIMARY KEY,canonical TEXT NOT NULL,response TEXT NOT NULL);
+             CREATE TABLE participants(thread TEXT NOT NULL,agent TEXT NOT NULL REFERENCES agents(id),PRIMARY KEY(thread,agent));
+             CREATE TABLE board_deliveries(message INTEGER NOT NULL REFERENCES messages(id),agent TEXT NOT NULL REFERENCES agents(id),received_at INTEGER,PRIMARY KEY(message,agent));
+             PRAGMA user_version=4;",
+        )
+        .unwrap();
+        for (id, name, token) in [
+            ("agt_a", "author", "token-a"),
+            ("agt_b", "recipient", "token-b"),
+            ("agt_c", "handoff-only", "token-c"),
+        ] {
+            db.execute(
+                "INSERT INTO agents(id,name,tool,context,token,last_seen) VALUES(?,?, 'test', '{\"project\":\"proj\"}', ?,100)",
+                params![id, name, token],
+            )
+            .unwrap();
+        }
+        let parts = |text: &str| json!([{"type":"text","text":text}]).to_string();
+        db.execute(
+            "INSERT INTO messages(id,thread,sender,recipient,project,context,parts,kind,expects_reply,created_at,key,canonical)
+             VALUES(1,'thr_direct','agt_a','agt_b',NULL,'{}',?,'message',1,100,'k1','c1')",
+            [parts("direct request")],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO messages(id,thread,sender,recipient,project,context,parts,kind,expects_reply,created_at,key,canonical)
+             VALUES(2,'thr_direct','agt_a','agt_c',NULL,'{}',?,'handoff',1,101,'k2','c2')",
+            [parts("handoff summary")],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO messages(id,thread,sender,project,context,parts,kind,expects_reply,created_at,key,canonical)
+             VALUES(3,'thr_board','agt_a','proj','{}',?,'post',0,102,'k3','c3')",
+            [parts("board post")],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO messages(id,thread,sender,project,context,parts,kind,reply_to,expects_reply,created_at,key,canonical)
+             VALUES(4,'thr_board','agt_b','proj','{}',?,'reply',3,0,103,'k4','c4')",
+            [parts("board reply")],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO board_deliveries(message,agent) VALUES(4,'agt_a')",
+            [],
+        )
+        .unwrap();
+        drop(db);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store
+                .db
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
+        let direct: (String, Option<String>, u64, u64, String) = store
+            .db
+            .query_row(
+                "SELECT kind,board_project,latest_message_id,message_count,excerpt FROM thread_summaries WHERE thread='thr_direct'",
+                [],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            direct,
+            ("direct".into(), None, 2, 2, "handoff summary".into())
+        );
+        let handoff_access: u64 = store
+            .db
+            .query_row(
+                "SELECT latest_message_id FROM thread_list_access WHERE agent='agt_c' AND thread='thr_direct'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(handoff_access, 2);
+        let board_replier_access: u64 = store
+            .db
+            .query_row(
+                "SELECT latest_message_id FROM thread_list_access WHERE agent='agt_b' AND thread='thr_board'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(board_replier_access, 4);
+        let board: (String, String, u64, u64) = store
+            .db
+            .query_row(
+                "SELECT kind,board_project,latest_message_id,message_count FROM thread_summaries WHERE thread='thr_board'",
+                [],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(board, ("board".into(), "proj".into(), 4, 2));
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT group_concat(agent,',') FROM (SELECT agent FROM thread_conversation_participants WHERE thread='thr_direct' ORDER BY agent)",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "agt_a,agt_b"
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT agent FROM thread_handoff_grants WHERE thread='thr_direct'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "agt_c"
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT COUNT(*) FROM thread_open_requests", [], |row| row
+                    .get::<_, u64>(
+                    0
+                ))
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT unread_count FROM thread_unread WHERE thread='thr_direct' AND agent='agt_b'",
+                    [],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT unread_count FROM thread_unread WHERE thread='thr_board' AND agent='agt_a'",
+                    [],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT received_at FROM board_deliveries WHERE message=4 AND agent='agt_a'",
+                    [],
+                    |row| row.get::<_, Option<i64>>(0)
+                )
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn thread_list_large_history_uses_indexed_summaries_and_keyset_page() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        for (id, name, token) in [
+            ("agt_list", "list-agent", "list-token"),
+            ("agt_peer", "peer", "peer-token"),
+        ] {
+            store
+                .db
+                .execute(
+                    "INSERT INTO agents(id,name,tool,context,token,last_seen) VALUES(?,?,'test','{\"project\":\"/test/project\",\"branch\":null,\"revision\":null}',?,?)",
+                    params![id,name,token,now()],
+                )
+                .unwrap();
+        }
+        store
+            .db
+            .execute_batch(
+                "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1200)
+                 INSERT INTO messages(id,thread,sender,recipient,project,context,parts,kind,expects_reply,created_at,key,canonical)
+                 SELECT x,printf('thr_%04d',x),'agt_list','agt_peer',NULL,'{}','[{\"type\":\"text\",\"text\":\"history item\"}]','message',0,x,'k'||x,'c'||x FROM n;
+                 WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1200)
+                 INSERT INTO thread_summaries(thread,kind,board_project,latest_message_id,latest_message_at,message_count,excerpt)
+                 SELECT printf('thr_%04d',x),'direct',NULL,x,x,1,'history item' FROM n;
+                 INSERT INTO thread_conversation_participants(thread,agent)
+                 SELECT thread,'agt_list' FROM thread_summaries;
+                 INSERT INTO thread_conversation_participants(thread,agent)
+                 SELECT thread,'agt_peer' FROM thread_summaries;
+                 INSERT INTO participants(thread,agent)
+                 SELECT thread,'agt_list' FROM thread_summaries;
+                 INSERT INTO participants(thread,agent)
+                 SELECT thread,'agt_peer' FROM thread_summaries;
+                 INSERT INTO thread_list_access(agent,thread,latest_message_id)
+                 SELECT p.agent,p.thread,s.latest_message_id
+                 FROM thread_conversation_participants p
+                 JOIN thread_summaries s ON s.thread=p.thread;",
+            )
+            .unwrap();
+
+        let plan = store
+            .db
+            .prepare(&format!("EXPLAIN QUERY PLAN {THREAD_LIST_SUMMARY_QUERY}"))
+            .unwrap()
+            .query_map(params!["agt_list", now() - STALE_AFTER as i64], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(plan.contains("thread_list_access_order"), "{plan}");
+        assert!(plan.contains("thread_open_by_agent"), "{plan}");
+        assert!(!plan.contains("SCAN messages"), "{plan}");
+        assert!(!plan.contains("USE TEMP B-TREE FOR ORDER BY"), "{plan}");
+
+        let data = store
+            .execute(&rpc(
+                Operation::ListThreads {
+                    cursor: None,
+                    limit: 50,
+                },
+                Some(Credential {
+                    agent: "agt_list".into(),
+                    token: "list-token".into(),
+                }),
+            ))
+            .unwrap();
+        assert_eq!(data["threads"].as_array().unwrap().len(), 50);
+        assert_eq!(data["threads"][0]["last_message_id"], 1200);
+        assert_eq!(data["snapshot_high_water_id"], 1200);
+        assert_eq!(data["has_more"], true);
+        let cursor = data["next_cursor"].as_str().unwrap();
+        let second = store
+            .execute(&rpc(
+                Operation::ListThreads {
+                    cursor: Some(cursor.into()),
+                    limit: 50,
+                },
+                Some(Credential {
+                    agent: "agt_list".into(),
+                    token: "list-token".into(),
+                }),
+            ))
+            .unwrap();
+        assert_eq!(second["threads"].as_array().unwrap().len(), 50);
+        assert_eq!(second["threads"][0]["last_message_id"], 1150);
+        assert_eq!(second["snapshot_high_water_id"], 1200);
+
+        for n in 0..100 {
+            store
+                .execute(&rpc(
+                    Operation::Send {
+                        to: Some("agt_peer".into()),
+                        project: None,
+                        thread: Some("thr_1200".into()),
+                        reply_to: None,
+                        parts: vec![Part::Text {
+                            text: format!("reply {n}"),
+                        }],
+                        request: false,
+                        kind: "message".into(),
+                        key: format!("list-benchmark-{n}"),
+                        context: context(),
+                        supersedes: None,
+                    },
+                    Some(Credential {
+                        agent: "agt_list".into(),
+                        token: "list-token".into(),
+                    }),
+                ))
+                .unwrap();
+        }
+    }
+
+    #[test]
     fn fresh_database_runs_all_migrations_once() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().join("db")).unwrap();
@@ -3002,7 +3943,7 @@ mod tests {
                 .db
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            4
+            5
         );
         for column in ["purpose", "purpose_updated_at"] {
             assert_eq!(

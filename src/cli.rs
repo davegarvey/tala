@@ -262,11 +262,20 @@ pub enum Commands {
         #[command(flatten)]
         page: PageArgs,
     },
-    /// Read a visible thread without acknowledging inbox messages
+    /// List recent visible threads or read one visible thread without acknowledging inbox messages
     History {
-        thread: String,
-        #[command(flatten)]
-        page: PageArgs,
+        thread: Option<String>,
+        #[arg(
+            long,
+            requires = "thread",
+            conflicts_with = "cursor",
+            value_name = "MESSAGE_ID"
+        )]
+        after: Option<u64>,
+        #[arg(long, conflicts_with = "thread", value_name = "CURSOR")]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 50, value_parser = limit)]
+        limit: usize,
     },
     /// Search visible direct messages and a project board
     Search {
@@ -1711,16 +1720,22 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             )
             .await?
         }
-        Commands::History { thread, page } => {
-            client::call(
+        Commands::History {
+            thread,
+            after,
+            cursor,
+            limit,
+        } => {
+            let operation = if let Some(thread) = thread {
                 Operation::History {
                     thread,
-                    after: page.after,
-                    limit: page.limit,
-                },
-                Some(client::credential(selected)?),
-            )
-            .await?
+                    after: after.unwrap_or(0),
+                    limit,
+                }
+            } else {
+                Operation::ListThreads { cursor, limit }
+            };
+            client::call(operation, Some(client::credential(selected)?)).await?
         }
         Commands::Search {
             query,
@@ -1857,6 +1872,8 @@ pub fn render(data: &Value, attention: Option<&Value>) {
         render_wait(data);
     } else if data["incoming_requests"].is_array() {
         render_summary(data);
+    } else if let Some(threads) = data["threads"].as_array() {
+        render_thread_list(data, threads);
     } else if let Some(messages) = data["messages"].as_array() {
         if messages.is_empty() {
             println!("No messages.");
@@ -2032,6 +2049,67 @@ pub fn render(data: &Value, attention: Option<&Value>) {
             },
             a["next"].as_str().unwrap_or("")
         );
+    }
+}
+
+fn render_thread_list(data: &Value, threads: &[Value]) {
+    if threads.is_empty() {
+        println!("No visible threads.");
+    } else {
+        println!("THREAD | LAST ID | MESSAGES | UNREAD | PENDING IN/OUT | STALE IN/OUT | KIND | PROJECT | PARTICIPANTS | HANDOFF ONLY | EXCERPT");
+        for thread in threads {
+            let people = |field: &str| {
+                thread[field]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|person| {
+                        format!(
+                            "{} ({})",
+                            person["name"].as_str().unwrap_or(""),
+                            person["id"].as_str().unwrap_or("")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let cells = [
+                thread["thread"].as_str().unwrap_or("").to_string(),
+                thread["last_message_id"].to_string(),
+                thread["message_count"].to_string(),
+                thread["unread"].to_string(),
+                format!(
+                    "{}/{}",
+                    thread["pending_incoming"], thread["pending_outgoing"]
+                ),
+                format!(
+                    "{}/{}",
+                    thread["stale_pending_incoming"], thread["stale_pending_outgoing"]
+                ),
+                thread["kind"].as_str().unwrap_or("").to_string(),
+                thread["project"].as_str().unwrap_or("").to_string(),
+                people("participants"),
+                people("handoff_only_recipients"),
+                thread["excerpt"].as_str().unwrap_or("").to_string(),
+            ];
+            println!(
+                "{}",
+                cells
+                    .iter()
+                    .map(|cell| escape_status_text(cell).replace('|', "\\|"))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            );
+        }
+    }
+    println!(
+        "Snapshot high-water message ID: {}",
+        data["snapshot_high_water_id"]
+    );
+    if data["has_more"] == true {
+        if let Some(cursor) = data["next_cursor"].as_str() {
+            println!("More threads: tala history --cursor={cursor}");
+        }
     }
 }
 fn escape_status_text(value: &str) -> String {
