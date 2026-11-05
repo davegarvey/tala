@@ -862,6 +862,256 @@ fn inbox_wait_wakes_and_infinite_wait_can_be_interrupted() {
     waiter.kill().unwrap();
     waiter.wait().unwrap();
 }
+
+#[test]
+fn unified_wait_reports_direct_messages_and_replies_without_consuming_them() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    let request = h.ok(
+        &h.a,
+        Some(&a),
+        &["send", "--to", &b.id, "--request", "question"],
+    );
+    h.ok(&h.a, Some(&b), &["reply", &id(&request), "answer"]);
+    h.ok(&h.a, Some(&b), &["send", "--to", &a.id, "additional note"]);
+    h.ok(&h.a, Some(&b), &["post", "parallel board update"]);
+
+    let waiting = h.ok(&h.a, Some(&a), &["wait", "--board-after=0", "--timeout=2"]);
+    let events = waiting["events"].as_array().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0]["type"], "direct_reply");
+    assert_eq!(events[1]["type"], "direct_message");
+    assert_eq!(events[2]["type"], "board_post");
+    assert!(!waiting.to_string().contains("answer"));
+    assert!(waiting["next"]["inbox"]
+        .as_str()
+        .unwrap()
+        .contains("inbox --peek"));
+    assert!(waiting["next"]["listen_again"]
+        .as_str()
+        .unwrap()
+        .contains("--inbox-after="));
+    assert_eq!(
+        h.ok(&h.a, Some(&a), &["inbox", "--peek"])["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    h.ok(&h.a, Some(&a), &["inbox"]);
+
+    let mut waiter = h
+        .command(&h.a, Some(&a), &["wait"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(waiter.try_wait().unwrap().is_none());
+    h.ok(
+        &h.a,
+        Some(&b),
+        &["send", "--to", &a.id, "wake the background wait"],
+    );
+    let output = waiter.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["data"]["events"][0]["type"], "direct_message");
+}
+
+#[test]
+fn unified_wait_deduplicates_board_replies_and_reports_both_sources() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    let post = h.ok(&h.a, Some(&a), &["post", "plan"]);
+    let post_id = id(&post);
+    let reply = h.ok(&h.a, Some(&b), &["reply", &post_id, "reviewed"]);
+    let reply_id = id(&reply);
+
+    let waiting = h.ok(
+        &h.a,
+        Some(&a),
+        &[
+            "wait",
+            "--inbox-after=0",
+            "--board-after",
+            &post_id,
+            "--timeout=2",
+        ],
+    );
+    let events = waiting["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["id"], reply_id.parse::<u64>().unwrap());
+    assert_eq!(events[0]["type"], "board_reply");
+    assert_eq!(events[0]["sources"], json!(["inbox", "board"]));
+    assert_eq!(
+        h.ok(&h.a, Some(&a), &["inbox", "--peek"])["messages"][0]["id"],
+        reply_id.parse::<u64>().unwrap()
+    );
+}
+
+#[test]
+fn unified_wait_watches_explicit_project_and_resumes_from_separate_cursors() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.b, "b");
+    let post = h.ok(&h.b, Some(&b), &["post", "other project update"]);
+    let post_id = id(&post);
+    let project = "../project-b";
+    let canonical_project = h.b.canonicalize().unwrap().display().to_string();
+    let waiting = h.ok(
+        &h.a,
+        Some(&a),
+        &[
+            "wait",
+            "--project",
+            project,
+            "--inbox-after=0",
+            "--board-after=0",
+            "--timeout=2",
+        ],
+    );
+    assert_eq!(waiting["events"][0]["id"], post_id.parse::<u64>().unwrap());
+    assert_eq!(waiting["events"][0]["type"], "board_post");
+    let restart = waiting["next"]["listen_again"].as_str().unwrap();
+    assert!(restart.contains(&format!("--project={canonical_project}")));
+    assert!(restart.contains(&format!("--board-after={post_id}")));
+    assert!(restart.contains("--inbox-after=0"));
+
+    let inbox_sender = h.register(&h.a, "sender");
+    h.ok(
+        &h.a,
+        Some(&inbox_sender),
+        &["send", "--to", &a.id, "later note"],
+    );
+    let after_id = waiting["inbox_after"].as_u64().unwrap();
+    let later = h.ok(
+        &h.a,
+        Some(&a),
+        &[
+            "wait",
+            "--project",
+            project,
+            &format!("--inbox-after={after_id}"),
+            &format!("--board-after={post_id}"),
+            "--timeout=2",
+        ],
+    );
+    assert_eq!(later["events"][0]["type"], "direct_message");
+}
+
+#[test]
+fn unified_wait_baselines_existing_board_posts_and_times_out_cleanly() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    let post = h.ok(&h.a, Some(&b), &["post", "already there"]);
+    let _post_id = id(&post);
+    h.ok(&h.a, Some(&b), &["post", "also already there"]);
+    let latest_post = h.ok(&h.a, Some(&b), &["post", "latest already there"]);
+    let board_page = h.ok(&h.a, Some(&a), &["board", "--limit=1"]);
+    assert_eq!(board_page["has_more"], true);
+    assert_eq!(board_page["latest_id"], latest_post["message"]["id"]);
+    let output = h.raw(&h.a, Some(&a), &["wait", "--timeout=1"]);
+    assert_eq!(output.status.code(), Some(3));
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["data"]["events"], json!([]));
+    assert_eq!(response["data"]["timed_out"], true);
+    assert_eq!(
+        response["data"]["board_after"],
+        latest_post["message"]["id"]
+    );
+    assert!(response["data"]["next"]["listen_again"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("--board-after={}", latest_post["message"]["id"])));
+
+    let waiter = h
+        .command(&h.a, Some(&a), &["wait", "--timeout=5"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let new_post = h.ok(&h.a, Some(&b), &["post", "arrived after startup"]);
+    let output = waiter.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        response["data"]["events"][0]["id"],
+        new_post["message"]["id"]
+    );
+    assert_eq!(response["data"]["events"][0]["type"], "board_post");
+}
+
+#[test]
+fn unified_wait_cursor_paginates_unread_messages_without_skipping() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    for i in 0..51 {
+        let text = format!("note {i}");
+        h.ok(&h.a, Some(&b), &["send", "--to", &a.id, &text]);
+    }
+
+    let first = h.ok(
+        &h.a,
+        Some(&a),
+        &["wait", "--inbox-after=0", "--board-after=0", "--timeout=2"],
+    );
+    assert_eq!(first["events"].as_array().unwrap().len(), 50);
+    assert_eq!(first["inbox_has_more"], true);
+    let cursor = first["inbox_after"].as_u64().unwrap();
+    assert_eq!(cursor, first["events"][49]["id"].as_u64().unwrap());
+
+    let second = h.ok(
+        &h.a,
+        Some(&a),
+        &[
+            "wait",
+            &format!("--inbox-after={cursor}"),
+            "--board-after=0",
+            "--timeout=2",
+        ],
+    );
+    assert_eq!(second["events"].as_array().unwrap().len(), 1);
+    assert_eq!(second["events"][0]["id"].as_u64().unwrap(), cursor + 1);
+    assert_eq!(h.ok(&h.a, Some(&a), &[])["unread"]["count"], 51);
+}
+
+#[test]
+fn unified_wait_board_cursor_paginates_without_skipping_posts() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let b = h.register(&h.a, "b");
+    for i in 0..51 {
+        let text = format!("board update {i}");
+        h.ok(&h.a, Some(&b), &["post", &text]);
+    }
+
+    let first = h.ok(
+        &h.a,
+        Some(&a),
+        &["wait", "--inbox-after=0", "--board-after=0", "--timeout=2"],
+    );
+    assert_eq!(first["events"].as_array().unwrap().len(), 50);
+    assert_eq!(first["board_has_more"], true);
+    let cursor = first["board_after"].as_u64().unwrap();
+    assert_eq!(cursor, first["events"][49]["id"].as_u64().unwrap());
+
+    let second = h.ok(
+        &h.a,
+        Some(&a),
+        &[
+            "wait",
+            "--inbox-after=0",
+            &format!("--board-after={cursor}"),
+            "--timeout=2",
+        ],
+    );
+    assert_eq!(second["events"].as_array().unwrap().len(), 1);
+    assert_eq!(second["events"][0]["id"].as_u64().unwrap(), cursor + 1);
+}
 #[test]
 fn git_root_and_branch_context_are_stable_from_nested_directories() {
     let h = Harness::new();
