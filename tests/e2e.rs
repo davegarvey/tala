@@ -321,6 +321,13 @@ fn cross_project_context_boards_and_handoff() {
         "THREAD_NOT_VISIBLE",
     );
     assert_eq!(hidden["error"], missing["error"]);
+    let malformed = h.error(
+        &h.b,
+        Some(&c),
+        &["history", "not-a-thread-id"],
+        "THREAD_NOT_VISIBLE",
+    );
+    assert_eq!(hidden["error"], malformed["error"]);
     assert_eq!(hidden["error"]["next"], "tala guide identity");
     let error_text = hidden["error"].to_string();
     assert!(!error_text.contains(&a.id));
