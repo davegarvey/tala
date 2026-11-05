@@ -1450,7 +1450,11 @@ fn wait_failing_after_storage_exits_4_with_resume_command() {
         .command(
             &h.a,
             Some(&a),
-            &["send", "--to", &b, "--wait", "--timeout=6", "question"],
+            // Leave enough time for the in-flight RPC timeout and the retry's
+            // daemon liveness probe. Otherwise the wait deadline can win while
+            // the transport call is still pending, which is a timeout (3), not
+            // a known transport failure (4).
+            &["send", "--to", &b, "--wait", "--timeout=15", "question"],
         )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1473,7 +1477,7 @@ fn wait_failing_after_storage_exits_4_with_resume_command() {
     assert_eq!(e["stored"].to_string(), mid);
     assert_eq!(
         e["next"],
-        format!("tala inbox --wait --reply-to={mid} --timeout=6")
+        format!("tala inbox --wait --reply-to={mid} --timeout=15")
     );
     assert_eq!(
         h.ok(&h.a, Some(&a), &["pending", "--direction=outgoing"])["messages"]
