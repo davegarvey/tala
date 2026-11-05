@@ -63,7 +63,7 @@ pub fn init(check: bool, refresh: bool, dry_run: bool) -> Result<Value> {
         let mut applied: Vec<usize> = Vec::new();
         for (index, item) in plan.iter().enumerate() {
             if let Some(stage) = &item.stage {
-                if let Err(error) = std::fs::rename(stage, &item.path) {
+                if let Err(error) = store::replace_file(stage, &item.path) {
                     let mut rollback_errors = Vec::new();
                     for &index in applied.iter().rev() {
                         let original = &plan[index];

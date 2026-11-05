@@ -191,6 +191,14 @@ pub fn legacy_credential_path(agent: &str) -> std::path::PathBuf {
         .join("identities")
         .join(format!("{agent}.json"))
 }
+/// Keeps a committed registration recoverable if writing its normal handle
+/// mapping fails. `register --reissue` consumes this private fallback.
+pub fn save_recovery_credential(credential: &Credential) -> Result<()> {
+    let path = legacy_credential_path(&credential.agent);
+    store::private_dir(path.parent().expect("identity directory"))?;
+    store::private_write(&path, &serde_json::to_vec(credential).map_err(network)?)?;
+    Ok(())
+}
 pub fn credential(handle: Option<&str>) -> Result<Credential> {
     let handle = handle.ok_or_else(|| {
         Failure::new(

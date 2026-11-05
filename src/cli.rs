@@ -730,7 +730,32 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             .await?;
             let c: Credential = serde_json::from_value(data["credential"].clone())
                 .map_err(|e| usage(e.to_string()))?;
-            let handle = client::issue_handle(&c)?;
+            let handle = match client::issue_handle(&c) {
+                Ok(handle) => handle,
+                Err(handle_error) => match client::save_recovery_credential(&c) {
+                    Ok(()) => {
+                        return Err(Failure::new(
+                            "IO_ERROR",
+                            format!(
+                                "Registration committed for {}, but saving its private handle failed: {}. A private recovery credential was saved.",
+                                c.agent, handle_error.message
+                            ),
+                            "Recover the same identity with the next command.",
+                        )
+                        .with_next(format!("tala register --reissue={}", c.agent)));
+                    }
+                    Err(recovery_error) => {
+                        return Err(Failure::new(
+                            "IO_ERROR",
+                            format!(
+                                "Registration committed for {}, but saving its handle failed: {}. Saving the private recovery credential also failed: {}.",
+                                c.agent, handle_error.message, recovery_error.message
+                            ),
+                            "The registration has no locally saved credential. Check Tala home permissions and storage, then register a new identity.",
+                        ));
+                    }
+                },
+            };
             data.as_object_mut()
                 .expect("register object")
                 .remove("credential");
