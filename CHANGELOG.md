@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- stop/wait lifecycle races and supervisor rearming after intentional shutdown (#138)
+
+### Changed
+
+- bump the CLI-daemon protocol to version 9 for lifecycle compatibility
+
 ## [1.12.0] - 2026-11-05
 
 ### Added

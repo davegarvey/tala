@@ -466,6 +466,14 @@ fn done(data: Value) -> Outcome {
 }
 async fn identity_context(credential: &Credential) -> Result<Context> {
     let identity = client::call(Operation::Whoami, Some(credential.clone())).await?;
+    identity_context_from_value(identity)
+}
+async fn wait_identity_context(credential: &Credential, generation: u64) -> Result<Context> {
+    let identity =
+        client::call_bound(Operation::Whoami, Some(credential.clone()), generation).await?;
+    identity_context_from_value(identity)
+}
+fn identity_context_from_value(identity: Value) -> Result<Context> {
     let registered: Agent =
         serde_json::from_value(identity["agent"].clone()).map_err(|e| usage(e.to_string()))?;
     // Keep the registered project as the agent's identity and board context,
@@ -655,6 +663,26 @@ fn finish_wait(waiter: &mut Waiter, timed_out: Outcome, resume: String) -> Resul
         result => result,
     }
 }
+
+fn inbox_wait_result(
+    data: Value,
+    consumed: bool,
+    generation_active: bool,
+) -> Result<Option<Outcome>> {
+    let found = data["messages"]
+        .as_array()
+        .is_some_and(|messages| !messages.is_empty());
+    if !found {
+        return Ok(None);
+    }
+    if consumed || generation_active {
+        // A consumed batch is already acknowledged and must be returned even
+        // if stop raced with the response.
+        Ok(Some(done(data)))
+    } else {
+        Err(crate::lifecycle::stopped())
+    }
+}
 async fn wait_inbox(
     credential: Credential,
     peek: bool,
@@ -663,6 +691,7 @@ async fn wait_inbox(
     reply_to: Option<u64>,
     timeout: u64,
 ) -> Result<Outcome> {
+    let (_, generation) = client::begin_wait().await?;
     let mut waiter = Waiter::new(timeout);
     let timed_out = json!({"messages":[],"next_after":after,"has_more":false,"timed_out":true});
     // A consuming read is replayed with the same request ID until it
@@ -683,19 +712,17 @@ async fn wait_inbox(
             Some(id) => (id.clone(), operation(false)),
             None => (Uuid::new_v4().to_string(), operation(true)),
         };
-        let call = client::call_as(request_id, op, Some(credential.clone()));
+        let call = client::call_as_bound(request_id, op, Some(credential.clone()), generation);
         match waiter.attempt(call).await? {
             Attempt::Deadline => return waiter.finish(timed_out),
             Attempt::Retry => {}
             Attempt::Data(data) => {
-                let found = data["messages"].as_array().is_some_and(|m| !m.is_empty());
-                if consume_id.take().is_some() {
-                    if found {
-                        return Ok(done(data));
-                    }
-                } else if found {
-                    if peek {
-                        return Ok(done(data));
+                let consumed = consume_id.take().is_some();
+                if let Some(result) =
+                    inbox_wait_result(data, consumed, crate::lifecycle::accepts(generation)?)?
+                {
+                    if consumed || peek {
+                        return Ok(result);
                     }
                     consume_id = Some(Uuid::new_v4().to_string());
                     continue;
@@ -717,14 +744,16 @@ async fn wait_board(
     limit: usize,
     timeout: u64,
 ) -> Result<Outcome> {
+    let (_, generation) = client::begin_wait().await?;
     let read = |after: u64, limit: usize| {
-        client::call(
+        client::call_bound(
             Operation::Board {
                 project: project.clone(),
                 after,
                 limit,
             },
             Some(credential.clone()),
+            generation,
         )
     };
     let mut cursor = after;
@@ -748,6 +777,9 @@ async fn wait_board(
             Attempt::Retry => {}
             Attempt::Data(data) => {
                 if data["messages"].as_array().is_some_and(|m| !m.is_empty()) {
+                    if !crate::lifecycle::accepts(generation)? {
+                        return Err(crate::lifecycle::stopped());
+                    }
                     return Ok(done(data));
                 }
             }
@@ -784,6 +816,11 @@ struct WaitResultMeta {
     project: String,
     timeout: u64,
     timed_out: bool,
+}
+
+struct WaitLifecycle {
+    started: Instant,
+    generation: u64,
 }
 
 fn wait_result(events: BTreeMap<u64, (String, Vec<String>)>, meta: WaitResultMeta) -> Outcome {
@@ -872,9 +909,10 @@ async fn wait_events(
     timeout: u64,
     inbox_cursor: u64,
     board_after: Option<u64>,
-    started: Instant,
+    lifecycle: WaitLifecycle,
 ) -> Result<Outcome> {
-    let mut waiter = Waiter::from_start(timeout, started);
+    let generation = lifecycle.generation;
+    let mut waiter = Waiter::from_start(timeout, lifecycle.started);
     let resume_command = |board_after| {
         wait_command(
             inbox_cursor,
@@ -907,13 +945,14 @@ async fn wait_events(
                 return finish_wait(&mut waiter, timed_out(None, false), resume_command(None));
             }
             let attempt = waiter
-                .attempt(client::call(
+                .attempt(client::call_bound(
                     Operation::Board {
                         project: project.clone(),
                         after: 0,
                         limit: 1,
                     },
                     Some(credential.clone()),
+                    generation,
                 ))
                 .await?;
             match attempt {
@@ -936,7 +975,7 @@ async fn wait_events(
                 resume_command(Some(board_cursor)),
             );
         }
-        let inbox_call = client::call(
+        let inbox_call = client::call_bound(
             Operation::Inbox {
                 peek: true,
                 after: inbox_cursor,
@@ -945,14 +984,16 @@ async fn wait_events(
                 listening: true,
             },
             Some(credential.clone()),
+            generation,
         );
-        let board_call = client::call(
+        let board_call = client::call_bound(
             Operation::Board {
                 project: project.clone(),
                 after: board_cursor,
                 limit: WAIT_PAGE_LIMIT,
             },
             Some(credential.clone()),
+            generation,
         );
         let attempt = waiter
             .attempt(async {
@@ -1011,6 +1052,9 @@ async fn wait_events(
                 let inbox_has_more = inbox["has_more"] == true;
                 board_has_more = board["has_more"] == true;
                 if !events.is_empty() {
+                    if !crate::lifecycle::accepts(generation)? {
+                        return Err(crate::lifecycle::stopped());
+                    }
                     return Ok(wait_result(
                         events,
                         WaitResultMeta {
@@ -1461,27 +1505,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             }
             status
         }
-        Commands::Stop => {
-            let data = client::existing(Operation::Stop)
-                .await?
-                .unwrap_or_else(|| json!({"stopped":false,"running":false}));
-            if data["stopped"] == true {
-                for _ in 0..50 {
-                    if daemon::read_info().is_none() {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                if daemon::read_info().is_some() {
-                    return Err(Failure::new(
-                        "STOP_TIMEOUT",
-                        "Daemon has not completed shutdown",
-                        "Check tala status and daemon.log.",
-                    ));
-                }
-            }
-            data
-        }
+        Commands::Stop => client::stop_daemon().await?,
         Commands::Whoami => {
             client::call(Operation::Whoami, Some(client::credential(selected)?)).await?
         }
@@ -1509,14 +1533,18 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             inbox_after,
             board_after,
         } => {
-            let wait_started = Instant::now();
             let c = client::credential(selected)?;
             let explicit_project = project.is_some();
-            let project_key = project
+            let explicit_project_key = project
                 .as_deref()
                 .map(|path| context(Some(path)).map(|ctx| ctx.project))
-                .transpose()?
-                .unwrap_or(identity_context(&c).await?.project);
+                .transpose()?;
+            let (_, generation) = client::begin_wait().await?;
+            let wait_started = Instant::now();
+            let project_key = match explicit_project_key {
+                Some(project) => project,
+                None => wait_identity_context(&c, generation).await?.project,
+            };
             let project_arg = explicit_project.then(|| project_key.clone());
             if human {
                 eprintln!(
@@ -1535,7 +1563,10 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                 timeout,
                 inbox_after,
                 board_after,
-                wait_started,
+                WaitLifecycle {
+                    started: wait_started,
+                    generation,
+                },
             )
             .await;
         }
@@ -2366,6 +2397,22 @@ mod tests {
         assert_eq!(error.code, "PROTOCOL_MISMATCH");
         assert_eq!(error.next.as_deref(), Some("tala stop"));
         assert_eq!(board_latest_id(&json!({"latest_id": 7})).unwrap(), 7);
+    }
+    #[test]
+    fn consumed_inbox_wait_batch_survives_a_racing_stop() {
+        let batch = json!({"messages":[{"id":7}],"next_after":7});
+        assert_eq!(
+            inbox_wait_result(batch.clone(), true, false)
+                .unwrap()
+                .unwrap()
+                .data,
+            batch
+        );
+        let error = match inbox_wait_result(batch, false, false) {
+            Err(error) => error,
+            Ok(_) => panic!("unconsumed inbox data should not outlive a stopped wait"),
+        };
+        assert_eq!(error.code, "DAEMON_STOPPED");
     }
     #[test]
     fn retry_command_adds_key_quotes_text_and_drops_identity() {

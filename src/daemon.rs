@@ -22,10 +22,51 @@ pub fn lock_file(name: &str) -> std::io::Result<File> {
     }
     options.open(store::home().join(name))
 }
+pub fn daemon_lock_available() -> std::io::Result<bool> {
+    let lock = lock_file("daemon.lock")?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = lock.unlock();
+            Ok(true)
+        }
+        Err(error) if crate::client::startup_lock_contended(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
 pub fn read_info() -> Option<DaemonInfo> {
     serde_json::from_slice(&std::fs::read(store::home().join("daemon.json")).ok()?).ok()
 }
+
+#[cfg(debug_assertions)]
+async fn test_startup_gate(name: &str) -> Result<()> {
+    let Ok(path) = std::env::var(name) else {
+        return Ok(());
+    };
+    let path = std::path::PathBuf::from(path);
+    std::fs::create_dir_all(&path)?;
+    store::private_write(&path.join("ready"), b"ready")?;
+    while !path.join("release").exists() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Ok(())
+}
+
 pub async fn run() -> Result<()> {
+    let generation = std::env::var("TALA_START_GENERATION")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| {
+            Failure::new(
+                "INVALID_OPERATION",
+                "The daemon process must be started by a Tala client",
+                "Run a normal Tala command to start the daemon safely.",
+            )
+        })?;
+    if !crate::lifecycle::can_publish(generation)? {
+        return Err(crate::lifecycle::stopped());
+    }
+    #[cfg(debug_assertions)]
+    test_startup_gate("TALA_TEST_STARTUP_GATE").await?;
     if let Some(info) = read_info() {
         if info.protocol_version != PROTOCOL_VERSION && crate::client::live(&info).await {
             return Err(Failure::new(
@@ -44,6 +85,9 @@ pub async fn run() -> Result<()> {
         )
     })?;
     let store = Store::open(&store::home().join("tala.sqlite3"))?;
+    if !crate::lifecycle::can_publish(generation)? {
+        return Err(crate::lifecycle::stopped());
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let info = DaemonInfo {
         pid: std::process::id(),
@@ -51,6 +95,11 @@ pub async fn run() -> Result<()> {
         protocol_version: PROTOCOL_VERSION,
         instance: Uuid::new_v4().to_string(),
     };
+    if !crate::lifecycle::publish(generation, &info.instance)? {
+        return Err(crate::lifecycle::stopped());
+    }
+    #[cfg(debug_assertions)]
+    test_startup_gate("TALA_TEST_METADATA_GATE").await?;
     store::private_write(
         &store::home().join("daemon.json"),
         &serde_json::to_vec(&info).expect("daemon metadata serializes"),

@@ -5,6 +5,7 @@ mod cli;
 mod client;
 mod daemon;
 mod integration;
+mod lifecycle;
 mod models;
 mod store;
 #[tokio::main]
@@ -68,6 +69,8 @@ async fn main() {
         Err(error) => {
             let code = if error.code == "USAGE_ERROR" {
                 2
+            } else if error.code == "DAEMON_STOPPED" {
+                5
             } else if error.stored.is_some() {
                 4
             } else {
