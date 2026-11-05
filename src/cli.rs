@@ -141,6 +141,12 @@ pub enum Commands {
         thread: Option<String>,
         #[arg(long)]
         request: bool,
+        #[arg(
+            long,
+            value_name = "MESSAGE_ID",
+            help = "Supersede an earlier message in the same direct thread"
+        )]
+        supersedes: Option<u64>,
         #[arg(long)]
         wait: bool,
         #[arg(
@@ -458,11 +464,16 @@ fn keyed(sender: &str, mut op: Operation) -> Operation {
         request,
         kind,
         key,
+        supersedes,
         ..
     } = &mut op
     {
         if key.is_empty() {
-            let material = json!([sender, kind, to, project, thread, reply_to, request, parts]);
+            let material = if let Some(target) = supersedes {
+                json!([sender, kind, to, project, thread, reply_to, request, parts, target])
+            } else {
+                json!([sender, kind, to, project, thread, reply_to, request, parts])
+            };
             let digest = Sha256::digest(material.to_string().as_bytes());
             *key = format!(
                 "auto:{}",
@@ -1415,6 +1426,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             to,
             thread,
             request,
+            supersedes,
             wait,
             timeout,
             key,
@@ -1435,6 +1447,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                     kind: "message".into(),
                     key: key.unwrap_or_default(),
                     context,
+                    supersedes,
                 },
             )
             .await?;
@@ -1501,6 +1514,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                     kind: "reply".into(),
                     key: key.unwrap_or_default(),
                     context,
+                    supersedes: None,
                 },
             )
             .await?
@@ -1530,6 +1544,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                     kind: "post".into(),
                     key: key.unwrap_or_default(),
                     context: ctx,
+                    supersedes: None,
                 },
             )
             .await?
@@ -1633,6 +1648,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                     kind: "handoff".into(),
                     key: key.unwrap_or_default(),
                     context,
+                    supersedes: None,
                 },
             )
             .await?
@@ -1912,7 +1928,7 @@ fn render_summary(data: &Value) {
         println!("  next: {}", m["next"].as_str().unwrap_or(""));
     }
     for m in unread["messages"].as_array().into_iter().flatten() {
-        if m["expects_reply"] != true {
+        if m["expects_reply"] != true || m["superseded_by"].as_u64().is_some() {
             render_message(m);
         }
     }
@@ -1963,6 +1979,12 @@ fn render_message(v: &Value) {
                 _ => {}
             }
         }
+    }
+    if let Some(id) = v["supersedes"].as_u64() {
+        println!("  Supersedes message {id}.");
+    }
+    if let Some(id) = v["superseded_by"].as_u64() {
+        println!("  Superseded by message {id}; use that message as the current instruction.");
     }
 }
 
@@ -2020,6 +2042,7 @@ mod tests {
                 branch: None,
                 revision: None,
             },
+            supersedes: None,
         };
         let key = |sender: &str, text: &str| match keyed(sender, op(text)) {
             Operation::Send { key, .. } => key,
@@ -2029,6 +2052,72 @@ mod tests {
         assert_eq!(key("a", "hi"), key("a", "hi"));
         assert_ne!(key("a", "hi"), key("c", "hi"));
         assert_ne!(key("a", "hi"), key("a", "bye"));
+    }
+    #[test]
+    fn supersedes_is_optional_in_canonical_payload_and_keys() {
+        let make = |supersedes| match keyed(
+            "a",
+            Operation::Send {
+                to: Some("b".into()),
+                project: None,
+                thread: None,
+                reply_to: None,
+                parts: vec![Part::Text { text: "hi".into() }],
+                request: false,
+                kind: "message".into(),
+                key: String::new(),
+                context: Context {
+                    project: "/p".into(),
+                    worktree: None,
+                    working_directory: None,
+                    branch: None,
+                    revision: None,
+                },
+                supersedes,
+            },
+        ) {
+            Operation::Send { key, .. } => key,
+            _ => unreachable!(),
+        };
+        let ordinary = make(None);
+        let amended = make(Some(12));
+        let other_amendment = make(Some(13));
+        assert_eq!(ordinary, make(None));
+        assert_ne!(ordinary, amended);
+        assert_ne!(amended, other_amendment);
+
+        let old_material =
+            json!(["a", "message", "b", null, null, null, false, [{"type":"text", "text":"hi"}]]);
+        let old_digest = Sha256::digest(old_material.to_string().as_bytes());
+        let expected_old_key = format!(
+            "auto:{}",
+            old_digest
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        assert_eq!(ordinary, expected_old_key);
+
+        let value = serde_json::to_value(Operation::Send {
+            to: Some("b".into()),
+            project: None,
+            thread: None,
+            reply_to: None,
+            parts: vec![Part::Text { text: "hi".into() }],
+            request: false,
+            kind: "message".into(),
+            key: "k".into(),
+            context: Context {
+                project: "/p".into(),
+                worktree: None,
+                working_directory: None,
+                branch: None,
+                revision: None,
+            },
+            supersedes: None,
+        })
+        .unwrap();
+        assert!(value.get("supersedes").is_none());
     }
     #[test]
     fn ages_render_in_days_hours_and_minutes() {

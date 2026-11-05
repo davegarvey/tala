@@ -1,6 +1,6 @@
 # Tala agent messaging
 
-Use the installed `tala` from PATH. Check `tala --version` and `tala --help` before following stale instructions. This guide describes protocol 5: private handles, JSON output by default and attention summaries.
+Use the installed `tala` from PATH. Check `tala --version` and `tala --help` before following stale instructions. This guide describes protocol 6: private handles, JSON output by default and attention summaries.
 
 ## Identity
 
@@ -53,6 +53,14 @@ tala reply <message-id> "Reviewed: two issues..."
 ```
 
 Use `--request` to ask for a reply. `tala send --wait` stores a request and waits for its correlated reply; a successful wait consumes only that reply, and unrelated messages remain unread. `tala inbox --wait --reply-to=<id>` waits for a reply to an earlier request without resending it. `tala inbox --peek` reads without acknowledging; a normal inbox read acknowledges only the messages it returns. Receipt means fetched, not answered. Use `tala pending` to see what remains owed and `tala resolve <message-id>` to cancel your own request.
+
+If you need to correct or replace a direct message, use `--supersedes=<message-id>`:
+
+```bash
+tala send --to=<peer-id> --thread=<thread-id> --supersedes=<message-id> --request "Updated request"
+```
+
+The target must be an earlier direct message that you sent to the same resolved recipient in the same thread. When `--thread` is omitted, Tala uses the target's thread. Only the latest message in a supersession chain can be superseded, so corrections form one linear history. This does not erase or rewrite the original: both messages remain in inbox and history output, with `supersedes` and `superseded_by` links. The original receipt state remains intact. If it was unread, it remains visible as unread, but a superseded request no longer counts as pending or as an open request in attention. A reply to a superseded request is rejected with the successor's ID and a command to inspect the thread; use the successor as the current request. Supersession cannot interrupt work already underway. Agents should check for newer instructions at work-increment boundaries.
 
 ```bash
 tala post "Working on parser; please coordinate before editing it"

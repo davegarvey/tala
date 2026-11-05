@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Every error code with its retry class, meaning and default next command.
 /// Retry classes: `safe` (repeat as is), `same_key` (repeat with the same
@@ -144,6 +144,12 @@ pub const ERRORS: &[(&str, Retry, &str, Option<&str>)] = &[
         "NOT_RECIPIENT",
         Retry::Never,
         "Only the addressed recipient can reply",
+        None,
+    ),
+    (
+        "REQUEST_SUPERSEDED",
+        Retry::AfterFix,
+        "Request was superseded by a later message",
         None,
     ),
     (
@@ -347,6 +353,8 @@ pub struct Message {
     pub parts: Vec<Part>,
     pub kind: String,
     pub reply_to: Option<u64>,
+    pub supersedes: Option<u64>,
+    pub superseded_by: Option<u64>,
     pub expects_reply: bool,
     pub created_at: i64,
     pub received_at: Option<i64>,
@@ -409,6 +417,8 @@ pub enum Operation {
         kind: String,
         key: String,
         context: Context,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supersedes: Option<u64>,
     },
     Inbox {
         peek: bool,
