@@ -3,6 +3,7 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     io::{self, IsTerminal, Read},
     path::{Path, PathBuf},
     process::Command,
@@ -168,6 +169,31 @@ pub enum Commands {
         timeout: u64,
         #[command(flatten)]
         page: PageArgs,
+    },
+    /// Wait for unread inbox messages and project-board activity without acknowledging messages
+    Wait {
+        #[arg(
+            long,
+            help = "Watch this project's board instead of your registered project's board"
+        )]
+        project: Option<PathBuf>,
+        #[arg(
+            long,
+            default_value_t = 0,
+            help = "Wait deadline in seconds; 0 waits indefinitely"
+        )]
+        timeout: u64,
+        #[arg(
+            long,
+            default_value_t = 0,
+            help = "Resume inbox notifications after this message ID"
+        )]
+        inbox_after: u64,
+        #[arg(
+            long,
+            help = "Resume board notifications after this message ID; omitted means start at the latest post"
+        )]
+        board_after: Option<u64>,
     },
     /// Reply to a message ID; Tala supplies recipient and thread
     Reply {
@@ -517,8 +543,11 @@ enum Attempt {
 }
 impl Waiter {
     fn new(timeout: u64) -> Self {
+        Self::from_start(timeout, Instant::now())
+    }
+    fn from_start(timeout: u64, start: Instant) -> Self {
         Self {
-            start: Instant::now(),
+            start,
             timeout,
             failure: None,
             backoff: Duration::from_millis(200),
@@ -575,6 +604,12 @@ impl Waiter {
             self.backoff = (self.backoff * 2).min(Duration::from_secs(2));
         }
         tokio::time::sleep(self.remaining().map_or(delay, |r| delay.min(r))).await;
+    }
+}
+fn finish_wait(waiter: &mut Waiter, timed_out: Outcome, resume: String) -> Result<Outcome> {
+    match waiter.finish(timed_out.data) {
+        Err(error) if error.is_transport() => Err(error.with_next(resume)),
+        result => result,
     }
 }
 async fn wait_inbox(
@@ -676,6 +711,289 @@ async fn wait_board(
         }
         if waiter.expired() {
             return waiter.finish(timed_out);
+        }
+        waiter.pause().await;
+    }
+}
+const WAIT_PAGE_LIMIT: usize = 50;
+
+fn wait_command(inbox_after: u64, board_after: Option<u64>, timeout: u64, project: &str) -> String {
+    let mut command = format!("tala wait --inbox-after={inbox_after} --timeout={timeout}");
+    if let Some(board_after) = board_after {
+        command.push_str(&format!(" --board-after={board_after}"));
+    }
+    if !project.is_empty() {
+        command.push_str(&format!(
+            " --project={}",
+            shell_quote_selector_path(project)
+        ));
+    }
+    command
+}
+
+struct WaitResultMeta {
+    inbox_before: u64,
+    inbox_after: u64,
+    inbox_has_more: bool,
+    board_before: u64,
+    board_after: Option<u64>,
+    board_has_more: bool,
+    project: String,
+    timeout: u64,
+    timed_out: bool,
+}
+
+fn wait_result(events: BTreeMap<u64, (String, Vec<String>)>, meta: WaitResultMeta) -> Outcome {
+    let event_values: Vec<Value> = events
+        .iter()
+        .map(|(id, (kind, sources))| json!({"id": id, "type": kind, "sources": sources}))
+        .collect();
+    let inbox_present = events
+        .values()
+        .any(|(_, sources)| sources.iter().any(|s| s == "inbox"));
+    let board_present = events
+        .values()
+        .any(|(_, sources)| sources.iter().any(|s| s == "board"));
+    let inbox_next =
+        inbox_present.then(|| format!("tala inbox --peek --after={}", meta.inbox_before));
+    let mut board_next = board_present.then(|| format!("tala board --after={}", meta.board_before));
+    if let Some(command) = &mut board_next {
+        if !meta.project.is_empty() {
+            command.push_str(&format!(
+                " --project={}",
+                shell_quote_selector_path(&meta.project)
+            ));
+        }
+    }
+    let listen_again = wait_command(
+        meta.inbox_after,
+        meta.board_after,
+        meta.timeout,
+        &meta.project,
+    );
+    let next = if events.is_empty() {
+        json!({"listen_again": listen_again})
+    } else {
+        json!({
+            "inbox": inbox_next,
+            "board": board_next,
+            "listen_again": listen_again
+        })
+    };
+    Outcome {
+        data: json!({
+            "events": event_values,
+            "inbox_after": meta.inbox_after,
+            "inbox_has_more": meta.inbox_has_more,
+            "board_after": meta.board_after,
+            "board_has_more": meta.board_has_more,
+            "timed_out": meta.timed_out,
+            "next": next,
+        }),
+        code: if meta.timed_out { 3 } else { 0 },
+    }
+}
+
+fn wait_event_type(message: &Value) -> String {
+    let is_board = message["project"].is_string();
+    let reply = message["reply_to"].as_u64().is_some();
+    let request = message["expects_reply"] == true;
+    match (is_board, reply, request) {
+        (true, true, _) => "board_reply",
+        (true, false, _) => "board_post",
+        (false, true, _) => "direct_reply",
+        (false, false, true) => "direct_request",
+        (false, false, false) => "direct_message",
+    }
+    .into()
+}
+
+fn board_latest_id(page: &Value) -> Result<u64> {
+    page["latest_id"].as_u64().ok_or_else(|| {
+        Failure::new(
+            "PROTOCOL_MISMATCH",
+            "The running daemon does not provide an atomic board high-water mark",
+            "Restart the daemon with the current Tala binary, then run the wait command again.",
+        )
+        .with_next("tala stop")
+    })
+}
+
+/// Waits for unread messages and project-board activity. Inbox pages are
+/// peeked, so notifications never acknowledge receipts. The two cursors are
+/// independent because inbox and board messages share global IDs.
+async fn wait_events(
+    credential: Credential,
+    project: String,
+    project_arg: Option<String>,
+    timeout: u64,
+    inbox_cursor: u64,
+    board_after: Option<u64>,
+    started: Instant,
+) -> Result<Outcome> {
+    let mut waiter = Waiter::from_start(timeout, started);
+    let resume_command = |board_after| {
+        wait_command(
+            inbox_cursor,
+            board_after,
+            timeout,
+            project_arg.as_deref().unwrap_or(""),
+        )
+    };
+    let timed_out = |board_after: Option<u64>, board_has_more: bool| {
+        wait_result(
+            BTreeMap::new(),
+            WaitResultMeta {
+                inbox_before: inbox_cursor,
+                inbox_after: inbox_cursor,
+                inbox_has_more: false,
+                board_before: board_after.unwrap_or(0),
+                board_after,
+                board_has_more,
+                project: project_arg.clone().unwrap_or_default(),
+                timeout,
+                timed_out: true,
+            },
+        )
+    };
+    let mut board_cursor = if let Some(cursor) = board_after {
+        cursor
+    } else {
+        loop {
+            if waiter.expired() {
+                return finish_wait(&mut waiter, timed_out(None, false), resume_command(None));
+            }
+            let attempt = waiter
+                .attempt(client::call(
+                    Operation::Board {
+                        project: project.clone(),
+                        after: 0,
+                        limit: 1,
+                    },
+                    Some(credential.clone()),
+                ))
+                .await?;
+            match attempt {
+                Attempt::Deadline => {
+                    return finish_wait(&mut waiter, timed_out(None, false), resume_command(None));
+                }
+                Attempt::Retry => waiter.pause().await,
+                Attempt::Data(page) => {
+                    break board_latest_id(&page)?;
+                }
+            }
+        }
+    };
+    let mut board_has_more = false;
+    loop {
+        if waiter.expired() {
+            return finish_wait(
+                &mut waiter,
+                timed_out(Some(board_cursor), board_has_more),
+                resume_command(Some(board_cursor)),
+            );
+        }
+        let inbox_call = client::call(
+            Operation::Inbox {
+                peek: true,
+                after: inbox_cursor,
+                limit: WAIT_PAGE_LIMIT,
+                reply_to: None,
+                listening: true,
+            },
+            Some(credential.clone()),
+        );
+        let board_call = client::call(
+            Operation::Board {
+                project: project.clone(),
+                after: board_cursor,
+                limit: WAIT_PAGE_LIMIT,
+            },
+            Some(credential.clone()),
+        );
+        let attempt = waiter
+            .attempt(async {
+                let (inbox, board) = tokio::join!(inbox_call, board_call);
+                Ok(json!({"inbox": inbox?, "board": board?}))
+            })
+            .await?;
+        match attempt {
+            Attempt::Deadline => {
+                return finish_wait(
+                    &mut waiter,
+                    timed_out(Some(board_cursor), board_has_more),
+                    resume_command(Some(board_cursor)),
+                );
+            }
+            Attempt::Retry => {}
+            Attempt::Data(pages) => {
+                let inbox = pages["inbox"].clone();
+                let board = pages["board"].clone();
+                let inbox_messages = inbox["messages"].as_array().cloned().unwrap_or_default();
+                let board_messages = board["messages"].as_array().cloned().unwrap_or_default();
+                let mut events: BTreeMap<u64, (String, Vec<String>)> = BTreeMap::new();
+                for message in &inbox_messages {
+                    if let Some(id) = message["id"].as_u64() {
+                        events
+                            .entry(id)
+                            .or_insert_with(|| (wait_event_type(message), Vec::new()))
+                            .1
+                            .push("inbox".into());
+                    }
+                }
+                for message in &board_messages {
+                    let Some(id) = message["id"].as_u64() else {
+                        continue;
+                    };
+                    if message["sender"].as_str() == Some(credential.agent.as_str()) {
+                        continue;
+                    }
+                    let entry = events
+                        .entry(id)
+                        .or_insert_with(|| (wait_event_type(message), Vec::new()));
+                    if !entry.1.iter().any(|source| source == "board") {
+                        entry.1.push("board".into());
+                    }
+                }
+                let next_inbox_cursor = if inbox_messages.is_empty() {
+                    inbox_cursor
+                } else {
+                    inbox["next_after"].as_u64().unwrap_or(inbox_cursor)
+                };
+                let next_board_cursor = if board_messages.is_empty() {
+                    board_cursor
+                } else {
+                    board["next_after"].as_u64().unwrap_or(board_cursor)
+                };
+                let inbox_has_more = inbox["has_more"] == true;
+                board_has_more = board["has_more"] == true;
+                if !events.is_empty() {
+                    return Ok(wait_result(
+                        events,
+                        WaitResultMeta {
+                            inbox_before: inbox_cursor,
+                            inbox_after: next_inbox_cursor,
+                            inbox_has_more,
+                            board_before: board_cursor,
+                            board_after: Some(next_board_cursor),
+                            board_has_more,
+                            project: project_arg.clone().unwrap_or_default(),
+                            timeout,
+                            timed_out: false,
+                        },
+                    ));
+                }
+                // Advancing over self-authored board entries is safe: the
+                // cursor is returned on the next notification or timeout.
+                board_cursor = next_board_cursor;
+            }
+        }
+        if waiter.expired() {
+            return finish_wait(
+                &mut waiter,
+                timed_out(Some(board_cursor), board_has_more),
+                resume_command(Some(board_cursor)),
+            );
         }
         waiter.pause().await;
     }
@@ -1020,6 +1338,42 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             )
             .await?
         }
+        Commands::Wait {
+            project,
+            timeout,
+            inbox_after,
+            board_after,
+        } => {
+            let wait_started = Instant::now();
+            let c = client::credential(selected)?;
+            let explicit_project = project.is_some();
+            let project_key = project
+                .as_deref()
+                .map(|path| context(Some(path)).map(|ctx| ctx.project))
+                .transpose()?
+                .unwrap_or(identity_context(&c).await?.project);
+            let project_arg = explicit_project.then(|| project_key.clone());
+            if human {
+                eprintln!(
+                    "Waiting for inbox and board activity ({}).",
+                    if timeout == 0 {
+                        "indefinitely".to_string()
+                    } else {
+                        format!("timeout: {timeout}s")
+                    }
+                );
+            }
+            return wait_events(
+                c,
+                project_key,
+                project_arg,
+                timeout,
+                inbox_after,
+                board_after,
+                wait_started,
+            )
+            .await;
+        }
         Commands::Inbox {
             peek,
             wait,
@@ -1289,7 +1643,9 @@ pub fn human_age(seconds: i64) -> String {
     }
 }
 pub fn render(data: &Value, attention: Option<&Value>) {
-    if data["incoming_requests"].is_array() {
+    if data["events"].is_array() {
+        render_wait(data);
+    } else if data["incoming_requests"].is_array() {
         render_summary(data);
     } else if let Some(messages) = data["messages"].as_array() {
         if messages.is_empty() {
@@ -1446,6 +1802,36 @@ pub fn render(data: &Value, attention: Option<&Value>) {
         );
     }
 }
+fn render_wait(data: &Value) {
+    let events = data["events"].as_array().cloned().unwrap_or_default();
+    if events.is_empty() {
+        println!("No new events.");
+    } else {
+        for event in events {
+            println!(
+                "[{}] {} ({})",
+                event["id"],
+                event["type"].as_str().unwrap_or("event"),
+                event["sources"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    if let Some(inbox) = data["next"]["inbox"].as_str() {
+        println!("Fetch inbox: {inbox}");
+    }
+    if let Some(board) = data["next"]["board"].as_str() {
+        println!("Fetch board: {board}");
+    }
+    if let Some(restart) = data["next"]["listen_again"].as_str() {
+        println!("Listen again: {restart}");
+    }
+}
 fn render_projects(data: &Value, projects: &[Value]) {
     if projects.is_empty() {
         println!("No projects match these filters.");
@@ -1571,6 +1957,13 @@ mod tests {
     #[test]
     fn clap_contract_has_unique_arguments() {
         Cli::command().debug_assert();
+    }
+    #[test]
+    fn board_baseline_requires_atomic_high_water_mark() {
+        let error = board_latest_id(&json!({"next_after": 1})).unwrap_err();
+        assert_eq!(error.code, "PROTOCOL_MISMATCH");
+        assert_eq!(error.next.as_deref(), Some("tala stop"));
+        assert_eq!(board_latest_id(&json!({"latest_id": 7})).unwrap(), 7);
     }
     #[test]
     fn retry_command_adds_key_quotes_text_and_drops_identity() {

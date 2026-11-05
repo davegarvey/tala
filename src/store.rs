@@ -481,7 +481,15 @@ PRAGMA user_version=2; COMMIT;")?;
                 limit,
             } => {
                 require()?;
-                json!(page(&tx, "project=?", [project], *after, *limit)?)
+                let page = page(&tx, "project=?", [project], *after, *limit)?;
+                let latest_id: u64 = tx.query_row(
+                    "SELECT COALESCE(MAX(id),0) FROM messages WHERE project=?",
+                    [project],
+                    |row| row.get(0),
+                )?;
+                let mut data = json!(page);
+                data["latest_id"] = json!(latest_id);
+                data
             }
             Operation::History {
                 thread,
