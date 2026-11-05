@@ -1104,6 +1104,108 @@ fn resolve_selector(agent: Option<String>, agent_file: Option<PathBuf>) -> Resul
     }
 }
 
+struct StatusSelector {
+    source: &'static str,
+    state: &'static str,
+    error_code: Option<String>,
+    credential: Option<Credential>,
+}
+
+fn status_selector_source(agent: Option<&str>, agent_file: Option<&Path>) -> &'static str {
+    if agent.is_some() {
+        "--agent"
+    } else if agent_file.is_some() {
+        "selector_file"
+    } else if std::env::var_os("TALA_AGENT").is_some()
+        && std::env::var_os("TALA_AGENT_FILE").is_some()
+    {
+        "environment"
+    } else if std::env::var_os("TALA_AGENT_FILE").is_some() {
+        "selector_file"
+    } else if std::env::var_os("TALA_AGENT").is_some() {
+        "environment"
+    } else {
+        "none"
+    }
+}
+
+/// Resolve status identity best-effort so global daemon diagnostics remain
+/// available when the selector is absent, malformed, or conflicting.
+fn status_selector(agent: Option<String>, agent_file: Option<PathBuf>) -> StatusSelector {
+    let source = status_selector_source(agent.as_deref(), agent_file.as_deref());
+    let handle = match resolve_selector(agent, agent_file) {
+        Ok(Some(handle)) => handle,
+        Ok(None) => {
+            return StatusSelector {
+                source,
+                state: "none",
+                error_code: None,
+                credential: None,
+            }
+        }
+        Err(error) => {
+            return StatusSelector {
+                source,
+                state: "invalid",
+                error_code: Some(error.code),
+                credential: None,
+            }
+        }
+    };
+    match client::credential(Some(&handle)) {
+        Ok(credential) => StatusSelector {
+            source,
+            state: "selected",
+            error_code: None,
+            credential: Some(credential),
+        },
+        Err(error) => StatusSelector {
+            source,
+            state: "invalid",
+            error_code: Some(error.code),
+            credential: None,
+        },
+    }
+}
+
+fn add_status_identity_context(status: &mut Value, selector: &StatusSelector) {
+    let mut context = json!({
+        "selector_source": selector.source,
+        "selection_state": selector.state,
+        "context_source": "local_database_snapshot",
+        "agent": Value::Null,
+        "project_root": Value::Null,
+        "board_latest_id": Value::Null,
+        "unavailable_reason": Value::Null,
+        "error_code": selector.error_code,
+    });
+    let Some(credential) = selector.credential.as_ref() else {
+        context["unavailable_reason"] = json!(if selector.state == "none" {
+            "no_identity"
+        } else {
+            "invalid_selector"
+        });
+        status["identity_context"] = context;
+        return;
+    };
+
+    context["agent"] = json!({"id": credential.agent, "name": Value::Null});
+    match store::status_context_snapshot(&store::home().join("tala.sqlite3"), credential) {
+        Ok(Some(snapshot)) => {
+            context["agent"]["name"] = json!(snapshot.name);
+            context["project_root"] = json!(snapshot.project);
+            context["board_latest_id"] = json!(snapshot.board_latest_id);
+        }
+        Ok(None) => {
+            context["selection_state"] = json!("invalid");
+            context["unavailable_reason"] = json!("identity_not_found");
+            context["error_code"] = json!("IDENTITY_ERROR");
+        }
+        Err(_) => context["unavailable_reason"] = json!("storage_unavailable"),
+    }
+    status["identity_context"] = context;
+}
+
 fn shell_quote_selector_path(path: &str) -> String {
     #[cfg(windows)]
     {
@@ -1116,6 +1218,11 @@ fn shell_quote_selector_path(path: &str) -> String {
 }
 
 pub async fn run(cli: Cli) -> Result<Outcome> {
+    let status_selector = matches!(
+        cli.command.as_ref(),
+        Some(Commands::Status { message: None })
+    )
+    .then(|| status_selector(cli.agent.clone(), cli.agent_file.clone()));
     let uses_identity = !matches!(
         cli.command.as_ref(),
         Some(
@@ -1320,6 +1427,8 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                 )
                 .await?["message"]
                     .clone();
+            } else if let Some(selector) = status_selector.as_ref() {
+                add_status_identity_context(&mut status, selector);
             }
             status
         }
@@ -1669,6 +1778,8 @@ pub fn human_age(seconds: i64) -> String {
 pub fn render(data: &Value, attention: Option<&Value>) {
     if let Some(content) = data["content"].as_str() {
         print!("{content}");
+    } else if data["identity_context"].is_object() && data["database"].is_string() {
+        render_status(data);
     } else if data["events"].is_array() {
         render_wait(data);
     } else if data["incoming_requests"].is_array() {
@@ -1832,6 +1943,92 @@ pub fn render(data: &Value, attention: Option<&Value>) {
             },
             a["next"].as_str().unwrap_or("")
         );
+    }
+}
+fn escape_status_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if !character.is_control() {
+            escaped.push(character);
+            continue;
+        }
+        match character {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push_str(&format!("\\u{{{:x}}}", other as u32)),
+        }
+    }
+    escaped
+}
+
+fn render_status(data: &Value) {
+    let daemon = if data["compatible"] == false {
+        "running (incompatible)"
+    } else if data["running"] == true {
+        "running"
+    } else if data["running"].is_null() {
+        "unreachable"
+    } else {
+        "stopped"
+    };
+    println!("Daemon: {daemon}");
+    if data["stale_metadata"] == true {
+        println!("Daemon metadata: stale");
+    }
+    let context = &data["identity_context"];
+    println!(
+        "Identity selector: {} ({})",
+        context["selector_source"].as_str().unwrap_or("none"),
+        context["selection_state"].as_str().unwrap_or("unknown")
+    );
+    if context["context_source"] == "local_database_snapshot"
+        && context["unavailable_reason"].is_null()
+        && context["selection_state"] == "selected"
+    {
+        println!("Identity context: available from a read-only local database snapshot");
+    }
+    if context["agent"].is_object() {
+        let id = context["agent"]["id"].as_str().unwrap_or("unknown");
+        match context["agent"]["name"].as_str() {
+            Some(name) => println!(
+                "Identity: {} ({})",
+                escape_status_text(name),
+                escape_status_text(id)
+            ),
+            None => println!("Identity ID: {}", escape_status_text(id)),
+        }
+    } else if context["selection_state"] == "none" {
+        println!("Identity: none selected");
+    } else {
+        println!("Identity: unavailable");
+    }
+    if let Some(project) = context["project_root"].as_str() {
+        println!("Registered project root: {}", escape_status_text(project));
+    } else {
+        println!("Registered project root: unavailable");
+    }
+    if let Some(latest) = context["board_latest_id"].as_u64() {
+        println!("Board latest ID: {latest} (read-only high-water mark)");
+    } else {
+        println!("Board latest ID: unavailable");
+    }
+    if let Some(reason) = context["unavailable_reason"].as_str() {
+        println!("Identity context unavailable: {reason}");
+    }
+    if let Some(error_code) = context["error_code"].as_str() {
+        println!("Context error: {error_code}");
+    }
+    if let Some(home) = data["home"].as_str() {
+        println!("Tala home: {}", escape_status_text(home));
+    }
+    if let Some(database) = data["database"].as_str() {
+        println!("Database: {}", escape_status_text(database));
+    }
+    if let Some(error) = data["error"].as_object() {
+        if let Some(code) = error.get("code").and_then(Value::as_str) {
+            println!("Daemon diagnostic: {code}");
+        }
     }
 }
 fn render_wait(data: &Value) {
@@ -2124,5 +2321,13 @@ mod tests {
         assert_eq!(human_age(30), "<1m");
         assert_eq!(human_age(5400), "1h 30m");
         assert_eq!(human_age(91104 * 60), "63d 6h");
+    }
+    #[test]
+    fn status_text_escapes_controls_without_changing_path_separators() {
+        assert_eq!(escape_status_text("C:\\work\\project"), "C:\\work\\project");
+        assert_eq!(
+            escape_status_text("first\nsecond\t\u{1b}"),
+            "first\\nsecond\\t\\u{1b}"
+        );
     }
 }
