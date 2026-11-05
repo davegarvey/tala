@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-11-05
+goal: Help senders understand whether a recipient was observed listening when a
+  direct message was accepted, while preserving the queued message and the
+  original observation on retries.

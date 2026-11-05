@@ -1394,6 +1394,16 @@ pub fn render(data: &Value, attention: Option<&Value>) {
             serde_json::to_string_pretty(data).expect("JSON value")
         );
     }
+    let recipient_listening = data["recipient_presence"]["listening"]
+        .as_bool()
+        .or_else(|| data["sent"]["recipient_presence"]["listening"].as_bool());
+    if let Some(listening) = recipient_listening {
+        if listening {
+            println!("Recipient was listening when Tala accepted the message; this is a point-in-time observation.");
+        } else {
+            println!("Recipient was not listening when Tala accepted the message. The message remains queued.");
+        }
+    }
     if data["timed_out"] == true {
         if !data["sent"].is_null() {
             println!("Wait timed out; the request was stored. Do not resend it.");
