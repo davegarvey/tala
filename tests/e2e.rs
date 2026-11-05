@@ -41,6 +41,7 @@ impl Harness {
         let mut c = Command::new(bin());
         c.env("TALA_HOME", &self.home)
             .env_remove("TALA_AGENT")
+            .env_remove("TALA_AGENT_FILE")
             .current_dir(dir)
             .arg("--json");
         if let Some(agent) = agent {
@@ -662,6 +663,12 @@ fn new_help_rejects_old_surface() {
     for cmd in ["use", "session", "check", "listen", "discover"] {
         h.error(&h.a, None, &[cmd], "USAGE_ERROR");
     }
+    let register_help = Command::new(bin())
+        .args(["register", "--help"])
+        .output()
+        .unwrap();
+    let register_help = String::from_utf8(register_help.stdout).unwrap();
+    assert!(register_help.contains("--save-handle-to"));
     let o = Command::new(bin()).arg("--version").output().unwrap();
     assert_eq!(
         String::from_utf8(o.stdout).unwrap().trim(),
@@ -962,6 +969,8 @@ fn help_lists_exit_codes_and_every_error_code() {
         "--stale",
         "--closed",
         "--all",
+        "--agent-file",
+        "TALA_AGENT_FILE",
     ] {
         assert!(help.contains(code), "{code}");
     }
@@ -1176,6 +1185,322 @@ fn public_ids_cannot_select_an_identity() {
         "for b only"
     );
 }
+
+#[test]
+fn saved_selector_file_selects_identity_without_exposing_handle() {
+    let h = Harness::new();
+    let path = h.a.join("codex selector's.selector");
+    #[cfg(unix)]
+    let parent_mode_before = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(&h.a).unwrap().permissions().mode()
+    };
+    let output = h
+        .command(&h.a, None, &["register", "--name=codex", "--tool=fixture"])
+        .arg(format!("--save-handle-to={}", path.display()))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let data = &value["data"];
+    assert!(data.get("handle").is_none(), "{data}");
+    assert!(data.get("credential").is_none(), "{data}");
+    let path_text = path.to_str().unwrap();
+    assert_eq!(data["selector_file"], path_text);
+    let quoted_path = if cfg!(windows) {
+        format!("\"{path_text}\"")
+    } else {
+        format!("'{}'", path_text.replace('\'', "'\\''"))
+    };
+    assert_eq!(data["select"], format!("--agent-file={quoted_path}"));
+    let contents = std::fs::read_to_string(&path).unwrap();
+    assert!(contents.starts_with("th_") && contents.trim_end().len() == 35);
+    let whoami = h.ok(
+        &h.a,
+        None,
+        &["--agent-file", path.to_str().unwrap(), "whoami"],
+    );
+    assert_eq!(whoami["agent"]["id"], data["agent"]["id"]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&h.a).unwrap().permissions().mode(),
+            parent_mode_before
+        );
+    }
+    let mut env_selected = h.command(&h.a, None, &["whoami"]);
+    env_selected.env("TALA_AGENT_FILE", &path);
+    let env_selected = env_selected.output().unwrap();
+    assert!(
+        env_selected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&env_selected.stderr)
+    );
+    let env_selected: Value = serde_json::from_slice(&env_selected.stdout).unwrap();
+    assert_eq!(env_selected["data"]["agent"]["id"], data["agent"]["id"]);
+    let human_path = h.a.join("human selector's.selector");
+    let human = h
+        .command(&h.a, None, &["register", "--name=human", "--tool=fixture"])
+        .arg(format!("--save-handle-to={}", human_path.display()))
+        .arg("--human")
+        .output()
+        .unwrap();
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let human = String::from_utf8(human.stdout).unwrap();
+    let human_path_text = human_path.to_str().unwrap();
+    let quoted_human_path = if cfg!(windows) {
+        format!("\"{human_path_text}\"")
+    } else {
+        format!("'{}'", human_path_text.replace('\'', "'\\''"))
+    };
+    assert!(
+        human.contains(&format!("--agent-file={quoted_human_path}")),
+        "{human}"
+    );
+    assert!(!human.contains("th_"), "{human}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn selector_file_rejects_unsafe_contents_and_permissions() {
+    let h = Harness::new();
+    let agent = h.register(&h.a, "codex");
+    let path = h.home.join("selector");
+    std::fs::write(&path, format!("{}\nextra\n", agent.handle)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    h.error(
+        &h.a,
+        None,
+        &["--agent-file", path.to_str().unwrap(), "whoami"],
+        "IDENTITY_ERROR",
+    );
+
+    #[cfg(windows)]
+    {
+        // A normally inherited ACL is intentionally rejected; only Tala's
+        // protected current-user + SYSTEM ACL is accepted for selector files.
+        std::fs::write(&path, format!("{}\n", agent.handle)).unwrap();
+        h.error(
+            &h.a,
+            None,
+            &["--agent-file", path.to_str().unwrap(), "whoami"],
+            "IDENTITY_ERROR",
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(&path, format!("{}\n", agent.handle)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        h.error(
+            &h.a,
+            None,
+            &["--agent-file", path.to_str().unwrap(), "whoami"],
+            "IDENTITY_ERROR",
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = h.home.join("selector-link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        h.error(
+            &h.a,
+            None,
+            &["--agent-file", link.to_str().unwrap(), "whoami"],
+            "IDENTITY_ERROR",
+        );
+    }
+    let saved_path = h.home.join("valid-selector");
+    let saved = h
+        .command(&h.a, None, &["register", "--name=saved", "--tool=fixture"])
+        .arg(format!("--save-handle-to={}", saved_path.display()))
+        .output()
+        .unwrap();
+    assert!(
+        saved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    let saved: Value = serde_json::from_slice(&saved.stdout).unwrap();
+    assert_eq!(
+        h.ok(
+            &h.a,
+            None,
+            &["--agent-file", saved_path.to_str().unwrap(), "whoami"]
+        )["agent"]["id"],
+        saved["data"]["agent"]["id"]
+    );
+    let selector_handle = std::fs::read_to_string(&saved_path)
+        .unwrap()
+        .trim_end()
+        .to_owned();
+    std::fs::write(&saved_path, format!("{selector_handle}\r\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&saved_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    assert_eq!(
+        h.ok(
+            &h.a,
+            None,
+            &["--agent-file", saved_path.to_str().unwrap(), "whoami"]
+        )["agent"]["id"],
+        saved["data"]["agent"]["id"]
+    );
+    std::fs::write(&saved_path, "").unwrap();
+    h.error(
+        &h.a,
+        None,
+        &["--agent-file", saved_path.to_str().unwrap(), "whoami"],
+        "IDENTITY_ERROR",
+    );
+    std::fs::write(&saved_path, "x".repeat(128)).unwrap();
+    h.error(
+        &h.a,
+        None,
+        &["--agent-file", saved_path.to_str().unwrap(), "whoami"],
+        "IDENTITY_ERROR",
+    );
+    #[cfg(windows)]
+    {
+        let link = h.home.join("selector-reparse");
+        if std::os::windows::fs::symlink_file(&saved_path, &link).is_ok() {
+            h.error(
+                &h.a,
+                None,
+                &["--agent-file", link.to_str().unwrap(), "whoami"],
+                "IDENTITY_ERROR",
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn save_selector_rejects_non_utf8_path_before_registration() {
+    use std::os::unix::ffi::OsStringExt;
+    let h = Harness::new();
+    let path = PathBuf::from(std::ffi::OsString::from_vec(vec![b's', 0xff]));
+    let output = h
+        .command(
+            &h.a,
+            None,
+            &["register", "--name=non-utf8", "--tool=fixture"],
+        )
+        .arg("--save-handle-to")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert_eq!(stderr_json(&output)["error"]["code"], "USAGE_ERROR");
+    assert!(h.ok(&h.a, None, &["agents"])["agents"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn selector_precedence_is_explicit_and_failed_save_returns_handle_once() {
+    let h = Harness::new();
+    let agent = h.register(&h.a, "codex");
+    let selector = h.home.join("selector");
+    let selector_output = h
+        .command(
+            &h.a,
+            None,
+            &["register", "--name=selector", "--tool=fixture"],
+        )
+        .arg(format!("--save-handle-to={}", selector.display()))
+        .output()
+        .unwrap();
+    assert!(
+        selector_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selector_output.stderr)
+    );
+
+    let mut explicit_wins = h.command(&h.a, Some(&agent), &["whoami"]);
+    explicit_wins.env("TALA_AGENT_FILE", &selector);
+    assert!(explicit_wins.output().unwrap().status.success());
+
+    let mut both_env = h.command(&h.a, None, &["whoami"]);
+    both_env
+        .env("TALA_AGENT", &agent.handle)
+        .env("TALA_AGENT_FILE", &selector);
+    assert_eq!(
+        stderr_json(&both_env.output().unwrap())["error"]["code"],
+        "IDENTITY_ERROR"
+    );
+
+    let mut empty_env = h.command(&h.a, None, &["whoami"]);
+    empty_env.env("TALA_AGENT_FILE", "");
+    assert_eq!(
+        stderr_json(&empty_env.output().unwrap())["error"]["code"],
+        "IDENTITY_ERROR"
+    );
+    let mut empty_handle_env = h.command(&h.a, None, &["whoami"]);
+    empty_handle_env.env("TALA_AGENT", "");
+    assert_eq!(
+        stderr_json(&empty_handle_env.output().unwrap())["error"]["code"],
+        "IDENTITY_ERROR"
+    );
+
+    let mut conflict = h.command(
+        &h.a,
+        None,
+        &[
+            "--agent=th_00000000000000000000000000000000",
+            "--agent-file",
+            selector.to_str().unwrap(),
+            "whoami",
+        ],
+    );
+    assert_eq!(
+        stderr_json(&conflict.output().unwrap())["error"]["code"],
+        "USAGE_ERROR"
+    );
+
+    let existing = h.home.join("already-exists");
+    std::fs::write(&existing, "keep me").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let failed = h
+        .command(&h.a, None, &["register", "--name=new", "--tool=fixture"])
+        .arg(format!("--save-handle-to={}", existing.display()))
+        .output()
+        .unwrap();
+    assert!(failed.status.success());
+    let failed: Value = serde_json::from_slice(&failed.stdout).unwrap();
+    let saved = &failed["data"];
+    let disclosed = saved["handle"].as_str().unwrap();
+    assert!(saved["selector_file_error"].is_string());
+    assert!(saved.get("selector_file").is_none());
+    assert_eq!(std::fs::read_to_string(existing).unwrap(), "keep me");
+    let selected = h.ok(&h.a, None, &["--agent", disclosed, "whoami"]);
+    assert_eq!(selected["agent"]["id"], saved["agent"]["id"]);
+}
 #[test]
 fn reissue_issues_one_handle_for_a_legacy_identity() {
     use sha2::{Digest, Sha256};
@@ -1247,6 +1572,7 @@ fn json_is_the_default_and_human_renders_text() {
         let mut c = Command::new(bin());
         c.env("TALA_HOME", &h.home)
             .env("TALA_AGENT", &b.handle)
+            .env_remove("TALA_AGENT_FILE")
             .current_dir(&h.a)
             .args(args);
         c.output().unwrap()

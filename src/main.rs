@@ -13,7 +13,7 @@ async fn main() {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    let human = std::env::args()
+    let human = std::env::args_os()
         .take_while(|a| a != "--")
         .any(|a| a == "--human");
     let cli = match cli::Cli::try_parse() {
