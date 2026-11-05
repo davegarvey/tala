@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Every error code with its retry class, meaning and default next command.
 /// Retry classes: `safe` (repeat as is), `same_key` (repeat with the same
@@ -67,6 +67,24 @@ pub const ERRORS: &[(&str, Retry, &str, Option<&str>)] = &[
         Retry::AfterFix,
         "Command needs a running daemon",
         Some("tala whoami"),
+    ),
+    (
+        "DAEMON_STOPPED",
+        Retry::AfterFix,
+        "Wait ended because the daemon was intentionally stopped",
+        Some("tala wait"),
+    ),
+    (
+        "DAEMON_STOPPING",
+        Retry::Safe,
+        "The daemon is shutting down",
+        Some("tala status"),
+    ),
+    (
+        "LIFECYCLE_STATE_ERROR",
+        Retry::AfterFix,
+        "Local daemon lifecycle state could not be read or written",
+        Some("tala status"),
     ),
     (
         "DAEMON_ALREADY_RUNNING",
@@ -214,7 +232,7 @@ Background loop: run tala wait; fetch with its next.inbox/next.board commands, t
 Then: tala (what needs attention); tala agents; tala send --to=<id> --request 'Review this'; tala inbox; tala reply <id> 'Done'\n\
 Projects: tala list-projects [--stale|--closed|--all] (no registration required); owner lifecycle: tala close-project / tala reopen-project\n\
 Output is one JSON envelope; --human renders text.\n\n\
-Exit codes: 0 success, 1 operational error (nothing stored), 2 usage error, 3 wait timeout, 4 stored but wait failed (do not resend).\n\n\
+Exit codes: 0 success, 1 operational error (nothing stored), 2 usage error, 3 wait timeout, 4 stored but wait failed (do not resend), 5 wait stopped by tala stop.\n\n\
 Error codes (retry class: safe | same_key | after_fix | never):\n",
     );
     for (code, retry, meaning, _) in ERRORS {

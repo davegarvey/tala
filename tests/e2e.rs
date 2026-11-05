@@ -2,8 +2,8 @@ use serde_json::{json, Value};
 use std::{
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
-    time::{Duration, Instant},
+    process::{Child, Command, Output, Stdio},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tempfile::TempDir;
 fn bin() -> PathBuf {
@@ -86,6 +86,54 @@ impl Harness {
     }
 }
 
+fn wait_for_listening(h: &Harness, agent: &Ident, timeout: Duration) {
+    let db = h.home.join("tala.sqlite3");
+    let deadline = Instant::now() + timeout;
+    loop {
+        if db.exists() {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            let until: i64 = conn
+                .query_row(
+                    "SELECT listening_until FROM agents WHERE id=?1",
+                    [&agent.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            if until > now {
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "waiter did not issue its listening RPC"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_child(mut child: Child, timeout: Duration, label: &str) -> Output {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return child.wait_with_output().unwrap();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let output = child.wait_with_output().unwrap();
+            panic!(
+                "{label} did not exit within {timeout:?}; stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn guide_is_available_without_identity_or_daemon_in_json_and_human_modes() {
     let h = Harness::new();
@@ -108,6 +156,8 @@ fn guide_is_available_without_identity_or_daemon_in_json_and_human_modes() {
     assert!(listening.contains("Keep one inbox reader per identity"));
     assert!(listening.contains("does not run commands from `next.*`"));
     assert!(listening.contains("exit **3** means timeout"));
+    assert!(listening.contains("exit **5** means the daemon was intentionally stopped"));
+    assert!(listening.contains("5) exit 0"));
     assert!(listening.contains("a standalone read-only `tala wait` does not produce it"));
     let reference_loop = listening
         .split("### Reference loop for a harness\n")
@@ -1575,7 +1625,9 @@ fn status_is_read_only_and_corrupt_database_fails_loudly() {
     assert!(!h.home.exists());
     std::fs::create_dir(&h.home).unwrap();
     std::fs::write(h.home.join("tala.sqlite3"), "not a database").unwrap();
-    let o = h.raw(&h.a, None, &["daemon"]);
+    let mut daemon = h.command(&h.a, None, &["daemon"]);
+    daemon.env("TALA_START_GENERATION", "0");
+    let o = daemon.output().unwrap();
     assert!(!o.status.success());
     let v: Value = serde_json::from_slice(&o.stderr).unwrap();
     assert_eq!(v["error"]["code"], "STORAGE_ERROR");
@@ -2034,6 +2086,206 @@ fn inbox_wait_wakes_and_infinite_wait_can_be_interrupted() {
 }
 
 #[test]
+fn stop_ends_active_wait_without_restarting_the_daemon() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "stop-wait");
+    let waiter = h
+        .command(&h.a, Some(&a), &["wait", "--timeout=0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_listening(&h, &a, Duration::from_secs(5));
+    h.ok(&h.a, None, &["stop"]);
+    let output = wait_child(waiter, Duration::from_secs(5), "active wait");
+    assert_eq!(output.status.code(), Some(5));
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "DAEMON_STOPPED");
+    assert_eq!(h.ok(&h.a, None, &["status"])["running"], false);
+    let daemon_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(h.home.join("daemon.lock"))
+        .unwrap();
+    assert!(
+        fs2::FileExt::try_lock_exclusive(&daemon_lock).is_ok(),
+        "stop must wait for the daemon lifetime lock to be released"
+    );
+    let _ = fs2::FileExt::unlock(&daemon_lock);
+
+    // A fresh explicit command after stop may start the replacement daemon.
+    assert_eq!(h.ok(&h.a, Some(&a), &["whoami"])["agent"]["id"], a.id);
+    assert_eq!(h.ok(&h.a, None, &["stop"])["stopped"], true);
+}
+
+#[test]
+fn new_wait_during_shutdown_exits_five_without_starting_a_replacement() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "wait-during-stop");
+    let info: Value =
+        serde_json::from_slice(&std::fs::read(h.home.join("daemon.json")).unwrap()).unwrap();
+    let state_path = h.home.join("lifecycle.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    state["stopping"] = info["instance"].clone();
+    std::fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+
+    let output = h.raw(&h.a, Some(&a), &["wait", "--timeout=0"]);
+    assert_eq!(output.status.code(), Some(5));
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "DAEMON_STOPPED");
+    let current: Value =
+        serde_json::from_slice(&std::fs::read(h.home.join("daemon.json")).unwrap()).unwrap();
+    assert_eq!(current["instance"], info["instance"]);
+
+    assert_eq!(h.ok(&h.a, None, &["stop"])["stopped"], true);
+}
+
+#[test]
+fn stop_ends_active_inbox_wait_without_restarting_the_daemon() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "inbox-stop-wait");
+    let waiter = h
+        .command(&h.a, Some(&a), &["inbox", "--wait", "--timeout=0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_listening(&h, &a, Duration::from_secs(5));
+    h.ok(&h.a, None, &["stop"]);
+    let output = wait_child(waiter, Duration::from_secs(5), "active inbox wait");
+    assert_eq!(output.status.code(), Some(5));
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "DAEMON_STOPPED");
+    assert_eq!(h.ok(&h.a, None, &["status"])["running"], false);
+}
+
+#[test]
+fn stop_invalidates_a_start_reserved_before_daemon_publication() {
+    use fs2::FileExt;
+
+    let h = Harness::new();
+    let a = h.register(&h.a, "start-stop-race");
+    h.ok(&h.a, None, &["stop"]);
+
+    let startup = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(h.home.join("startup.lock"))
+        .unwrap();
+    startup.lock_exclusive().unwrap();
+    let starter = h
+        .command(&h.a, Some(&a), &["whoami"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let stopper = h
+        .command(&h.a, None, &["stop"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let state: Value =
+            serde_json::from_slice(&std::fs::read(h.home.join("lifecycle.json")).unwrap()).unwrap();
+        if state["generation"] == 2 {
+            assert_eq!(state["stop_in_progress"], true);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stop did not reserve a new generation"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = startup.unlock();
+
+    let starter = wait_child(starter, Duration::from_secs(5), "pre-stop starter");
+    assert_eq!(starter.status.code(), Some(5));
+    let error: Value = serde_json::from_slice(&starter.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "DAEMON_STOPPED");
+    let stopped = wait_child(stopper, Duration::from_secs(5), "stop barrier");
+    assert!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    let stop_result: Value = serde_json::from_slice(&stopped.stdout).unwrap();
+    assert_eq!(stop_result["data"]["stopped"], false);
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(h.home.join("lifecycle.json")).unwrap()).unwrap();
+    assert_eq!(state["stop_in_progress"], false);
+    assert_eq!(h.ok(&h.a, None, &["status"])["running"], false);
+}
+
+#[test]
+fn child_with_stale_generation_cannot_publish_daemon_metadata() {
+    let h = Harness::new();
+    std::fs::create_dir_all(&h.home).unwrap();
+    std::fs::write(
+        h.home.join("lifecycle.json"),
+        serde_json::to_vec(&json!({
+            "generation": 1,
+            "instance": null,
+            "stop_in_progress": true,
+            "stopping": null
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut child = h.command(&h.a, None, &["daemon"]);
+    child.env("TALA_START_GENERATION", "0");
+    let output = child.output().unwrap();
+    assert!(!output.status.success());
+    assert!(
+        !h.home.join("daemon.json").exists(),
+        "a stale child must not publish daemon metadata"
+    );
+    assert!(!h.home.join("daemon.lock").exists());
+}
+
+#[test]
+fn ordinary_command_waits_for_stop_operation_then_starts() {
+    use fs2::FileExt;
+
+    let h = Harness::new();
+    let a = h.register(&h.a, "command-after-stop");
+    h.ok(&h.a, None, &["stop"]);
+    let stop_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(h.home.join("stop.lock"))
+        .unwrap();
+    stop_lock.lock_exclusive().unwrap();
+    let mut command = h
+        .command(&h.a, Some(&a), &["whoami"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        command.try_wait().unwrap().is_none(),
+        "ordinary command should wait while stop.lock is held"
+    );
+    let _ = stop_lock.unlock();
+    let output = wait_child(
+        command,
+        Duration::from_secs(5),
+        "ordinary command after stop",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(h.ok(&h.a, None, &["stop"])["stopped"], true);
+}
+
+#[test]
 fn unified_wait_reports_direct_messages_and_replies_without_consuming_them() {
     let h = Harness::new();
     let a = h.register(&h.a, "a");
@@ -2353,7 +2605,7 @@ fn incompatible_live_legacy_daemon_blocks_registration_without_new_storage() {
     let port = listener.local_addr().unwrap().port();
     std::fs::write(
         h.home.join("daemon.json"),
-        serde_json::to_vec(&json!({"pid":42,"port":port,"protocol_version":1})).unwrap(),
+        serde_json::to_vec(&json!({"pid":42,"port":port,"protocol_version":8})).unwrap(),
     )
     .unwrap();
     let server = std::thread::spawn(move || {
@@ -2366,7 +2618,7 @@ fn incompatible_live_legacy_daemon_blocks_registration_without_new_storage() {
                 break stream;
             }
         };
-        let body = "{\"pid\":42,\"protocol_version\":1}";
+        let body = "{\"pid\":42,\"protocol_version\":8}";
         write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
     });
     h.error(

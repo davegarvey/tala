@@ -3272,7 +3272,7 @@ mod tests {
             },
             None,
         );
-        for old in [1, 2, 4, 6] {
+        for old in [1, 2, 4, 6, 8] {
             req.protocol_version = old;
             assert_eq!(store.execute(&req).unwrap_err().code, "PROTOCOL_MISMATCH");
         }

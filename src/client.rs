@@ -115,7 +115,7 @@ async fn usable() -> Result<Option<DaemonInfo>> {
         Liveness::Unreachable(reason) => Err(unreachable(info.port, &reason)),
     }
 }
-fn startup_lock_contended(error: &std::io::Error) -> bool {
+pub(crate) fn startup_lock_contended(error: &std::io::Error) -> bool {
     if error.kind() == std::io::ErrorKind::WouldBlock {
         return true;
     }
@@ -129,9 +129,36 @@ fn startup_lock_contended(error: &std::io::Error) -> bool {
         false
     }
 }
-pub async fn ensure() -> Result<DaemonInfo> {
+async fn command_generation() -> Result<u64> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = crate::lifecycle::recover_stopping().await?;
+        if !state.stop_in_progress
+            && state.stopping.is_none()
+            && !crate::lifecycle::stop_operation_active()?
+        {
+            match crate::lifecycle::reserve_for_command() {
+                Err(error) if error.code == "DAEMON_STOPPING" => continue,
+                result => return result,
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Failure::new(
+                "DAEMON_STOPPING",
+                "The daemon is still shutting down",
+                "Check tala status and retry after the current stop finishes.",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn ensure_reserved(generation: u64) -> Result<DaemonInfo> {
     if let Some(i) = usable().await? {
-        return Ok(i);
+        if crate::lifecycle::publish(generation, &i.instance)? {
+            return Ok(i);
+        }
+        return Err(crate::lifecycle::stopped());
     }
     let lock_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let lock = daemon::lock_file("startup.lock")?;
@@ -143,7 +170,13 @@ pub async fn ensure() -> Result<DaemonInfo> {
                 // progress on this runtime thread, and reuse the daemon as
                 // soon as its health check succeeds.
                 if let Some(i) = usable().await? {
-                    return Ok(i);
+                    if crate::lifecycle::publish(generation, &i.instance)? {
+                        return Ok(i);
+                    }
+                    return Err(crate::lifecycle::stopped());
+                }
+                if !crate::lifecycle::can_publish(generation)? {
+                    return Err(crate::lifecycle::stopped());
                 }
                 if tokio::time::Instant::now() >= lock_deadline {
                     return Err(Failure::new(
@@ -159,8 +192,16 @@ pub async fn ensure() -> Result<DaemonInfo> {
         }
     }
     if let Some(i) = usable().await? {
+        if !crate::lifecycle::publish(generation, &i.instance)? {
+            let _ = lock.unlock();
+            return Err(crate::lifecycle::stopped());
+        }
         let _ = lock.unlock();
         return Ok(i);
+    }
+    if !crate::lifecycle::can_publish(generation)? {
+        let _ = lock.unlock();
+        return Err(crate::lifecycle::stopped());
     }
     let mut options = OpenOptions::new();
     options.create(true).append(true);
@@ -182,13 +223,31 @@ pub async fn ensure() -> Result<DaemonInfo> {
     }
     command
         .arg("daemon")
+        .env("TALA_START_GENERATION", generation.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(log)
         .spawn()?;
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
+        if !crate::lifecycle::can_publish(generation)? {
+            let _ = lock.unlock();
+            return Err(crate::lifecycle::stopped());
+        }
         if let Some(i) = usable().await? {
+            if !crate::lifecycle::publish(generation, &i.instance)? {
+                // Stop advanced the generation after this reservation. Shut
+                // down only the instance created here before releasing the
+                // startup barrier, so Stop can safely finish its barrier.
+                let _ = stop_instance(&i).await;
+                let _ =
+                    crate::lifecycle::wait_until_stopped(Duration::from_secs(5), &i.instance).await;
+                if daemon::read_info().is_some_and(|current| current.instance == i.instance) {
+                    let _ = std::fs::remove_file(store::home().join("daemon.json"));
+                }
+                let _ = lock.unlock();
+                return Err(crate::lifecycle::stopped());
+            }
             let _ = lock.unlock();
             return Ok(i);
         }
@@ -198,6 +257,155 @@ pub async fn ensure() -> Result<DaemonInfo> {
         "Daemon did not start within five seconds",
         "Read TALA_HOME/daemon.log for storage, lock or startup errors.",
     ))
+}
+
+pub async fn ensure() -> Result<DaemonInfo> {
+    let generation = command_generation().await?;
+    ensure_reserved(generation).await
+}
+
+/// Starts or binds a new wait to the current lifecycle generation. Unlike an
+/// ordinary command, a wait invoked during shutdown is terminal immediately.
+pub async fn begin_wait() -> Result<(DaemonInfo, u64)> {
+    let state = crate::lifecycle::recover_stopping().await?;
+    if state.stop_in_progress
+        || state.stopping.is_some()
+        || crate::lifecycle::stop_operation_active()?
+    {
+        return Err(crate::lifecycle::stopping_error());
+    }
+    let generation = crate::lifecycle::reserve_for_wait()?;
+    let info = ensure_reserved(generation).await?;
+    if !crate::lifecycle::accepts(generation)? {
+        return Err(crate::lifecycle::stopped());
+    }
+    Ok((info, generation))
+}
+
+async fn stop_instance(info: &DaemonInfo) -> Result<()> {
+    let request = Rpc {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: Uuid::new_v4().to_string(),
+        credential: None,
+        operation: Operation::Stop,
+    };
+    let response = http()?
+        .post(format!("http://127.0.0.1:{}/rpc", info.port))
+        .header("x-tala-instance", &info.instance)
+        .json(&request)
+        .send()
+        .await
+        .map_err(network)?
+        .json::<Envelope>()
+        .await
+        .map_err(network)?;
+    if response.ok {
+        Ok(())
+    } else {
+        Err(response
+            .error
+            .unwrap_or_else(|| network("Missing response")))
+    }
+}
+
+async fn startup_barrier() -> Result<File> {
+    let lock = daemon::lock_file("startup.lock")?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Ok(lock),
+            Err(error) if startup_lock_contended(&error) => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(Failure::new(
+                        "STOP_TIMEOUT",
+                        "Timed out waiting for a daemon start to finish",
+                        "Check tala status and daemon.log, then retry tala stop.",
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+async fn stop_operation_lock() -> Result<File> {
+    let lock = daemon::lock_file("stop.lock")?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Ok(lock),
+            Err(error) if startup_lock_contended(&error) => {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(Failure::new(
+                        "STOP_TIMEOUT",
+                        "Another stop operation has not completed",
+                        "Check tala status and retry tala stop.",
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+pub async fn stop_daemon() -> Result<Value> {
+    let stop_guard = stop_operation_lock().await?;
+    if let Some(info) = daemon::read_info() {
+        match probe(&info).await {
+            Liveness::Live => {
+                compatible(info)?;
+            }
+            Liveness::Unreachable(reason) => return Err(unreachable(info.port, &reason)),
+            Liveness::Stale => {}
+        }
+    }
+    let (_, target) = crate::lifecycle::accept_stop()?;
+    // This barrier drains starters holding startup.lock. Stale reservations
+    // cannot publish after accept_stop; release the lock before contacting or
+    // waiting for the daemon.
+    let barrier = startup_barrier().await?;
+    let state = crate::lifecycle::snapshot()?;
+    let target = target.or_else(|| {
+        state
+            .stopping
+            .filter(|target| state.instance.as_deref() == Some(target.as_str()))
+    });
+    let _ = barrier.unlock();
+    let Some(target) = target else {
+        crate::lifecycle::finish_stop(None)?;
+        let _ = stop_guard.unlock();
+        return Ok(serde_json::json!({"stopped":false,"running":false}));
+    };
+
+    let info = daemon::read_info().filter(|info| info.instance == target);
+    if let Some(info) = info {
+        match probe(&info).await {
+            Liveness::Live => {
+                let _ = stop_instance(&info).await;
+            }
+            Liveness::Stale => {}
+            Liveness::Unreachable(_) => {
+                return Err(Failure::new(
+                    "STOP_TIMEOUT",
+                    "The daemon target is still recorded but cannot be reached",
+                    "Inspect tala status and daemon.log; retry stop when the daemon can be reached.",
+                ));
+            }
+        }
+    }
+    if crate::lifecycle::wait_until_stopped(Duration::from_secs(5), &target).await? {
+        crate::lifecycle::finish_stop(Some(&target))?;
+        let _ = stop_guard.unlock();
+        Ok(serde_json::json!({"stopped":true,"instance":target}))
+    } else {
+        Err(Failure::new(
+            "STOP_TIMEOUT",
+            "Daemon has not completed shutdown",
+            "Check tala status and daemon.log.",
+        ))
+    }
 }
 
 fn compatible(i: DaemonInfo) -> Result<DaemonInfo> {
@@ -728,6 +936,29 @@ pub async fn call_as(
     op: Operation,
     credential: Option<Credential>,
 ) -> Result<Value> {
+    call_with_generation(request_id, op, credential, None).await
+}
+pub async fn call_bound(
+    op: Operation,
+    credential: Option<Credential>,
+    generation: u64,
+) -> Result<Value> {
+    call_with_generation(Uuid::new_v4().to_string(), op, credential, Some(generation)).await
+}
+pub async fn call_as_bound(
+    request_id: String,
+    op: Operation,
+    credential: Option<Credential>,
+    generation: u64,
+) -> Result<Value> {
+    call_with_generation(request_id, op, credential, Some(generation)).await
+}
+async fn call_with_generation(
+    request_id: String,
+    op: Operation,
+    credential: Option<Credential>,
+    generation: Option<u64>,
+) -> Result<Value> {
     let request = Rpc {
         protocol_version: PROTOCOL_VERSION,
         request_id,
@@ -736,7 +967,10 @@ pub async fn call_as(
     };
     let mut last = None;
     for _ in 0..3 {
-        let info = ensure().await?;
+        let info = match generation {
+            Some(generation) => ensure_reserved(generation).await?,
+            None => ensure().await?,
+        };
         match http()?
             .post(format!("http://127.0.0.1:{}/rpc", info.port))
             .header("x-tala-instance", &info.instance)

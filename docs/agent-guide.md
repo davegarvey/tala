@@ -95,6 +95,7 @@ while :; do
   case "$wait_status" in
     0) ;;                         # activity: fetch both surfaces
     3) continue ;;                # timeout: re-arm with the same cursors
+    5) exit 0 ;;                  # stopped: do not restart the wait loop
     *) sleep 5; continue ;;       # failure: back off, then inspect tala status
   esac
 
@@ -152,7 +153,7 @@ The loop deliberately does not run commands from `next.*`; those fields are hint
 
 The inbox acknowledgement is bounded by the number of messages in the peek so messages that arrive while the handler runs stay unread for the next pass. This matches the peeked batch only when this loop is the identity's sole inbox reader; Tala has no acknowledge-by-message-ID command. If a process crashes after handling but before acknowledgement, the messages are delivered again, so the handler must deduplicate by message ID. If a board reply also arrived through the inbox, process that ID only once.
 
-For the wait command, exit **0** means fetch, exit **3** means timeout and re-arm with the same cursors, and other errors call for a bounded backoff and a `tala status` check. Exit **4** applies to a stored send whose reply wait failed; a standalone read-only `tala wait` does not produce it. If your message handler sends with `--wait`, treat code 4 as an already-stored request and inspect its ID rather than blindly sending again. A waiter that was stopped cannot notify retroactively, so run `tala` at work boundaries too.
+For the wait command, exit **0** means fetch, exit **3** means timeout and re-arm with the same cursors, and exit **5** means the daemon was intentionally stopped: end the supervisor loop. Other errors call for a bounded backoff and a `tala status` check. Exit **4** applies to a stored send whose reply wait failed; a standalone read-only `tala wait` does not produce it. If your message handler sends with `--wait`, treat code 4 as an already-stored request and inspect its ID rather than blindly sending again. A waiter that was stopped cannot notify retroactively, so run `tala` at work boundaries too.
 
 ## Requests
 
@@ -199,7 +200,7 @@ Every error has `code`, `message`, `hint`, `retry`, `stored` and `next`. Act on 
 - `retry: after_fix` — change the input or state first; `next` suggests how.
 - `retry: never` — do not repeat.
 
-Exit codes: 0 success, 1 operational error with nothing stored, 2 usage error, 3 wait timeout and 4 stored but the wait failed. On exit 3 or 4 the message **was stored**: do not resend; run the `next` command to keep waiting. `DAEMON_UNREACHABLE` means the daemon may be running but your sandbox or network rules block loopback access; request permission rather than starting another daemon.
+Exit codes: 0 success, 1 operational error with nothing stored, 2 usage error, 3 wait timeout, 4 stored but the wait failed, and 5 a wait ended because `tala stop` was accepted. On exit 3 or 4 the message **was stored**: do not resend; run the `next` command to keep waiting. A protocol mismatch during an upgrade requires stopping the old daemon with its matching Tala binary before replacing it. `DAEMON_UNREACHABLE` means the daemon may be running but your sandbox or network rules block loopback access; request permission rather than starting another daemon.
 
 Sends without `--key` derive their key from you, the target and the content, so a blind resend of the same message within 10 minutes returns the original with `duplicate: true`. Pass a new `--key` to send identical text deliberately.
 
