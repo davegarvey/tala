@@ -846,6 +846,80 @@ fn abrupt_crash_keeps_committed_messages() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn wait_recovers_after_daemon_crash_without_blocking_a_concurrent_client() {
+    use fs2::FileExt;
+
+    let h = Harness::new();
+    let a = h.register(&h.a, "a");
+    let mut waiter = h
+        .command(&h.a, Some(&a), &["wait", "--timeout=30"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(waiter.try_wait().unwrap().is_none());
+
+    let pid = daemon_pid(&h);
+    assert!(Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+    std::thread::sleep(Duration::from_secs(1));
+
+    let mut inbox = h
+        .command(&h.a, Some(&a), &["inbox", "--peek"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        match inbox.try_wait().unwrap() {
+            Some(status) => break status,
+            None if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            None => {
+                let _ = inbox.kill();
+                let _ = waiter.kill();
+                let _ = waiter.wait();
+                panic!("inbox remained blocked after the waiter's daemon died");
+            }
+        }
+    };
+    let output = inbox.wait_with_output().unwrap();
+    let waiter_recovered = waiter.try_wait().unwrap().is_none();
+    let _ = waiter.kill();
+    let _ = waiter.wait();
+
+    assert!(
+        status.success(),
+        "inbox failed after daemon recovery: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        waiter_recovered,
+        "finite wait should recover and keep listening"
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["ok"], true);
+    assert_eq!(response["data"]["messages"], json!([]));
+    assert_eq!(h.ok(&h.a, None, &["status"])["running"], true);
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(h.home.join("startup.lock"))
+        .unwrap();
+    assert!(
+        lock.try_lock_exclusive().is_ok(),
+        "startup lock should be available after the waiter and inbox complete"
+    );
+}
+
 #[test]
 fn direct_messages_cannot_leak_into_public_board_threads() {
     let h = Harness::new();

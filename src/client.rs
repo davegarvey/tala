@@ -119,9 +119,33 @@ pub async fn ensure() -> Result<DaemonInfo> {
     if let Some(i) = usable().await? {
         return Ok(i);
     }
+    let lock_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let lock = daemon::lock_file("startup.lock")?;
-    lock.lock_exclusive()?;
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                // Another client may be starting a replacement. Let it make
+                // progress on this runtime thread, and reuse the daemon as
+                // soon as its health check succeeds.
+                if let Some(i) = usable().await? {
+                    return Ok(i);
+                }
+                if tokio::time::Instant::now() >= lock_deadline {
+                    return Err(Failure::new(
+                        "DAEMON_START_FAILED",
+                        "Timed out waiting for another client to start the daemon",
+                        "Check tala status and TALA_HOME/daemon.log, then retry.",
+                    )
+                    .with_next("tala status"));
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
     if let Some(i) = usable().await? {
+        let _ = lock.unlock();
         return Ok(i);
     }
     let mut options = OpenOptions::new();
@@ -151,6 +175,7 @@ pub async fn ensure() -> Result<DaemonInfo> {
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if let Some(i) = usable().await? {
+            let _ = lock.unlock();
             return Ok(i);
         }
     }
