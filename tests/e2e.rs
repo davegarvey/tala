@@ -2014,7 +2014,7 @@ fn wait_recovers_after_daemon_crash_without_blocking_a_concurrent_client() {
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(h.home.join("startup.lock"))
+        .open(h.home.join("startup-v2.lock"))
         .unwrap();
     assert!(
         lock.try_lock_exclusive().is_ok(),
@@ -2160,6 +2160,35 @@ fn stop_ends_active_inbox_wait_without_restarting_the_daemon() {
 }
 
 #[test]
+fn legacy_startup_lock_does_not_block_current_startup() {
+    use fs2::FileExt;
+
+    let h = Harness::new();
+    std::fs::create_dir_all(&h.home).unwrap();
+    let legacy_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(h.home.join("startup.lock"))
+        .unwrap();
+    legacy_lock.lock_exclusive().unwrap();
+
+    let identity = h.ok(
+        &h.a,
+        None,
+        &[
+            "register",
+            "--name",
+            "legacy-lock-recovery",
+            "--tool=fixture",
+        ],
+    );
+    assert_eq!(identity["next"], "tala guide listening");
+    assert_eq!(h.ok(&h.a, None, &["status"])["running"], true);
+}
+
+#[test]
 fn stop_invalidates_a_start_reserved_before_daemon_publication() {
     use fs2::FileExt;
 
@@ -2170,7 +2199,7 @@ fn stop_invalidates_a_start_reserved_before_daemon_publication() {
     let startup = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(h.home.join("startup.lock"))
+        .open(h.home.join("startup-v2.lock"))
         .unwrap();
     startup.lock_exclusive().unwrap();
     let starter = h

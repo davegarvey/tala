@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- avoid legacy startup locks blocking daemon recovery after upgrades
 - stop/wait lifecycle races and supervisor rearming after intentional shutdown (#138)
 
 ### Changed

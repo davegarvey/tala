@@ -161,7 +161,7 @@ async fn ensure_reserved(generation: u64) -> Result<DaemonInfo> {
         return Err(crate::lifecycle::stopped());
     }
     let lock_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let lock = daemon::lock_file("startup.lock")?;
+    let lock = daemon::lock_file(daemon::STARTUP_LOCK_FILE)?;
     loop {
         match lock.try_lock_exclusive() {
             Ok(()) => break,
@@ -236,13 +236,13 @@ async fn ensure_reserved(generation: u64) -> Result<DaemonInfo> {
             if state.instance != instance_before_spawn {
                 // The daemon published immediately before Stop advanced the
                 // generation. Stop captured this instance and must acquire
-                // startup.lock before sending its own RPC.
+                // the startup lock before sending its own RPC.
                 let _ = lock.unlock();
                 return Err(crate::lifecycle::stopped());
             }
             // The child may have passed its first generation check but not
             // yet acquired daemon.lock. Reap that exact child before
-            // releasing startup.lock, so Stop's barrier covers hidden starts.
+            // releasing the startup lock, so Stop's barrier covers hidden starts.
             wait_for_start_child_exit(&mut child).await?;
             let _ = lock.unlock();
             return Err(crate::lifecycle::stopped());
@@ -252,7 +252,7 @@ async fn ensure_reserved(generation: u64) -> Result<DaemonInfo> {
                 let state = crate::lifecycle::snapshot()?;
                 if state.instance != instance_before_spawn {
                     // Stop already captured the just-published daemon as its
-                    // target. Let it acquire startup.lock and perform shutdown.
+                    // target. Let it acquire the startup lock and perform shutdown.
                     let _ = lock.unlock();
                     return Err(crate::lifecycle::stopped());
                 }
@@ -281,7 +281,7 @@ async fn wait_for_start_child_exit(child: &mut Child) -> Result<()> {
         if tokio::time::Instant::now() >= deadline {
             // This child has no valid startup reservation anymore (or failed
             // to publish within the startup deadline), so it cannot be left
-            // running after startup.lock is released.
+            // running after the startup lock is released.
             let _ = child.kill();
             child.wait()?;
             return Ok(());
@@ -340,7 +340,7 @@ async fn stop_instance(info: &DaemonInfo) -> Result<()> {
 }
 
 async fn startup_barrier() -> Result<File> {
-    let lock = daemon::lock_file("startup.lock")?;
+    let lock = daemon::lock_file(daemon::STARTUP_LOCK_FILE)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         match lock.try_lock_exclusive() {
@@ -393,7 +393,7 @@ pub async fn stop_daemon() -> Result<Value> {
         }
     }
     let (_, target) = crate::lifecycle::accept_stop()?;
-    // This barrier drains starters holding startup.lock. Stale reservations
+    // This barrier drains starters holding the current startup lock. Stale reservations
     // cannot publish after accept_stop; release the lock before contacting or
     // waiting for the daemon.
     let barrier = startup_barrier().await?;

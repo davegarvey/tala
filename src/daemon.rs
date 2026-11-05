@@ -11,6 +11,9 @@ use std::{
 use tokio::sync::watch;
 use uuid::Uuid;
 
+/// Lock generation for current clients. Older releases used `startup.lock`.
+pub const STARTUP_LOCK_FILE: &str = "startup-v2.lock";
+
 pub fn lock_file(name: &str) -> std::io::Result<File> {
     store::private_dir(&store::home())?;
     let mut options = OpenOptions::new();
