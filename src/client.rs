@@ -1025,7 +1025,12 @@ async fn call_with_generation(
             Some(generation) => ensure_reserved(generation).await?,
             None => ensure().await?,
         };
-        match http()?
+        let client = if matches!(&request.operation, Operation::Wait { .. }) {
+            reqwest::Client::builder().build().map_err(network)?
+        } else {
+            http()?
+        };
+        match client
             .post(format!("http://127.0.0.1:{}/rpc", info.port))
             .header("x-tala-instance", &info.instance)
             .json(&request)
