@@ -232,7 +232,7 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let mut version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if !(0..=5).contains(&version) {
+        if !(0..=6).contains(&version) {
             return Err(Failure::new(
                 "DATABASE_VERSION",
                 format!("Unsupported database schema {version}"),
@@ -444,6 +444,30 @@ COMMIT;")?;
                  COMMIT;",
             )?;
         }
+        if version < 6 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE messages ADD COLUMN accepted_at INTEGER;
+                 ALTER TABLE messages ADD COLUMN acceptance_state TEXT NOT NULL DEFAULT 'pending';
+                 ALTER TABLE messages ADD COLUMN acceptance_detail TEXT;
+                 ALTER TABLE messages ADD COLUMN accept_deadline INTEGER;
+                 ALTER TABLE messages ADD COLUMN acceptance_expired_at INTEGER;
+                 ALTER TABLE messages ADD COLUMN delivery_overdue_after INTEGER;
+                 ALTER TABLE messages ADD COLUMN delivery_overdue_at INTEGER;
+                 CREATE TABLE agent_events(
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   agent TEXT NOT NULL REFERENCES agents(id),
+                   type TEXT NOT NULL,
+                   message INTEGER NOT NULL REFERENCES messages(id),
+                   created_at INTEGER NOT NULL,
+                   detail TEXT,
+                   UNIQUE(agent,type,message)
+                 );
+                 CREATE INDEX agent_events_cursor ON agent_events(agent,id);
+                 PRAGMA user_version=6;
+                 COMMIT;",
+            )?;
+        }
         let check: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
         if check != "ok" {
             return Err(Failure::new(
@@ -520,6 +544,9 @@ COMMIT;")?;
             } else {
                 None
             };
+        if let Some(id) = identity {
+            process_due_events(&tx, id)?;
+        }
         let require = || {
             identity.ok_or_else(|| {
                 Failure::new(
@@ -735,6 +762,20 @@ COMMIT;")?;
                     }
                 }
                 let mut data = json!(page);
+                if let Some(messages) = data["messages"].as_array_mut() {
+                    for item in messages {
+                        let id = item["id"].as_u64().unwrap_or_default();
+                        item["next"] = json!(if item["acceptance_state"] == "declined" {
+                            "tala".to_string()
+                        } else if item["expects_reply"] == true
+                            && item["acceptance_state"] == "pending"
+                        {
+                            format!("tala accept {id}")
+                        } else {
+                            format!("tala reply {id} '<answer>'")
+                        });
+                    }
+                }
                 if let Some(request_id) = reply_to {
                     let original = message(&tx, *request_id)?;
                     if original.sender != id {
@@ -803,10 +844,15 @@ COMMIT;")?;
                 };
                 let cutoff = cutoff(STALE_AFTER);
                 let open = format!("{OPEN} AND {side}");
-                let selected = if *stale {
-                    format!("{open} AND {STALE}")
+                let list_condition = if direction == "incoming" {
+                    open.clone()
                 } else {
-                    format!("{open} AND NOT {STALE}")
+                    format!("(({OPEN}) OR (messages.expects_reply=1 AND messages.acceptance_state='declined' AND messages.sender=?1)) AND {side}")
+                };
+                let selected = if *stale {
+                    format!("{list_condition} AND {STALE}")
+                } else {
+                    format!("{list_condition} AND NOT {STALE}")
                 };
                 let mut data = json!(page(&tx, &selected, params![id, cutoff], *after, *limit)?);
                 if !stale {
@@ -823,6 +869,28 @@ COMMIT;")?;
                 }
                 data
             }
+            Operation::Accept { message: id, note } => {
+                request_decision(&tx, require()?, *id, true, note.as_deref())?
+            }
+            Operation::Decline {
+                message: id,
+                reason,
+            } => request_decision(&tx, require()?, *id, false, reason.as_deref())?,
+            Operation::Wait {
+                project,
+                inbox_after,
+                board_after,
+                event_after,
+                timeout: _,
+            } => {
+                let id = require()?;
+                tx.execute(
+                    "UPDATE agents SET listening_until=? WHERE id=?",
+                    params![now() + 3, id],
+                )?;
+                process_due_events(&tx, id)?;
+                wait_snapshot(&tx, id, project, *inbox_after, *board_after, *event_after)?
+            }
             Operation::Attention => summary(&tx, require()?, cutoff(STALE_AFTER))?,
             Operation::Resolve { message: id } => {
                 let msg = message(&tx, *id)?;
@@ -833,6 +901,11 @@ COMMIT;")?;
                     return Err(invalid("Request is already answered"));
                 }
                 tx.execute("UPDATE messages SET cancelled=1 WHERE id=?", [id])?;
+                if msg.accepted_at.is_some() {
+                    if let Some(recipient) = msg.recipient.as_deref() {
+                        record_event(&tx, recipient, "request_cancelled", *id, None)?;
+                    }
+                }
                 tx.execute("DELETE FROM thread_open_requests WHERE message=?", [id])?;
                 json!({"message":message(&tx,*id)?})
             }
@@ -884,6 +957,13 @@ fn count<P: rusqlite::Params>(tx: &Transaction<'_>, predicate: &str, p: P) -> Re
 fn reply_next(id: u64) -> String {
     format!("tala reply {id} '<answer>'")
 }
+fn request_next(message: &Message) -> String {
+    if message.expects_reply && message.acceptance_state == "pending" {
+        format!("tala accept {}", message.id)
+    } else {
+        reply_next(message.id)
+    }
+}
 fn with_next(page: Page, next: impl Fn(&Message) -> String) -> Vec<Value> {
     page.messages
         .iter()
@@ -907,7 +987,7 @@ fn summary(tx: &Transaction<'_>, id: &str, cutoff: i64) -> Result<Value> {
         50,
     )?;
     let more = requests.has_more;
-    let requests = with_next(requests, |m| reply_next(m.id));
+    let requests = with_next(requests, request_next);
     let waiting = with_next(
         page(
             tx,
@@ -924,7 +1004,14 @@ fn summary(tx: &Transaction<'_>, id: &str, cutoff: i64) -> Result<Value> {
     });
     let stale_in = count(tx, &format!("{incoming} AND {STALE}"), params![id, cutoff])?;
     let stale_out = count(tx, &format!("{outgoing} AND {STALE}"), params![id, cutoff])?;
-    let next = if unread_count > 0 {
+    let listening = tx.query_row(
+        "SELECT listening_until>? FROM agents WHERE id=?",
+        params![now(), id],
+        |r| r.get::<_, bool>(0),
+    )?;
+    let next = if !listening && (unread_count > 0 || !requests.is_empty()) {
+        Some("tala wait".to_string())
+    } else if unread_count > 0 {
         Some("tala inbox".to_string())
     } else if let Some(first) = requests.first() {
         first["next"].as_str().map(Into::into)
@@ -940,6 +1027,7 @@ fn summary(tx: &Transaction<'_>, id: &str, cutoff: i64) -> Result<Value> {
         "outgoing_requests": waiting,
         "stale": {"incoming": stale_in, "outgoing": stale_out, "next": "tala pending --stale"},
         "next": next,
+        "listening": listening,
     }))
 }
 /// Compact attention attached to every authenticated response; None when
@@ -958,7 +1046,7 @@ fn ambient(tx: &Transaction<'_>, id: &str) -> Result<Option<Value>> {
         return Ok(None);
     }
     let mut stmt = tx.prepare(&format!(
-        "SELECT id,sender,created_at FROM messages WHERE {fresh} ORDER BY id LIMIT 3"
+        "SELECT id,sender,created_at,acceptance_state FROM messages WHERE {fresh} ORDER BY id LIMIT 3"
     ))?;
     let requests = stmt
         .query_map(params![id, cutoff], |r| {
@@ -966,19 +1054,31 @@ fn ambient(tx: &Transaction<'_>, id: &str) -> Result<Option<Value>> {
                 r.get::<_, u64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let next = if unread > 0 {
+    let listening = tx.query_row(
+        "SELECT listening_until>? FROM agents WHERE id=?",
+        params![now(), id],
+        |r| r.get::<_, bool>(0),
+    )?;
+    let next = if !listening && (unread > 0 || open > 0) {
+        "tala wait".to_string()
+    } else if unread > 0 {
         "tala inbox".to_string()
-    } else if let Some((first, _, _)) = requests.first() {
-        reply_next(*first)
+    } else if let Some((first, _, _, state)) = requests.first() {
+        if state == "pending" {
+            format!("tala accept {first}")
+        } else {
+            reply_next(*first)
+        }
     } else {
         "tala pending --stale".to_string()
     };
     let requests: Vec<Value> = requests
         .into_iter()
-        .map(|(id, from, created)| json!({"id": id, "from": from, "age_seconds": (now() - created).max(0)}))
+        .map(|(id, from, created, acceptance_state)| json!({"id": id, "from": from, "age_seconds": (now() - created).max(0),"acceptance_state":acceptance_state}))
         .collect();
     Ok(Some(json!({
         "unread": unread,
@@ -986,6 +1086,7 @@ fn ambient(tx: &Transaction<'_>, id: &str) -> Result<Option<Value>> {
         "open_requests": open,
         "stale": stale,
         "next": next,
+        "listening": listening,
     })))
 }
 fn bounds(limit: usize) -> Result<()> {
@@ -1384,13 +1485,18 @@ fn row_message(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         received_at: r.get(13)?,
         answered_by: r.get(14)?,
         cancelled: r.get(15)?,
+        acceptance_state: r.get(16)?,
+        accepted_at: r.get(17)?,
+        accept_deadline: r.get(18)?,
+        acceptance_expired_at: r.get(19)?,
+        delivery_overdue_at: r.get(20)?,
         delivery: String::new(),
         age_seconds: (now() - r.get::<_, i64>(12)?).max(0),
     };
     msg.delivery = delivery(&msg);
     Ok(msg)
 }
-const COLUMNS:&str="id,thread,sender,recipient,project,context,parts,kind,reply_to,supersedes,(SELECT id FROM messages successor WHERE successor.supersedes=messages.id),expects_reply,created_at,received_at,answered_by,cancelled";
+const COLUMNS:&str="id,thread,sender,recipient,project,context,parts,kind,reply_to,supersedes,(SELECT id FROM messages successor WHERE successor.supersedes=messages.id),expects_reply,created_at,received_at,answered_by,cancelled,acceptance_state,accepted_at,accept_deadline,acceptance_expired_at,delivery_overdue_at";
 fn message(tx: &Transaction<'_>, id: u64) -> Result<Message> {
     tx.query_row(
         &format!("SELECT {COLUMNS} FROM messages WHERE id=?"),
@@ -1633,6 +1739,151 @@ fn add_open_request(
     )?;
     Ok(())
 }
+
+fn record_event(
+    tx: &Transaction<'_>,
+    agent: &str,
+    kind: &str,
+    message: u64,
+    detail: Option<&str>,
+) -> Result<()> {
+    tx.execute("INSERT OR IGNORE INTO agent_events(agent,type,message,created_at,detail) VALUES(?,?,?,?,?)", params![agent, kind, message, now(), detail])?;
+    Ok(())
+}
+
+fn process_due_events(tx: &Transaction<'_>, _agent: &str) -> Result<()> {
+    let at = now();
+    let mut due = tx.prepare("SELECT id,sender,recipient,acceptance_state FROM messages WHERE expects_reply=1 AND acceptance_state='pending' AND answered_by IS NULL AND cancelled=0 AND NOT EXISTS(SELECT 1 FROM messages s WHERE s.supersedes=messages.id) AND accept_deadline IS NOT NULL AND accept_deadline<=? AND acceptance_expired_at IS NULL")?;
+    let rows = due
+        .query_map([at], |r| {
+            Ok((
+                r.get::<_, u64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(due);
+    for (id, sender, _recipient, state) in rows {
+        if state == "pending" {
+            tx.execute("UPDATE messages SET acceptance_expired_at=? WHERE id=? AND acceptance_expired_at IS NULL",params![at,id])?;
+            record_event(tx, &sender, "acceptance_deadline_expired", id, None)?;
+        }
+    }
+    let mut due = tx.prepare("SELECT id,sender,recipient FROM messages WHERE recipient IS NOT NULL AND received_at IS NULL AND delivery_overdue_after IS NOT NULL AND created_at+delivery_overdue_after<=? AND delivery_overdue_at IS NULL")?;
+    let rows = due
+        .query_map([at], |r| {
+            Ok((
+                r.get::<_, u64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(due);
+    for (id, sender, _recipient) in rows {
+        tx.execute(
+            "UPDATE messages SET delivery_overdue_at=? WHERE id=? AND delivery_overdue_at IS NULL",
+            params![at, id],
+        )?;
+        record_event(tx, &sender, "delivery_overdue", id, None)?;
+    }
+    Ok(())
+}
+
+fn wait_snapshot(
+    tx: &Transaction<'_>,
+    agent_id: &str,
+    project: &str,
+    inbox_after: u64,
+    board_after: Option<u64>,
+    event_after: u64,
+) -> Result<Value> {
+    let inbox = page(
+        tx,
+        &format!("({UNREAD}) AND messages.id>?2"),
+        params![agent_id, inbox_after],
+        inbox_after,
+        50,
+    )?;
+    let baseline = match board_after {
+        Some(cursor) => cursor,
+        None => tx.query_row(
+            "SELECT COALESCE(MAX(id),0) FROM messages WHERE project=?",
+            [project],
+            |r| r.get::<_, u64>(0),
+        )?,
+    };
+    let board = page(
+        tx,
+        "project=? AND id>?",
+        params![project, baseline],
+        baseline,
+        50,
+    )?;
+    let mut stmt=tx.prepare("SELECT id,type,message,created_at,detail FROM agent_events WHERE agent=? AND id>? ORDER BY id LIMIT 50")?;
+    let rows=stmt.query_map(params![agent_id,event_after],|r|Ok(json!({"id":r.get::<_,u64>(0)?,"type":r.get::<_,String>(1)?,"message_id":r.get::<_,u64>(2)?,"created_at":r.get::<_,i64>(3)?,"detail":r.get::<_,Option<String>>(4)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
+    let event_cursor = rows
+        .last()
+        .and_then(|v| v["id"].as_u64())
+        .unwrap_or(event_after);
+    Ok(
+        json!({"inbox":inbox,"board":board,"durable_events":rows,"event_after":event_cursor,"event_has_more":rows.len()==50}),
+    )
+}
+
+fn request_decision(
+    tx: &Transaction<'_>,
+    actor: &str,
+    id: u64,
+    accept: bool,
+    detail: Option<&str>,
+) -> Result<Value> {
+    if detail.is_some_and(|v| v.chars().any(char::is_control) || v.chars().count() > 500) {
+        return Err(invalid(
+            "Decision note/reason must be at most 500 characters and contain no control characters",
+        ));
+    }
+    let row = tx.query_row("SELECT recipient,sender,expects_reply,answered_by,cancelled,acceptance_state,acceptance_detail,superseded_by FROM (SELECT m.*, (SELECT id FROM messages s WHERE s.supersedes=m.id) AS superseded_by FROM messages m WHERE m.id=?)",[id],|r| Ok((r.get::<_,Option<String>>(0)?,r.get::<_,String>(1)?,r.get::<_,bool>(2)?,r.get::<_,Option<u64>>(3)?,r.get::<_,bool>(4)?,r.get::<_,String>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,Option<u64>>(7)?))).optional()?.ok_or_else(|| Failure::new("MESSAGE_NOT_FOUND","No such request","Check the request ID with tala pending."))?;
+    let (recipient, sender, request, answered, cancelled, state, _old_detail, superseded_by) = row;
+    if recipient.as_deref() != Some(actor) {
+        return Err(Failure::new(
+            "NOT_RECIPIENT",
+            "Only the addressed recipient can decide a request",
+            "Select the recipient identity that received the request.",
+        ));
+    }
+    if !request || answered.is_some() || cancelled || superseded_by.is_some() {
+        return Err(invalid("This request is no longer active"));
+    }
+    let next = if accept { "accepted" } else { "declined" };
+    if state == next {
+        return Ok(json!({"message":message(tx,id)?,"changed":false}));
+    }
+    if state != "pending" {
+        return Err(invalid(
+            "Request already has a conflicting acceptance decision",
+        ));
+    }
+    let detail = detail.map(str::trim).filter(|s| !s.is_empty());
+    tx.execute("UPDATE messages SET acceptance_state=?,accepted_at=?,acceptance_detail=? WHERE id=? AND acceptance_state='pending'",params![next,if accept {Some(now())} else {None},detail,id])?;
+    record_event(
+        tx,
+        &sender,
+        if accept {
+            "request_accepted"
+        } else {
+            "request_declined"
+        },
+        id,
+        detail,
+    )?;
+    if !accept {
+        tx.execute("DELETE FROM thread_open_requests WHERE message=?", [id])?;
+    }
+    Ok(json!({"message":message(tx,id)?,"changed":true}))
+}
 fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Value> {
     let Operation::Send {
         to,
@@ -1645,6 +1896,8 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
         key,
         context,
         supersedes,
+        accept_within,
+        delivery_overdue_after,
     } = operation
     else {
         unreachable!()
@@ -1720,6 +1973,12 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
                 ));
             }
             if parent.expects_reply {
+                if parent.cancelled {
+                    return Err(invalid("Request was cancelled by its sender"));
+                }
+                if parent.acceptance_state == "declined" {
+                    return Err(invalid("Request was declined"));
+                }
                 if let Some(successor) = parent.superseded_by {
                     return Err(Failure::new(
                         "REQUEST_SUPERSEDED",
@@ -1809,7 +2068,22 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
         .as_deref()
         .map(|recipient| recipient_is_listening(tx, recipient))
         .transpose()?;
-    tx.execute("INSERT INTO messages(thread,sender,recipient,project,context,parts,kind,reply_to,expects_reply,created_at,key,canonical,recipient_listening,supersedes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",params![thread_id,sender,recipient,board,encode(context)?,encode(parts)?,kind,reply_to,request,created_at,stored_key,canonical,recipient_listening,supersedes])?;
+    if accept_within.is_some() && !request {
+        return Err(invalid("--accept-within requires --request"));
+    }
+    if accept_within.is_some_and(|seconds| seconds > 30 * 24 * 60 * 60) {
+        return Err(invalid("Acceptance deadline must be at most 30 days"));
+    }
+    let accept_deadline = accept_within.map(|seconds| created_at.saturating_add(seconds as i64));
+    if delivery_overdue_after.is_some_and(|seconds| seconds > 7 * 24 * 60 * 60) {
+        return Err(invalid(
+            "Delivery-overdue threshold must be at most seven days",
+        ));
+    }
+    let delivery_overdue_after = recipient
+        .as_ref()
+        .map(|_| delivery_overdue_after.unwrap_or(300) as i64);
+    tx.execute("INSERT INTO messages(thread,sender,recipient,project,context,parts,kind,reply_to,expects_reply,created_at,key,canonical,recipient_listening,supersedes,accept_deadline,delivery_overdue_after) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",params![thread_id,sender,recipient,board,encode(context)?,encode(parts)?,kind,reply_to,request,created_at,stored_key,canonical,recipient_listening,supersedes,accept_deadline,delivery_overdue_after])?;
     let id = tx.last_insert_rowid() as u64;
     update_thread_summary(tx, &thread_id, id, created_at, board.as_deref(), parts)?;
     tx.execute(
@@ -1871,10 +2145,37 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
         }
     }
     if let Some(superseded_message) = supersedes {
+        let (old_sender, accepted): (String, bool) = tx.query_row(
+            "SELECT sender,accepted_at IS NOT NULL FROM messages WHERE id=?",
+            [superseded_message],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
         tx.execute(
             "DELETE FROM thread_open_requests WHERE message=?",
             [superseded_message],
         )?;
+        if accepted {
+            record_event(
+                tx,
+                &old_sender,
+                "request_superseded",
+                *superseded_message,
+                None,
+            )?;
+            if let Some(recipient) = tx.query_row(
+                "SELECT recipient FROM messages WHERE id=?",
+                [superseded_message],
+                |r| r.get::<_, Option<String>>(0),
+            )? {
+                record_event(
+                    tx,
+                    &recipient,
+                    "request_superseded",
+                    *superseded_message,
+                    None,
+                )?;
+            }
+        }
     }
     if let Some(author) = notify {
         tx.execute(
@@ -2276,6 +2577,8 @@ mod tests {
             key: key.into(),
             context: context(),
             supersedes: None,
+            accept_within: None,
+            delivery_overdue_after: None,
         }
     }
     fn age(store: &Store, id: u64, seconds: i64) {
@@ -2845,7 +3148,7 @@ mod tests {
         let summary = store.execute(&rpc(Operation::Attention, Some(b))).unwrap();
         assert_eq!(summary["incoming_requests"], json!([]));
         assert_eq!(summary["stale"]["incoming"], 1);
-        assert_eq!(summary["next"], "tala inbox");
+        assert_eq!(summary["next"], "tala wait");
     }
     #[test]
     fn automatic_keys_deduplicate_only_inside_the_window() {
@@ -3034,7 +3337,7 @@ mod tests {
         let attention = attention.unwrap();
         assert_eq!(attention["unread"], 0);
         assert_eq!(attention["open_requests"], 1);
-        assert_eq!(attention["next"], format!("tala reply {id} '<answer>'"));
+        assert_eq!(attention["next"], "tala wait");
     }
     /// Measures ambient attention cost on 10,000 messages:
     /// `cargo test --release --bin tala attention_cost -- --ignored --nocapture`
@@ -3210,7 +3513,7 @@ mod tests {
         let attention = attention.unwrap();
         assert_eq!(
             (attention["unread"].clone(), attention["next"].clone()),
-            (json!(1), json!("tala inbox"))
+            (json!(1), json!("tala wait"))
         );
         let summary = store
             .execute(&rpc(Operation::Attention, Some(a.clone())))
@@ -3495,7 +3798,7 @@ mod tests {
                 .db
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            5
+            6
         );
         assert_eq!(
             store
@@ -3544,7 +3847,7 @@ mod tests {
                 .db
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            5
+            6
         );
         assert_eq!(
             store
@@ -3599,7 +3902,7 @@ mod tests {
                 .db
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            6
         );
         assert_eq!(
             store
@@ -3711,7 +4014,7 @@ mod tests {
                 .db
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            6
         );
         let direct: (String, Option<String>, u64, u64, String) = store
             .db
@@ -3924,6 +4227,8 @@ mod tests {
                         key: format!("list-benchmark-{n}"),
                         context: context(),
                         supersedes: None,
+                        accept_within: None,
+                        delivery_overdue_after: None,
                     },
                     Some(Credential {
                         agent: "agt_list".into(),
@@ -3943,7 +4248,7 @@ mod tests {
                 .db
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            6
         );
         for column in ["purpose", "purpose_updated_at"] {
             assert_eq!(

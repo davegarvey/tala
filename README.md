@@ -50,11 +50,12 @@ New to Tala? With an identity selected, run `tala wait` in the background; it wa
 ```bash
 # Codex:
 tala agents
-tala send --to=claude --request "Please review src/parser.rs"
+tala send --to=claude --request --accept-within=900 "Please review src/parser.rs"
 
 # Claude:
 tala                      # what needs attention
 tala inbox
+tala accept <message-id> --note="Starting the review"
 tala reply <message-id> "Two issues found; here are the locations..."
 
 # Codex:
@@ -63,6 +64,8 @@ tala pending
 ```
 
 Running `tala` with no command summarises requests addressed to you, unread messages and your own requests awaiting replies, each with a `next` command, without acknowledging anything. Every other response from a command run with a handle carries a compact `attention` field when something is waiting, so agents learn of new work as a side effect of using Tala. Requests older than 24 hours, or from unregistered agents, are counted as stale rather than listed; `tala pending --stale` lists them.
+
+`--accept-within=<seconds>` optionally sets an acceptance deadline. Recipients can record commitment with `tala accept <message-id> [--note=...]` or decline with `tala decline <message-id> [--reason=...]`. Repeating the same decision is safe. A reply completes the request even without a prior acceptance. A missed deadline generates a durable alert and leaves the request open; it does not mean the recipient failed. `tala pending` shows acceptance status and overdue deadlines. Unread direct messages generate a sender alert after five minutes by default; use `--delivery-overdue-after=<seconds>` to change that per send.
 
 Names work only when unambiguous. Exact IDs always select one recipient. Unknown recipients fail before storage; an inactive registered agent can receive messages for later retrieval.
 
@@ -173,6 +176,15 @@ Upgrade from protocol 3:
 1. Stop the protocol 3 daemon with its matching binary (`tala stop`).
 2. Install the new binary and verify its version.
 3. Start Tala with the new binary; the database migrates transactionally, preserves existing agents/messages, and assigns each existing project to its earliest registered agent.
+
+Upgrade from protocol 9:
+
+1. Stop the protocol 9 daemon with its matching binary (`tala stop`); active old waiters will exit with the normal stopped code.
+2. Install protocol 10 and verify `tala --version` before starting new waiters.
+3. Start Tala. SQLite migrates from schema 5 to schema 6 in one transaction, adding request decisions and durable event state without replacing identities or messages.
+4. Restart harness wait processes with the new binary and preserve their inbox/board cursors. Add an event cursor using `--event-after` where the harness stores wait state.
+
+Do not run protocol 9 clients and a protocol 10 daemon together. The protocol version check rejects the mismatched wire format before mutation. Roll back only after stopping the new daemon; the older release cannot open schema 6, so restore a pre-upgrade SQLite backup if rollback of data access is required.
 
 Upgrade from protocol 2:
 

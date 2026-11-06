@@ -148,7 +148,7 @@ fn guide_is_available_without_identity_or_daemon_in_json_and_human_modes() {
     assert!(listening.contains("tala wait"));
     assert!(listening.contains("--agent=th_<your-handle> wait"));
     assert!(listening.contains("does not return message bodies or acknowledge messages"));
-    assert!(listening.contains("`events` field gives the IDs, types and sources"));
+    assert!(listening.contains("`events` field gives IDs, types and sources"));
     assert!(listening.contains("`next.listen_again`"));
     assert!(listening.contains("--limit=\"$N\""));
     assert!(listening.contains("requires Bash and Python 3"));
@@ -2589,6 +2589,266 @@ fn unified_wait_reports_direct_messages_and_replies_without_consuming_them() {
 }
 
 #[test]
+fn accepting_a_request_wakes_a_blocked_sender_and_is_idempotent() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "sender");
+    let recipient = h.register(&h.a, "recipient");
+    let request = h.ok(
+        &h.a,
+        Some(&sender),
+        &["send", "--to", &recipient.id, "--request", "Review this"],
+    );
+    let request_id = id(&request);
+    let waiter = h
+        .command(
+            &h.a,
+            Some(&sender),
+            &["wait", "--event-after=0", "--timeout=5"],
+        )
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_listening(&h, &sender, Duration::from_secs(2));
+    let accepted = h.ok(
+        &h.a,
+        Some(&recipient),
+        &["accept", &request_id, "--note=Starting now"],
+    );
+    assert_eq!(accepted["message"]["acceptance_state"], "accepted");
+    assert_eq!(
+        h.ok(&h.a, Some(&recipient), &["accept", &request_id])["changed"],
+        false
+    );
+    let output = wait_child(waiter, Duration::from_secs(3), "acceptance event wait");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["data"]["durable_events"][0]["type"],
+        "request_accepted"
+    );
+    assert_eq!(
+        result["data"]["durable_events"][0]["message_id"],
+        request["message"]["id"]
+    );
+}
+
+#[test]
+fn acceptance_deadline_alerts_without_failing_request_and_delivery_overdue_wakes_wait() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "sender");
+    let recipient = h.register(&h.a, "recipient");
+    let request = h.ok(
+        &h.a,
+        Some(&sender),
+        &[
+            "send",
+            "--to",
+            &recipient.id,
+            "--request",
+            "--accept-within=1",
+            "--delivery-overdue-after=1",
+            "Review this",
+        ],
+    );
+    let request_id = id(&request);
+    let waiter = h
+        .command(
+            &h.a,
+            Some(&sender),
+            &["wait", "--event-after=0", "--timeout=5"],
+        )
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_listening(&h, &sender, Duration::from_secs(2));
+    let output = wait_child(waiter, Duration::from_secs(4), "overdue events wait");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let types: Vec<_> = result["data"]["durable_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["type"].as_str())
+        .collect();
+    assert!(types.contains(&"acceptance_deadline_expired"), "{types:?}");
+    assert!(types.contains(&"delivery_overdue"), "{types:?}");
+    let pending = h.ok(&h.a, Some(&sender), &["pending", "--direction=outgoing"]);
+    assert_eq!(pending["messages"][0]["id"], request["message"]["id"]);
+    assert!(pending["messages"][0]["acceptance_expired_at"].is_number());
+    assert_eq!(pending["messages"][0]["cancelled"], false);
+    h.ok(&h.a, Some(&recipient), &["accept", &request_id]);
+}
+
+#[test]
+fn decline_is_visible_in_pending_and_reply_before_acceptance_completes_request() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "sender");
+    let recipient = h.register(&h.a, "recipient");
+    let declined = h.ok(
+        &h.a,
+        Some(&sender),
+        &[
+            "send",
+            "--to",
+            &recipient.id,
+            "--request",
+            "Cannot take this?",
+        ],
+    );
+    let declined_id = id(&declined);
+    h.ok(
+        &h.a,
+        Some(&recipient),
+        &["decline", &declined_id, "--reason=At capacity"],
+    );
+    let pending = h.ok(&h.a, Some(&sender), &["pending", "--direction=outgoing"]);
+    assert_eq!(pending["messages"][0]["acceptance_state"], "declined");
+    let decline_wait = h.ok(
+        &h.a,
+        Some(&sender),
+        &["wait", "--event-after=0", "--timeout=2"],
+    );
+    assert_eq!(
+        decline_wait["durable_events"][0]["type"],
+        "request_declined"
+    );
+    assert_eq!(decline_wait["durable_events"][0]["detail"], "At capacity");
+    let replied = h.ok(
+        &h.a,
+        Some(&sender),
+        &[
+            "send",
+            "--to",
+            &recipient.id,
+            "--request",
+            "Please answer directly",
+            "--accept-within=1",
+        ],
+    );
+    let replied_id = id(&replied);
+    let reply = h.ok(
+        &h.a,
+        Some(&recipient),
+        &["reply", &replied_id, "Here is the answer"],
+    );
+    let reply_id = reply["message"]["id"].as_u64().unwrap().to_string();
+    std::thread::sleep(Duration::from_millis(1200));
+    let event_cursor = decline_wait["event_after"].as_u64().unwrap().to_string();
+    let event_arg = format!("--event-after={event_cursor}");
+    let inbox_arg = format!("--inbox-after={reply_id}");
+    let after = h.raw(
+        &h.a,
+        Some(&sender),
+        &["wait", &event_arg, &inbox_arg, "--timeout=1"],
+    );
+    assert_eq!(after.status.code(), Some(3));
+    let after: Value = serde_json::from_slice(&after.stdout).unwrap();
+    assert_eq!(after["data"]["durable_events"], json!([]));
+}
+
+#[test]
+fn deadline_that_passes_while_daemon_is_stopped_is_recovered() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "sender");
+    let recipient = h.register(&h.a, "recipient");
+    let request = h.ok(
+        &h.a,
+        Some(&sender),
+        &[
+            "send",
+            "--to",
+            &recipient.id,
+            "--request",
+            "Long-running work",
+            "--accept-within=1",
+        ],
+    );
+    h.ok(&h.a, None, &["stop"]);
+    std::thread::sleep(Duration::from_millis(1200));
+    let resumed = h.ok(
+        &h.a,
+        Some(&sender),
+        &["wait", "--event-after=0", "--timeout=3"],
+    );
+    assert_eq!(
+        resumed["durable_events"][0]["type"],
+        "acceptance_deadline_expired"
+    );
+    assert_eq!(
+        resumed["durable_events"][0]["message_id"],
+        request["message"]["id"]
+    );
+}
+
+#[test]
+fn accepted_work_cancellation_and_supersession_wake_the_recipient_without_reopening_old_requests() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "sender");
+    let recipient = h.register(&h.a, "recipient");
+    let cancelled = h.send(&sender, &recipient, "first task");
+    let cancelled_id = id(&cancelled);
+    h.ok(&h.a, Some(&recipient), &["accept", &cancelled_id]);
+    h.ok(&h.a, Some(&sender), &["resolve", &cancelled_id]);
+    let cancelled_event = h.ok(
+        &h.a,
+        Some(&recipient),
+        &["wait", "--event-after=0", "--inbox-after=1", "--timeout=2"],
+    );
+    assert_eq!(
+        cancelled_event["durable_events"][0]["type"],
+        "request_cancelled"
+    );
+    h.error(
+        &h.a,
+        Some(&recipient),
+        &["reply", &cancelled_id, "too late"],
+        "INVALID_OPERATION",
+    );
+
+    let original = h.send(&sender, &recipient, "accepted request to replace");
+    let original_id = id(&original);
+    h.ok(&h.a, Some(&recipient), &["accept", &original_id]);
+    let replacement = h.ok(
+        &h.a,
+        Some(&sender),
+        &[
+            "send",
+            "--to",
+            &recipient.id,
+            &format!("--supersedes={original_id}"),
+            "--request",
+            "Updated task",
+        ],
+    );
+    let cursor = cancelled_event["event_after"].as_u64().unwrap().to_string();
+    let after = format!("--event-after={cursor}");
+    let events = h.ok(
+        &h.a,
+        Some(&recipient),
+        &["wait", &after, "--inbox-after=1", "--timeout=2"],
+    );
+    assert_eq!(events["durable_events"][0]["type"], "request_superseded");
+    h.error(
+        &h.a,
+        Some(&recipient),
+        &["accept", &original_id],
+        "INVALID_OPERATION",
+    );
+    assert_eq!(
+        h.ok(&h.a, Some(&sender), &["pending", "--direction=outgoing"])["messages"][0]["id"],
+        replacement["message"]["id"]
+    );
+}
+
+#[test]
 fn unified_wait_deduplicates_board_replies_and_reports_both_sources() {
     let h = Harness::new();
     let a = h.register(&h.a, "a");
@@ -3624,7 +3884,7 @@ fn json_is_the_default_and_human_renders_text() {
     let o = plain(&["--human"]);
     let text = String::from_utf8(o.stdout).unwrap();
     assert!(
-        text.contains("1 requests to you") && text.contains("Next: tala inbox"),
+        text.contains("1 requests to you") && text.contains("Next: tala wait"),
         "{text}"
     );
     let o = plain(&["send", "--to=missing", "x", "--human"]);
@@ -3765,7 +4025,7 @@ fn bare_tala_summarises_work_without_acknowledging_it() {
     assert_eq!(summary["incoming_requests"][0]["id"].to_string(), request);
     assert_eq!(
         summary["incoming_requests"][0]["next"],
-        format!("tala reply {request} '<answer>'")
+        format!("tala accept {request}")
     );
     assert_eq!(summary["unread"]["count"], 2);
     assert_eq!(

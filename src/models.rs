@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Every error code with its retry class, meaning and default next command.
 /// Retry classes: `safe` (repeat as is), `same_key` (repeat with the same
@@ -229,7 +229,7 @@ pub fn help_text() -> String {
 Pass the returned private handle with --agent=<handle> or TALA_AGENT. For a protected file, use register --save-handle-to=<path>, then --agent-file=<path> or TALA_AGENT_FILE.\n\
 Guide: tala guide [listening|requests|identity|worktrees|errors] (start with tala guide listening).\n\
 Background loop: run tala wait; fetch with its next.inbox/next.board commands, then restart with next.listen_again. tala init writes project instructions.\n\
-Then: tala (what needs attention); tala agents; tala send --to=<id> --request 'Review this'; tala inbox; tala reply <id> 'Done'\n\
+Then: tala (what needs attention); tala agents; tala send --to=<id> --request 'Review this'; tala inbox; tala accept <id>; tala reply <id> 'Done'\n\
 Projects: tala list-projects [--stale|--closed|--all] (no registration required); owner lifecycle: tala close-project / tala reopen-project\n\
 Output is one JSON envelope; --human renders text.\n\n\
 Exit codes: 0 success, 1 operational error (nothing stored), 2 usage error, 3 wait timeout, 4 stored but wait failed (do not resend), 5 wait stopped by tala stop.\n\n\
@@ -386,6 +386,12 @@ pub struct Message {
     pub received_at: Option<i64>,
     pub answered_by: Option<u64>,
     pub cancelled: bool,
+    #[serde(default)]
+    pub acceptance_state: String,
+    pub accepted_at: Option<i64>,
+    pub accept_deadline: Option<i64>,
+    pub acceptance_expired_at: Option<i64>,
+    pub delivery_overdue_at: Option<i64>,
     pub delivery: String,
     pub age_seconds: i64,
 }
@@ -449,6 +455,12 @@ pub enum Operation {
         context: Context,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         supersedes: Option<u64>,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        accept_within: Option<u64>,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        delivery_overdue_after: Option<u64>,
     },
     Inbox {
         peek: bool,
@@ -482,6 +494,21 @@ pub enum Operation {
         stale: bool,
         after: u64,
         limit: usize,
+    },
+    Accept {
+        message: u64,
+        note: Option<String>,
+    },
+    Decline {
+        message: u64,
+        reason: Option<String>,
+    },
+    Wait {
+        project: String,
+        inbox_after: u64,
+        board_after: Option<u64>,
+        event_after: u64,
+        timeout: u64,
     },
     Attention,
     Resolve {
