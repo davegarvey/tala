@@ -7,4 +7,4 @@
 - [x] 5. Replace client-side repeated wait reads with one daemon-held, cursor-aware wait that covers inbox, board and durable events.
 - [x] 6. Add store, CLI and integration coverage for races, idempotency, restart, deadlines, overdue delivery and the long-blocking wait contract.
 - [x] 7. Update README, agent guide, main specs and protocol/schema docs; run formatting, lint, unit, e2e and change-scoped strict OpenSpec validation (full-repository strict mode still reports existing long requirement descriptions).
-- [ ] 8. Review the final diff, open and review a PR, merge only with passing checks, then safely update and verify the local Tala binary.
+- [x] 8. Review the final diff, open and review a PR, merge only with passing checks, then safely update and verify the local Tala binary.
