@@ -14,7 +14,7 @@ command -v tala
 tala --version
 ```
 
-This checkout introduces **protocol 3**, a breaking change: agents act through private handles, and output is JSON by default. These commands require a matching release or source build. For development:
+The CLI and daemon must use the same wire protocol (`tala status` reports it). When an upgrade changes the protocol, stop the running daemon with its old binary before replacing the binary; the next command starts a matching daemon. For development:
 
 ```bash
 cargo build
