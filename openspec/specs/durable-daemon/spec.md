@@ -5,7 +5,7 @@ Defines durable daemon for reliable local collaboration between distinct coding 
 ## Requirements
 
 ### Requirement: Exclusive durable service
-The system SHALL operate one loopback daemon per Tala home, automatically start it safely under concurrent clients, and commit messages and receipts transactionally before success. Storage failure or corruption SHALL report an error without replacing storage with empty state. Clients SHALL acquire startup coordination without blocking their async executor, bound waits for another starter, and release the startup lock as soon as they confirm a healthy daemon before sending long-lived requests.
+The system SHALL operate one daemon per Tala home that always listens on loopback and, only while a network window is open for that home, also listens on the window's network address. It SHALL automatically start that daemon safely under concurrent clients, and commit messages and receipts transactionally before success. A home connected to a remote daemon SHALL NOT start a local daemon. Storage failure or corruption SHALL report an error without replacing storage with empty state. Clients SHALL acquire startup coordination without blocking their async executor, bound waits for another starter, and release the startup lock as soon as they confirm a healthy daemon before sending long-lived requests.
 
 #### Scenario: Concurrent startup
 - **WHEN** multiple commands start against a fresh home
@@ -99,7 +99,7 @@ Transport failures SHALL be reported only as transport error codes and SHALL nev
 - **THEN** the error code is a transport code, not `RECIPIENT_NOT_FOUND`
 
 ### Requirement: Status context inspection never starts or mutates the daemon
-Status SHALL read selected identity context from a read-only local database snapshot and SHALL not start the daemon or refresh agent presence.
+Status SHALL read selected identity context from a read-only local database snapshot and SHALL not start the daemon or refresh agent presence. In a home connected to a remote daemon, status SHALL report identity context as unavailable rather than reading a local database.
 
 #### Scenario: Daemon stopped or stale metadata
 - **WHEN** status runs while the daemon is stopped, including when stale daemon metadata remains, and the local database is readable
@@ -120,6 +120,10 @@ Status SHALL read selected identity context from a read-only local database snap
 - **WHEN** the local database is missing, locked beyond the bounded read timeout, or unreadable
 - **THEN** status preserves existing daemon diagnostics and reports local identity context as unavailable
 - **AND** it does not create or replace the database
+
+#### Scenario: Home connected to a remote daemon
+- **WHEN** status runs in a home connected to a remote daemon
+- **THEN** it queries the remote daemon's status, reports identity context as unavailable with reason `remote_daemon`, and starts no local daemon
 
 ### Requirement: Thread listing uses immutable identity-bound snapshots
 The daemon SHALL capture the thread-list high-water message ID and all response rows, including visibility and unread/pending values, in one transaction. Later pages SHALL return those materialized rows unchanged by activity or receipt updates after capture.
@@ -152,17 +156,21 @@ Thread-list cursors SHALL be bound to the authenticated identity. Snapshots SHAL
 - **THEN** Tala evicts that agent's oldest snapshot and its cursors
 
 ### Requirement: Thread-list protocol and storage versions match
-The CLI and daemon SHALL use protocol version 10 for lifecycle coordination, thread listing, request decisions, and durable wait events. The daemon SHALL migrate SQLite schema version 5 to version 6 transactionally while preserving existing identities, messages, and receipts, and SHALL reject incompatible protocol versions before mutation.
+The CLI and daemon SHALL use protocol version 11 for lifecycle coordination, thread listing, request decisions, durable wait events and network-window operations. The daemon SHALL migrate SQLite schema version 5 to version 6 transactionally while preserving existing identities, messages, and receipts, and SHALL reject incompatible protocol versions before mutation.
 
 #### Scenario: Existing database upgrades in place
-- **WHEN** protocol 10 opens a schema version 5 database
+- **WHEN** protocol 11 opens a schema version 5 database
 - **THEN** it adds the required acceptance and event state transactionally without replacing identity or message rows
 
 #### Scenario: Incompatible pre-list daemon
-- **WHEN** a protocol 8 CLI contacts a protocol 9 daemon or vice versa
+- **WHEN** a protocol 10 CLI contacts a protocol 11 daemon or vice versa
 - **THEN** Tala reports protocol incompatibility before applying any operation
 - **AND** the user is directed to stop an old daemon using its matching binary before upgrading
 
 #### Scenario: Schema migration preserves existing data
 - **WHEN** Tala opens a schema version 4 database
 - **THEN** it creates and backfills thread-list summaries and access state in a transaction, preserves existing messages and receipts, and records schema version 5
+
+#### Scenario: Release 1.13 daemon
+- **WHEN** a protocol 11 CLI finds a running protocol 10 daemon from v1.13.0
+- **THEN** it reports `PROTOCOL_MISMATCH` before any operation and directs the user to stop that daemon with its matching binary

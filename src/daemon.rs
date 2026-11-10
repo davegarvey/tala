@@ -108,11 +108,15 @@ pub async fn run() -> Result<()> {
         &serde_json::to_vec(&info).expect("daemon metadata serializes"),
     )?;
     let (stop, mut rx) = watch::channel(false);
-    let app = api::router(AppState {
+    let state = AppState {
         store: Arc::new(Mutex::new(store)),
         info: info.clone(),
         stop,
-    });
+        network: crate::listener::Manager::default(),
+    };
+    // Restores an unexpired network window; loopback service never depends on it.
+    state.network.start(&state).await;
+    let app = api::router(state);
     eprintln!(
         "Tala daemon {} started on localhost:{}",
         info.instance, info.port

@@ -28,6 +28,104 @@ fn http() -> Result<reqwest::Client> {
         .build()
         .map_err(network)
 }
+fn remote_unreachable(url: &str, reason: impl std::fmt::Display) -> Failure {
+    Failure::new(
+        "DAEMON_UNREACHABLE",
+        format!("Cannot reach the remote Tala daemon at {url}: {reason}"),
+        "Check that the host machine is awake and on the same network, that its network window is still open (tala network status on the host), and that its firewall allows incoming connections to tala. Tala will not start a local daemon while this home is connected to a remote.",
+    )
+}
+fn remote_mode(action: &str) -> Failure {
+    Failure::new(
+        "REMOTE_MODE",
+        format!("This home is connected to a remote daemon; {action}"),
+        "Run the command on the host machine, or run tala network disconnect to use a local daemon again.",
+    )
+}
+/// The remote daemon this home is connected to, if any.
+pub fn remote() -> Result<Option<crate::network::RemoteConfig>> {
+    crate::network::remote()
+}
+fn transport_reason(error: &reqwest::Error) -> String {
+    io_kind(error)
+        .map(|k| k.to_string())
+        .unwrap_or_else(|| error.to_string())
+}
+/// HTTPS client that accepts only the host certificate pinned for this remote.
+/// A wait is held open by the daemon until its own deadline, so it gets no
+/// overall timeout; connecting is always bounded.
+fn remote_http(remote: &crate::network::RemoteConfig, long_poll: bool) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .use_preconfigured_tls(crate::tls::pinned_client_config(&remote.fingerprint)?);
+    if !long_poll {
+        builder = builder.timeout(Duration::from_secs(5));
+    }
+    builder.build().map_err(network)
+}
+fn certificate_rejected(url: &str) -> Failure {
+    Failure::new(
+        "NETWORK_AUTH",
+        format!("The server at {url} did not present the pinned Tala certificate"),
+        "The host may have rotated its credentials, or another machine is answering at this address. Run tala network connect again with the host's current join code.",
+    )
+}
+/// Maps a failed remote request to a transport or authentication failure.
+fn remote_failure(url: &str, error: reqwest::Error) -> Failure {
+    if crate::tls::is_certificate_rejection(&error) {
+        certificate_rejected(url)
+    } else if error.is_connect() || error.is_timeout() {
+        remote_unreachable(url, transport_reason(&error))
+    } else {
+        network(error)
+    }
+}
+/// Checks that a remote daemon is reachable, presents the pinned certificate,
+/// accepts the token and speaks this protocol, without performing any operation.
+pub async fn remote_health(remote: &crate::network::RemoteConfig) -> Result<()> {
+    let response = remote_http(remote, false)?
+        .get(format!("{}/health", remote.url))
+        .bearer_auth(&remote.token)
+        .send()
+        .await
+        .map_err(|e| remote_failure(&remote.url, e))?;
+    let envelope = response.json::<Envelope>().await.map_err(|e| {
+        remote_unreachable(
+            &remote.url,
+            format!("the server did not answer as a Tala daemon ({e})"),
+        )
+    })?;
+    if !envelope.ok {
+        return Err(envelope.error.unwrap_or_else(|| network("Missing error")));
+    }
+    let version = envelope
+        .data
+        .as_ref()
+        .and_then(|d| d["protocol_version"].as_u64());
+    if version != Some(PROTOCOL_VERSION as u64) {
+        return Err(Failure::new(
+            "PROTOCOL_MISMATCH",
+            format!(
+                "Remote daemon protocol {} differs from CLI protocol {}",
+                version.map_or("unknown".into(), |v| v.to_string()),
+                PROTOCOL_VERSION
+            ),
+            "Install the same Tala version on both machines, then retry.",
+        ));
+    }
+    Ok(())
+}
+async fn remote_post(remote: &crate::network::RemoteConfig, request: &Rpc) -> Result<Envelope> {
+    let long_poll = matches!(&request.operation, Operation::Wait { .. });
+    let response = remote_http(remote, long_poll)?
+        .post(format!("{}/rpc", remote.url))
+        .bearer_auth(&remote.token)
+        .json(request)
+        .send()
+        .await
+        .map_err(|e| remote_failure(&remote.url, e))?;
+    response.json::<Envelope>().await.map_err(network)
+}
 /// Result of probing the daemon recorded in daemon.json.
 pub enum Liveness {
     Live,
@@ -297,7 +395,13 @@ pub async fn ensure() -> Result<DaemonInfo> {
 
 /// Starts or binds a new wait to the current lifecycle generation. Unlike an
 /// ordinary command, a wait invoked during shutdown is terminal immediately.
-pub async fn begin_wait() -> Result<(DaemonInfo, u64)> {
+pub async fn begin_wait() -> Result<u64> {
+    if let Some(remote) = remote()? {
+        // Remote mode never starts or stops a local daemon, so only a local
+        // generation is reserved; the remote daemon is checked directly.
+        remote_health(&remote).await?;
+        return crate::lifecycle::reserve_for_wait();
+    }
     let state = crate::lifecycle::recover_stopping().await?;
     if state.stop_in_progress
         || state.stopping.is_some()
@@ -306,11 +410,11 @@ pub async fn begin_wait() -> Result<(DaemonInfo, u64)> {
         return Err(crate::lifecycle::stopping_error());
     }
     let generation = crate::lifecycle::reserve_for_wait()?;
-    let info = ensure_reserved(generation).await?;
+    ensure_reserved(generation).await?;
     if !crate::lifecycle::accepts(generation)? {
         return Err(crate::lifecycle::stopped());
     }
-    Ok((info, generation))
+    Ok(generation)
 }
 
 async fn stop_instance(info: &DaemonInfo) -> Result<()> {
@@ -382,6 +486,9 @@ async fn stop_operation_lock() -> Result<File> {
 }
 
 pub async fn stop_daemon() -> Result<Value> {
+    if remote()?.is_some() {
+        return Err(remote_mode("tala stop only stops a local daemon"));
+    }
     let stop_guard = stop_operation_lock().await?;
     if let Some(info) = daemon::read_info() {
         match probe(&info).await {
@@ -1020,6 +1127,20 @@ async fn call_with_generation(
         operation: op,
     };
     let mut last = None;
+    if let Some(remote) = remote()? {
+        for _ in 0..3 {
+            // Retrying reuses the request ID, so the daemon replays a stored result.
+            match remote_post(&remote, &request).await {
+                Ok(e) => return unwrap_envelope(e),
+                Err(e) if e.code == "DAEMON_UNREACHABLE" || e.code == "NETWORK_AUTH" => {
+                    return Err(e)
+                }
+                Err(e) => last = Some(e),
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        return Err(last.unwrap_or_else(|| network("Request failed")));
+    }
     for _ in 0..3 {
         let info = match generation {
             Some(generation) => ensure_reserved(generation).await?,
@@ -1038,16 +1159,7 @@ async fn call_with_generation(
             .await
         {
             Ok(response) => match response.json::<Envelope>().await {
-                Ok(e) => {
-                    return if e.ok {
-                        if let Ok(mut slot) = ATTENTION.lock() {
-                            *slot = e.attention;
-                        }
-                        e.data.ok_or_else(|| network("Empty response"))
-                    } else {
-                        Err(e.error.unwrap_or_else(|| network("Missing error")))
-                    }
-                }
+                Ok(e) => return unwrap_envelope(e),
                 Err(e) => last = Some(network(e)),
             },
             Err(e) => last = Some(network(e)),
@@ -1056,16 +1168,30 @@ async fn call_with_generation(
     }
     Err(last.unwrap_or_else(|| network("Request failed")))
 }
+fn unwrap_envelope(e: Envelope) -> Result<Value> {
+    if e.ok {
+        if let Ok(mut slot) = ATTENTION.lock() {
+            *slot = e.attention;
+        }
+        e.data.ok_or_else(|| network("Empty response"))
+    } else {
+        Err(e.error.unwrap_or_else(|| network("Missing error")))
+    }
+}
 pub async fn existing(op: Operation) -> Result<Option<Value>> {
-    // Stop is deliberately allowed against a compatible daemon only; no stale PID signalling.
-    let Some(info) = usable().await? else {
-        return Ok(None);
-    };
     let request = Rpc {
         protocol_version: PROTOCOL_VERSION,
         request_id: Uuid::new_v4().to_string(),
         credential: None,
         operation: op,
+    };
+    if let Some(remote) = remote()? {
+        remote_health(&remote).await?;
+        return unwrap_envelope(remote_post(&remote, &request).await?).map(Some);
+    }
+    // Stop is deliberately allowed against a compatible daemon only; no stale PID signalling.
+    let Some(info) = usable().await? else {
+        return Ok(None);
     };
     let response = http()?
         .post(format!("http://127.0.0.1:{}/rpc", info.port))
