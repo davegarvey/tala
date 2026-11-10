@@ -52,12 +52,16 @@ fn transport_reason(error: &reqwest::Error) -> String {
         .unwrap_or_else(|| error.to_string())
 }
 /// HTTPS client that accepts only the host certificate pinned for this remote.
-fn remote_http(remote: &crate::network::RemoteConfig) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .use_preconfigured_tls(crate::tls::pinned_client_config(&remote.fingerprint)?)
-        .build()
-        .map_err(network)
+/// A wait is held open by the daemon until its own deadline, so it gets no
+/// overall timeout; connecting is always bounded.
+fn remote_http(remote: &crate::network::RemoteConfig, long_poll: bool) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .use_preconfigured_tls(crate::tls::pinned_client_config(&remote.fingerprint)?);
+    if !long_poll {
+        builder = builder.timeout(Duration::from_secs(5));
+    }
+    builder.build().map_err(network)
 }
 fn certificate_rejected(url: &str) -> Failure {
     Failure::new(
@@ -79,7 +83,7 @@ fn remote_failure(url: &str, error: reqwest::Error) -> Failure {
 /// Checks that a remote daemon is reachable, presents the pinned certificate,
 /// accepts the token and speaks this protocol, without performing any operation.
 pub async fn remote_health(remote: &crate::network::RemoteConfig) -> Result<()> {
-    let response = remote_http(remote)?
+    let response = remote_http(remote, false)?
         .get(format!("{}/health", remote.url))
         .bearer_auth(&remote.token)
         .send()
@@ -112,7 +116,8 @@ pub async fn remote_health(remote: &crate::network::RemoteConfig) -> Result<()> 
     Ok(())
 }
 async fn remote_post(remote: &crate::network::RemoteConfig, request: &Rpc) -> Result<Envelope> {
-    let response = remote_http(remote)?
+    let long_poll = matches!(&request.operation, Operation::Wait { .. });
+    let response = remote_http(remote, long_poll)?
         .post(format!("{}/rpc", remote.url))
         .bearer_auth(&remote.token)
         .json(request)
@@ -1141,7 +1146,12 @@ async fn call_with_generation(
             Some(generation) => ensure_reserved(generation).await?,
             None => ensure().await?,
         };
-        match http()?
+        let client = if matches!(&request.operation, Operation::Wait { .. }) {
+            reqwest::Client::builder().build().map_err(network)?
+        } else {
+            http()?
+        };
+        match client
             .post(format!("http://127.0.0.1:{}/rpc", info.port))
             .header("x-tala-instance", &info.instance)
             .json(&request)

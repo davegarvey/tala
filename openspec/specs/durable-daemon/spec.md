@@ -29,7 +29,15 @@ The system SHALL operate one daemon per Tala home that always listens on loopbac
 - **AND** concurrent current clients still use one daemon per Tala home
 
 ### Requirement: Protocol and lifecycle
-The system SHALL reject incompatible wire versions before mutation, report status without starting a daemon, stop through the live service, and persist diagnostics. Blocking operations SHALL use an overall deadline and recover durable messages after restart.
+The system SHALL reject incompatible wire versions before mutation, report status without starting a daemon, stop through the live service, and persist diagnostics. Blocking operations SHALL use an overall deadline and recover durable messages after restart. The daemon SHALL persist lifecycle and delivery events and evaluate notification deadlines while clients are blocked, including after restart.
+
+#### Scenario: Due events are recovered after restart
+- **WHEN** a request deadline or delivery threshold passes while the daemon is stopped
+- **THEN** the daemon records the due event before returning from the next wait or pending operation
+
+#### Scenario: Event writes and state transitions are atomic
+- **WHEN** a decision or due notification is recorded
+- **THEN** its state and event are committed together and cannot be duplicated by retry
 
 #### Scenario: Restart recovery
 - **WHEN** a daemon is killed after confirming a send
@@ -148,13 +156,21 @@ Thread-list cursors SHALL be bound to the authenticated identity. Snapshots SHAL
 - **THEN** Tala evicts that agent's oldest snapshot and its cursors
 
 ### Requirement: Thread-list protocol and storage versions match
-The CLI and daemon SHALL use protocol version 10 for lifecycle coordination, thread listing and network-window operations, and the daemon SHALL migrate SQLite schema version 4 to version 5 transactionally before serving the new operation. The daemon SHALL reject incompatible versions before mutation.
+The CLI and daemon SHALL use protocol version 11 for lifecycle coordination, thread listing, request decisions, durable wait events and network-window operations. The daemon SHALL migrate SQLite schema version 5 to version 6 transactionally while preserving existing identities, messages, and receipts, and SHALL reject incompatible protocol versions before mutation.
+
+#### Scenario: Existing database upgrades in place
+- **WHEN** protocol 11 opens a schema version 5 database
+- **THEN** it adds the required acceptance and event state transactionally without replacing identity or message rows
 
 #### Scenario: Incompatible pre-list daemon
-- **WHEN** a protocol 9 CLI contacts a protocol 10 daemon or vice versa
+- **WHEN** a protocol 10 CLI contacts a protocol 11 daemon or vice versa
 - **THEN** Tala reports protocol incompatibility before applying any operation
 - **AND** the user is directed to stop an old daemon using its matching binary before upgrading
 
 #### Scenario: Schema migration preserves existing data
 - **WHEN** Tala opens a schema version 4 database
 - **THEN** it creates and backfills thread-list summaries and access state in a transaction, preserves existing messages and receipts, and records schema version 5
+
+#### Scenario: Release 1.13 daemon
+- **WHEN** a protocol 11 CLI finds a running protocol 10 daemon from v1.13.0
+- **THEN** it reports `PROTOCOL_MISMATCH` before any operation and directs the user to stop that daemon with its matching binary

@@ -5,7 +5,11 @@ Defines agent cli for reliable local collaboration between distinct coding agent
 ## Requirements
 
 ### Requirement: Complete clean command surface
-The system SHALL expose init, register, update-purpose, rename, unregister, whoami, agents, project (with list, close and reopen), send, inbox, wait, reply, post, board, history, search, pending, resolve, handoff, guide, status, stop, network (with open, extend, close, rotate-token, status, connect and disconnect), and SHALL return the attention summary when run with no subcommand. Retired session commands and aliases, including `list-projects`, `close-project`, `reopen-project`, `enable-network`, `disable-network`, `connect-remote` and `disconnect-remote`, SHALL be absent.
+The system SHALL expose init, register, update-purpose, rename, unregister, whoami, agents, project (with list, close and reopen), send, inbox, wait, reply, accept, decline, post, board, history, search, pending, resolve, handoff, guide, status, stop, network (with open, extend, close, rotate-token, status, connect and disconnect), and SHALL return the attention summary when run with no subcommand. Retired session commands and aliases, including `list-projects`, `close-project`, `reopen-project`, `enable-network`, `disable-network`, `connect-remote` and `disconnect-remote`, SHALL be absent.
+
+#### Scenario: Accept or decline through the CLI
+- **WHEN** the recipient runs `tala accept <id>` or `tala decline <id>`
+- **THEN** Tala returns the recorded request decision and optional note or reason
 
 #### Scenario: Clean help
 - **WHEN** an agent runs --help
@@ -189,7 +193,15 @@ The `project list` command SHALL allow read-only project discovery without a sel
 - **THEN** Tala returns the same project listing and the agent's response includes its normal ambient attention summary
 
 ### Requirement: Unified background wait
-The CLI SHALL expose `tala wait` to monitor unread inbox messages and new messages on the selected project's board. Its timeout SHALL default to indefinite; finite `--timeout` SHALL remain available. Inbox and board reads SHALL not acknowledge messages. A new wait without `--board-after` SHALL use the project's atomic latest-message ID as its baseline. A wait SHALL bind to its lifecycle generation and SHALL exit 5 with `DAEMON_STOPPED` if an accepted stop advances that generation.
+The CLI SHALL expose `tala wait` to monitor unread inbox messages, new messages on the selected project's board, and durable lifecycle or delivery events. Its timeout SHALL default to indefinite; finite `--timeout` SHALL remain available. Inbox and board reads SHALL not acknowledge messages. A new wait without `--board-after` SHALL use the project's atomic latest-message ID as its baseline. A wait SHALL bind to its lifecycle generation and SHALL exit 5 with `DAEMON_STOPPED` if an accepted stop advances that generation. The client SHALL block on a daemon-held wait request rather than periodically polling.
+
+#### Scenario: Long-running wait wakes on a durable event
+- **WHEN** a sender has an indefinite wait open and the daemon records acceptance, decline, deadline, or delivery-overdue
+- **THEN** the same wait returns promptly with that event
+
+#### Scenario: Wait recovers notifications after disconnect
+- **WHEN** the client reconnects or restarts from its event cursor
+- **THEN** durable events remain available and the returned cursor advances only through returned events
 
 #### Scenario: Wait for direct messages and correlated replies
 - **WHEN** an agent runs `tala wait` and an unread direct message or reply arrives
@@ -210,7 +222,11 @@ The CLI SHALL expose `tala wait` to monitor unread inbox messages and new messag
 - **THEN** the wait exits 5 with `DAEMON_STOPPED` without recovering the daemon
 
 ### Requirement: Wait cursors and recovery
-The command SHALL accept separate inbox and board ID cursors, return event IDs and types without message bodies, and provide exact fetch and restart commands. It SHALL report whether either source has another page. Each cursor SHALL advance only to the last ID included in its returned page. Replaying an older cursor MAY repeat events but SHALL NOT hide or acknowledge messages. A supervisor SHALL treat exit 5 / `DAEMON_STOPPED` as a terminal stop signal and SHALL NOT rearm the wait loop.
+The command SHALL accept separate inbox, board and durable event cursors, return event IDs and types without message bodies, and provide exact fetch and restart commands. It SHALL report whether any source has another page. Each cursor SHALL advance only to the last event included in its returned page. Replaying an older cursor MAY repeat events but SHALL NOT hide or acknowledge them.
+
+#### Scenario: Event cursor paginates without skipping
+- **WHEN** more durable events exist than fit in one wait response
+- **THEN** the next event cursor identifies the last included event and later events remain available
 
 #### Scenario: Supervisor stops after daemon stop
 - **WHEN** a wait loop receives exit 5 with `DAEMON_STOPPED`
@@ -233,6 +249,7 @@ The command SHALL accept separate inbox and board ID cursors, return event IDs a
 #### Scenario: Finite wait timeout
 - **WHEN** `tala wait --timeout=N` receives no new event before its deadline
 - **THEN** it exits 3 with no events and exact continuation commands using the unchanged cursors
+
 
 ### Requirement: Rename command
 The CLI SHALL expose `tala rename --name=<new-name>` to rename the selected identity. It SHALL use the selected private handle, return the updated public agent record with the previous name and a `changed` flag, and SHALL provide a human-readable confirmation under `--format=text`. The command SHALL reject a blank name. It SHALL not issue or change a private handle.
@@ -326,3 +343,10 @@ Thread-list JSON SHALL return rows with public thread summary fields and paging 
 #### Scenario: Human thread-list parity
 - **WHEN** an agent runs `tala history --format=text` without a thread ID
 - **THEN** Tala prints the same thread rows and summary values in a compact escaped table
+
+### Requirement: Request deadline and delivery options
+Request send SHALL accept an optional acceptance deadline duration; omission SHALL preserve existing behavior. `tala pending` SHALL expose request acceptance status. A configurable overdue threshold SHALL apply to unread direct messages and delivery notifications SHALL not imply execution failure.
+
+#### Scenario: Acceptance deadline is opt-in
+- **WHEN** a request is sent without an acceptance deadline
+- **THEN** no acceptance deadline is scheduled
