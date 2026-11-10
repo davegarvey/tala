@@ -46,6 +46,26 @@ field or session aliases. Never silently import legacy identities or transcripts
 Agents select identity explicitly with TALA_AGENT or --agent, independently of
 project/CWD. Inbox consumption acknowledges receipt; history and board do not.
 
+## Install after merging
+
+After a PR merges to `main`, build and install the merged release on this
+machine as a matter of course, without being asked, so that the `tala` agents
+use from `PATH` matches `main`:
+
+1. Update `main`: `git switch main && git pull --ff-only`.
+2. Stop the running daemon with the binary that started it (`tala stop`
+   before replacing the binary). This is required when the wire protocol
+   changed, because a newer CLI refuses an incompatible daemon.
+3. Build and replace the installed binary in place:
+   `cargo build --release && install -m 755 target/release/tala "$(command -v tala)"`.
+4. Verify with `tala --version` and `tala status`. A wait loop can restart a
+   daemon with the old binary between steps 2 and 3. If status reports an
+   incompatible daemon, stop it with a saved copy of the old binary.
+
+Stopping the daemon ends active `tala wait` calls with exit code 5. Mention
+this, and any breaking CLI change that running harnesses must adopt, when
+reporting the install.
+
 ## OpenSpec workflow
 
 All feature work follows the OpenSpec change workflow in `openspec/` (see
