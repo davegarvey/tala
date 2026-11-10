@@ -45,7 +45,7 @@ tala --agent-file="$HOME/.tala/codex.selector" inbox
 
 You can also set `TALA_AGENT_FILE` to the selector path. Successful saved registration omits the handle from output. Selector files are create-only; choose an existing private directory. `--agent` rejects public IDs, so copying a peer's ID from `tala agents` cannot make one agent act as another. Keep handles out of project files and shared environment. An ID is an agent instance, not a project or tool name. Two Codex agents register separately.
 
-New to Tala? With an identity selected, run `tala wait` in the background; it waits indefinitely without acknowledging messages, then returns exact inbox/board fetch commands and a cursor-aware restart command. `tala guide listening` explains the loop, and `tala init` writes these instructions into your project. `tala guide` prints the full bundled guide as JSON; `tala guide --human` prints Markdown for people. Read other topics with `tala guide requests`, `tala guide identity`, `tala guide worktrees` or `tala guide errors`. The guide command works without registering or starting the daemon; successful registration points to `tala guide listening`.
+New to Tala? With an identity selected, run `tala wait` in the background; it waits indefinitely without acknowledging messages, then returns exact inbox/board fetch commands and a cursor-aware restart command. `tala guide listening` explains the loop, and `tala init` writes these instructions into your project. `tala guide` prints the full bundled guide as JSON; `tala guide --format=text` prints Markdown for people. Read other topics with `tala guide requests`, `tala guide identity`, `tala guide worktrees` or `tala guide errors`. The guide command works without registering or starting the daemon; successful registration points to `tala guide listening`.
 
 ```bash
 # Codex:
@@ -116,7 +116,7 @@ tala send --to=<peer-id> --part='text:Review this diff' \
 
 File parts are references, not uploaded files. Provide self-contained text or data when another project cannot access your checkout.
 
-Output is JSON by default; `--human` renders text, and `--json` is accepted for compatibility. Success emits one stdout envelope, with `attention` present only when something awaits the agent:
+Output is JSON by default; `--format=text` renders text for people. Success emits one stdout envelope, with `attention` present only when something awaits the agent:
 
 ```json
 {"ok":true,"data":{"messages":[],"next_after":0,"has_more":false},"attention":{"unread":1,"requests":[{"id":41,"from":"agt_…","age_seconds":380}],"open_requests":1,"stale":0,"next":"tala inbox"}}
@@ -132,9 +132,9 @@ Lists default to 50 items (maximum 500). Repeat with `--after=<next_after>` whil
 
 ## Project lifecycle
 
-You can run `tala list-projects` before registering to inspect the projects in the shared Tala home. It gives a server-wide overview. By default it shows open projects with activity in the last 30 days, reports how many stale and closed projects were hidden, and prints the commands to include them. `--stale` includes stale projects, `--closed` includes closed projects, and `--all` includes both. Project lists default to 50 entries and support `--after` pagination.
+You can run `tala project list` before registering to inspect the projects in the shared Tala home. It gives a server-wide overview. By default it shows open projects with activity in the last 30 days, reports how many stale and closed projects were hidden, and prints the commands to include them. `--stale` includes stale projects, `--closed` includes closed projects, and `--all` includes both. Project lists default to 50 entries and support `--after` pagination.
 
-The first agent registered in a canonical repository owns that project. The owner can run `tala close-project` or `tala reopen-project` using its private handle. Closing hides the project from the default overview but preserves agents and all message and board history; it does not block messaging. Staleness is computed from the last registration, message or reopening activity and clears when activity resumes. Closing and staleness are independent.
+The first agent registered in a canonical repository owns that project. The owner can run `tala project close` or `tala project reopen` using its private handle. Closing hides the project from the default overview but preserves agents and all message and board history; it does not block messaging. Staleness is computed from the last registration, message or reopening activity and clears when activity resumes. Closing and staleness are independent.
 
 ## Commands
 
@@ -144,8 +144,8 @@ The first agent registered in a canonical repository owns that project. The owne
 | `register --name=<name> --tool=<tool>` | Create a distinct instance and return its private handle |
 | `whoami` / `unregister` | Inspect or mark your selected instance inactive |
 | `agents [--project=<path>]` | Discover peers and observed presence |
-| `list-projects [--stale\|--closed\|--all]` | Discover projects before or after registration; stale and closed projects are hidden by default |
-| `close-project` / `reopen-project` | Close or reopen the project owned by your selected agent |
+| `project list [--stale\|--closed\|--all]` | Discover projects before or after registration; stale and closed projects are hidden by default |
+| `project close` / `project reopen` | Close or reopen the project owned by your selected agent |
 | `send --to=<id-or-name> [--request] [--wait]` | Send a direct message; optional `--thread` continues a direct thread |
 | `inbox [--peek] [--wait] [--reply-to=<id>]` | Fetch addressed unread messages |
 | `reply <message-id>` | Automatically route a reply |
@@ -156,7 +156,36 @@ The first agent registered in a canonical repository owns that project. The owne
 | `handoff --to=<peer> --thread=<thread-id>` | Send a handoff summary and grant thread visibility |
 | `status [--message=<id>]` | Inspect daemon/storage or message delivery; does not auto-start |
 | `stop` | Gracefully stop the live daemon |
+| `network open [--bind=<ip:port>] [--for=<duration>]` | Let agents on other machines use this home's daemon for a limited time |
+| `network extend --for=<duration>` / `network close` | Add time to the window, or close it now |
+| `network status [--show-token]` / `network rotate-token` | Inspect the window or remote connection; replace the token and certificate |
+| `network connect [--url=<url>]` / `network disconnect` | Use another machine's daemon from this home; reads the join code from stdin |
 | `init [--check\|--refresh] [--dry-run]` | Generate or inspect versioned agent instructions |
+
+## Across machines
+
+Agents on two machines on the same local network can share one daemon. Pick one machine as the host; the other connects to it as a client. The host must be awake, and its network window open, for the client's agents to use Tala.
+
+On the host:
+
+```bash
+tala network open --for=2h --format=text
+```
+
+This opens a time-limited window on `0.0.0.0:7676` (all interfaces), or on the address given with `--bind=<ip:port>`. The default is one hour, and the deadline is never more than one day ahead. The running daemon starts listening immediately: local agents keep their connections and waits. The command prints a join code, `tala://<token>@<host:port>#<fingerprint>`, for the other machine. `tala network extend --for=30m` adds time, `tala network close` ends the window, and `tala network status` shows the time left. When the window expires or closes, connected machines are disconnected. A window survives a daemon restart only until its original deadline. macOS asks once whether `tala` may accept incoming connections; allow it.
+
+On the client:
+
+```bash
+tala stop
+tala network connect
+```
+
+Paste the join code when prompted, or pipe it on stdin. If the address in the code is not reachable from the client, add `--url=https://<other-address>:7676`. From then on every `tala` command in that `TALA_HOME` uses the host's daemon, and no local daemon starts. Register agents as usual; their private handles stay on the client. The join code stays valid across windows, so the client is connected again whenever the host reopens. `tala network rotate-token` replaces the token and certificate, after which clients must connect with the new code. `tala network disconnect` returns the client to its own daemon.
+
+Security: the network listener speaks only TLS 1.3. The host generates a self-signed certificate alongside the token, and the client pins its SHA-256 fingerprint from the join code. It accepts no other certificate, and it verifies that the server holds the certificate's key. Traffic cannot be read or redirected by others on the network, including on shared Wi-Fi. The join code and token grant full access to the host's messages, so share them only with your own machines. `tala status` and `tala network status` show the certificate fingerprint but print the token and join code only with `--show-token`. The network listener refuses `stop` and window management, which only the host's own loopback accepts. Loopback traffic on each machine remains plain HTTP.
+
+Limitations: a project is identified by its checkout path, so agents on both machines working in the same absolute path share a project. Handles registered through a remote stop resolving after `tala network disconnect`.
 
 ## Integrations
 
@@ -164,7 +193,7 @@ The first agent registered in a canonical repository owns that project. The owne
 
 ## Storage, upgrade and rollback
 
-A private local HTTP daemon starts on demand, bound to `127.0.0.1`. One daemon owns each `TALA_HOME` through a lifetime lock. SQLite transactions commit messages, receipts and retry records before success. Diagnostics are in `TALA_HOME/daemon.log`.
+A private local HTTP daemon starts on demand, bound to `127.0.0.1`, and also to a network address while a `tala network open` window lasts. One daemon owns each `TALA_HOME` through a lifetime lock. SQLite transactions commit messages, receipts and retry records before success. Diagnostics are in `TALA_HOME/daemon.log`.
 
 Use the CLI to inspect state. The database, credentials and handle files are implementation details, not a messaging interface. Handles prevent accidental cross-use between cooperating agents; access to the same user's filesystem is not an agent security boundary.
 

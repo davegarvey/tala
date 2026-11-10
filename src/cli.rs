@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    io::{self, IsTerminal, Read},
+    io::{self, BufRead, IsTerminal, Read},
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, Instant},
@@ -22,17 +22,12 @@ pub struct Cli {
     #[arg(
         long,
         global = true,
-        short = 'j',
-        hide = true,
-        help = "Accepted for compatibility; JSON is the default output"
+        value_enum,
+        value_name = "FORMAT",
+        default_value_t = Format::Json,
+        help = "Output format: json (one envelope, for programs) or text (for people)"
     )]
-    pub json: bool,
-    #[arg(
-        long,
-        global = true,
-        help = "Render text for people instead of one JSON envelope"
-    )]
-    pub human: bool,
+    pub format: Format,
     #[arg(
         long,
         global = true,
@@ -49,6 +44,36 @@ pub struct Cli {
     pub agent_file: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Option<Commands>,
+}
+/// Output rendering selected by `--format`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Format {
+    #[default]
+    Json,
+    Text,
+}
+impl Cli {
+    pub fn text(&self) -> bool {
+        self.format == Format::Text
+    }
+}
+/// Whether raw arguments ask for text, used for usage errors before parsing.
+pub fn args_request_text<I: IntoIterator<Item = std::ffi::OsString>>(args: I) -> bool {
+    let mut text = false;
+    let mut args = args.into_iter().take_while(|a| a != "--").peekable();
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("--format=text") => text = true,
+            Some("--format=json") => text = false,
+            Some("--format") => match args.peek().and_then(|v| v.to_str()) {
+                Some("text") => text = true,
+                Some("json") => text = false,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    text
 }
 #[derive(Subcommand)]
 pub enum Commands {
@@ -130,27 +155,11 @@ pub enum Commands {
         #[arg(long,default_value_t=50,value_parser=limit)]
         limit: usize,
     },
-    /// List server-wide projects before or after registration; stale and closed projects are hidden by default
-    ListProjects {
-        #[arg(long, help = "Include stale projects")]
-        stale: bool,
-        #[arg(long, help = "Include closed projects")]
-        closed: bool,
-        #[arg(long, conflicts_with_all = ["stale", "closed"], help = "Include stale and closed projects")]
-        all: bool,
-        #[arg(
-            long,
-            default_value = "",
-            help = "Return project paths after this cursor"
-        )]
-        after: String,
-        #[arg(long, default_value_t=50,value_parser=limit)]
-        limit: usize,
+    /// Discover projects and manage the lifecycle of the project you own
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
     },
-    /// Close the project owned by your selected agent
-    CloseProject,
-    /// Reopen the project owned by your selected agent
-    ReopenProject,
     /// Send to an explicit recipient; --wait consumes only its correlated reply
     Send {
         #[arg(long)]
@@ -317,8 +326,91 @@ pub enum Commands {
     },
     /// Stop the live daemon gracefully; never signal a recorded PID
     Stop,
+    /// Share this home's daemon with other machines for a limited time, or use another machine's daemon
+    Network {
+        #[command(subcommand)]
+        command: NetworkCommand,
+    },
     #[command(hide = true)]
     Daemon,
+}
+/// Network subcommands. Host commands manage this home's time-limited
+/// window; connect and disconnect make this home a client of another host.
+#[derive(Subcommand)]
+pub enum NetworkCommand {
+    /// Open a time-limited window for other machines (TLS, pinned certificate, access token)
+    Open {
+        #[arg(
+            long,
+            value_name = "IP:PORT",
+            default_value = crate::network::DEFAULT_BIND,
+            help = "Address to listen on; 0.0.0.0 means every interface"
+        )]
+        bind: String,
+        #[arg(
+            long = "for",
+            value_name = "DURATION",
+            default_value = "1h",
+            value_parser = crate::network::parse_duration,
+            help = "How long to stay open, such as 30m or 2h (at most 1d)"
+        )]
+        duration: u64,
+    },
+    /// Add time to the open window (the deadline is at most 1d from now)
+    Extend {
+        #[arg(
+            long = "for",
+            value_name = "DURATION",
+            value_parser = crate::network::parse_duration,
+            help = "Time to add, such as 30m or 2h"
+        )]
+        duration: u64,
+    },
+    /// Close the window now; connected machines are disconnected
+    Close,
+    /// Replace the access token and TLS certificate; clients must connect again
+    RotateToken,
+    /// Show the window or the remote connection
+    Status {
+        #[arg(long, help = "Include the access token")]
+        show_token: bool,
+    },
+    /// Use another machine's daemon from this home; reads the host's join code from stdin
+    Connect {
+        #[arg(
+            long,
+            value_name = "URL",
+            help = "Override the join code's address, such as https://192.168.1.20:7676"
+        )]
+        url: Option<String>,
+    },
+    /// Return this home to its own local daemon
+    Disconnect,
+}
+/// Project subcommands.
+#[derive(Subcommand)]
+pub enum ProjectCommand {
+    /// List server-wide projects before or after registration; stale and closed projects are hidden by default
+    List {
+        #[arg(long, help = "Include stale projects")]
+        stale: bool,
+        #[arg(long, help = "Include closed projects")]
+        closed: bool,
+        #[arg(long, conflicts_with_all = ["stale", "closed"], help = "Include stale and closed projects")]
+        all: bool,
+        #[arg(
+            long,
+            default_value = "",
+            help = "Return project paths after this cursor"
+        )]
+        after: String,
+        #[arg(long, default_value_t=50,value_parser=limit)]
+        limit: usize,
+    },
+    /// Close the project owned by your selected agent
+    Close,
+    /// Reopen the project owned by your selected agent
+    Reopen,
 }
 fn limit(s: &str) -> std::result::Result<usize, String> {
     let n = s
@@ -691,7 +783,7 @@ async fn wait_inbox(
     reply_to: Option<u64>,
     timeout: u64,
 ) -> Result<Outcome> {
-    let (_, generation) = client::begin_wait().await?;
+    let generation = client::begin_wait().await?;
     let mut waiter = Waiter::new(timeout);
     let timed_out = json!({"messages":[],"next_after":after,"has_more":false,"timed_out":true});
     // A consuming read is replayed with the same request ID until it
@@ -744,7 +836,7 @@ async fn wait_board(
     limit: usize,
     timeout: u64,
 ) -> Result<Outcome> {
-    let (_, generation) = client::begin_wait().await?;
+    let generation = client::begin_wait().await?;
     let read = |after: u64, limit: usize| {
         client::call_bound(
             Operation::Board {
@@ -1261,6 +1353,12 @@ fn add_status_identity_context(status: &mut Value, selector: &StatusSelector) {
     };
 
     context["agent"] = json!({"id": credential.agent, "name": Value::Null});
+    if status["network"]["mode"] == "remote" {
+        // Identity rows live in the remote host's database.
+        context["unavailable_reason"] = json!("remote_daemon");
+        status["identity_context"] = context;
+        return;
+    }
     match store::status_context_snapshot(&store::home().join("tala.sqlite3"), credential) {
         Ok(Some(snapshot)) => {
             context["agent"]["name"] = json!(snapshot.name);
@@ -1277,6 +1375,295 @@ fn add_status_identity_context(status: &mut Value, selector: &StatusSelector) {
     status["identity_context"] = context;
 }
 
+/// Adds network mode to status. The access token is never included.
+async fn add_status_network(status: &mut Value) -> Result<()> {
+    if let Some(remote) = crate::network::remote()? {
+        status["network"] =
+            json!({"mode": "remote", "url": remote.url, "fingerprint": remote.fingerprint});
+        return Ok(());
+    }
+    let mut network = if status["running"] == true && status["compatible"] != false {
+        client::existing(Operation::NetworkStatus)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| json!({"open": false}))
+    } else {
+        json!({"open": false})
+    };
+    network["mode"] = json!("local");
+    if let Some(identity) = crate::network::host_identity()? {
+        network["fingerprint"] = json!(identity.fingerprint()?);
+    }
+    status["network"] = network;
+    Ok(())
+}
+
+async fn local_daemon_live() -> bool {
+    match daemon::read_info() {
+        Some(info) => client::live(&info).await,
+        None => false,
+    }
+}
+
+fn not_on_remote(command: &str) -> Result<()> {
+    if crate::network::remote()?.is_some() {
+        return Err(Failure::new(
+            "REMOTE_MODE",
+            format!("This home is connected to a remote daemon, so tala network {command} is unavailable"),
+            "Run it on the host machine, or run tala network disconnect first.",
+        ));
+    }
+    Ok(())
+}
+
+/// `host:port` addresses another machine can use to reach a bound address,
+/// private LAN addresses first.
+fn join_addresses(address: Option<&str>) -> Vec<String> {
+    let Some(address) = address.and_then(|a| a.parse::<std::net::SocketAddr>().ok()) else {
+        return Vec::new();
+    };
+    let format = |ip: String| format!("{ip}:{}", address.port());
+    if address.ip().is_unspecified() {
+        crate::network::local_ipv4_addresses()
+            .into_iter()
+            .map(format)
+            .collect()
+    } else if address.is_ipv6() {
+        vec![format(format!("[{}]", address.ip()))]
+    } else {
+        vec![format(address.ip().to_string())]
+    }
+}
+
+/// Adds the certificate fingerprint and, for an open window, the addresses
+/// to join. Secrets (token and join code) are added only when asked.
+fn add_join_details(result: &mut Value, include_secrets: bool) -> Result<()> {
+    let Some(identity) = crate::network::host_identity()? else {
+        return Ok(());
+    };
+    result["fingerprint"] = json!(identity.fingerprint()?);
+    let addresses = if result["open"] == true {
+        join_addresses(result["address"].as_str())
+    } else {
+        Vec::new()
+    };
+    result["urls"] = json!(addresses
+        .iter()
+        .map(|a| format!("https://{a}"))
+        .collect::<Vec<_>>());
+    if include_secrets {
+        result["token"] = json!(identity.token);
+        if let Some(address) = addresses.first() {
+            result["join_code"] = json!(identity.join_code(address)?);
+            result["connect"] = json!("tala network connect (paste the join code)");
+        }
+    }
+    Ok(())
+}
+
+const NETWORK_WARNING: &str = "The join code and token grant full access to this home's messages: share them only with your own machines. Traffic is encrypted with TLS, and clients accept only this host's certificate.";
+
+async fn network_command(command: NetworkCommand) -> Result<Value> {
+    let mut result = match command {
+        NetworkCommand::Open { bind, duration } => {
+            not_on_remote("open")?;
+            crate::network::validate_bind(&bind)?;
+            let mut result = client::call(
+                Operation::NetworkOpen {
+                    bind,
+                    seconds: duration,
+                },
+                None,
+            )
+            .await?;
+            add_join_details(&mut result, true)?;
+            result["warning"] = json!(NETWORK_WARNING);
+            result
+        }
+        NetworkCommand::Extend { duration } => {
+            not_on_remote("extend")?;
+            client::call(Operation::NetworkExtend { seconds: duration }, None).await?
+        }
+        NetworkCommand::Close => {
+            not_on_remote("close")?;
+            match client::existing(Operation::NetworkClose).await? {
+                Some(result) => result,
+                // No daemon: nothing is listening; drop any saved window.
+                None => {
+                    crate::network::remove_window()?;
+                    json!({"open": false, "closed": false})
+                }
+            }
+        }
+        NetworkCommand::RotateToken => {
+            not_on_remote("rotate-token")?;
+            let mut result = match client::existing(Operation::NetworkRotateToken).await? {
+                Some(result) => result,
+                None => {
+                    crate::network::rotate_host_identity()?;
+                    json!({"open": false, "rotated": true})
+                }
+            };
+            add_join_details(&mut result, true)?;
+            result["next"] = json!("tala network connect, with the new join code, on each client");
+            result
+        }
+        NetworkCommand::Status { show_token } => {
+            if let Some(remote) = crate::network::remote()? {
+                let mut result = json!({
+                    "mode": "remote",
+                    "url": remote.url,
+                    "fingerprint": remote.fingerprint,
+                    "reachable": true,
+                });
+                if let Err(e) = client::remote_health(&remote).await {
+                    result["reachable"] = json!(e.code != "DAEMON_UNREACHABLE");
+                    result["error"] = json!(e);
+                }
+                if show_token {
+                    result["token"] = json!(remote.token);
+                }
+                return Ok(json!({ "network": result }));
+            }
+            let mut result = match client::existing(Operation::NetworkStatus).await? {
+                Some(result) => result,
+                None => {
+                    // The daemon restores an unexpired window when it next starts.
+                    let saved = crate::network::window()?.filter(|w| w.expires_at > store::now());
+                    json!({"open": false, "daemon_running": false, "restores_on_start": saved})
+                }
+            };
+            add_join_details(&mut result, show_token)?;
+            result
+        }
+        NetworkCommand::Connect { url } => connect_remote(url.as_deref()).await?,
+        NetworkCommand::Disconnect => {
+            json!({"mode": "local", "changed": crate::network::remove_remote()?})
+        }
+    };
+    if result.get("mode").is_none() {
+        result["mode"] = json!("local");
+    }
+    Ok(json!({ "network": result }))
+}
+
+async fn connect_remote(url: Option<&str>) -> Result<Value> {
+    let url = url.map(crate::network::normalise_url).transpose()?;
+    if crate::network::remote()?.is_none() {
+        if crate::network::window()?.is_some() {
+            return Err(Failure::new(
+                "NETWORK_CONFIG",
+                "This home has a network window and cannot also use a remote daemon",
+                "Run tala network close and tala stop first, or use a separate TALA_HOME.",
+            ));
+        }
+        if local_daemon_live().await {
+            return Err(Failure::new(
+                "NETWORK_CONFIG",
+                "A local daemon is running for this home",
+                "Run tala stop first. Handles registered with the local daemon will not work against the remote one.",
+            ));
+        }
+    }
+    let stdin = io::stdin();
+    if stdin.is_terminal() {
+        eprint!(
+            "Join code from the host (tala network open, or tala network status --show-token): "
+        );
+    }
+    let mut code = String::new();
+    stdin.lock().read_line(&mut code)?;
+    let code = crate::network::parse_join_code(&code)?;
+    let remote = crate::network::RemoteConfig {
+        url: match url {
+            Some(url) => url,
+            None => crate::network::normalise_url(&code.address)?,
+        },
+        token: code.token,
+        fingerprint: code.fingerprint,
+    };
+    client::remote_health(&remote).await?;
+    crate::network::save_remote(&remote)?;
+    Ok(json!({
+        "mode": "remote",
+        "url": remote.url,
+        "fingerprint": remote.fingerprint,
+        "connected": true,
+        "next": "tala register --name=<name> --tool=<tool>",
+    }))
+}
+
+/// One-line description of a network object shared by status and the network commands.
+fn network_summary(network: &Value) -> String {
+    match network["mode"].as_str() {
+        Some("remote") => format!(
+            "connected to remote daemon {}",
+            escape_status_text(network["url"].as_str().unwrap_or(""))
+        ),
+        _ if network["open"] == true => format!(
+            "window open on {} for {}",
+            network["address"].as_str().unwrap_or(""),
+            human_age(network["remaining_seconds"].as_i64().unwrap_or(0))
+        ),
+        _ => "local only (no network window)".into(),
+    }
+}
+
+fn render_network(network: &Value) {
+    println!("Network: {}", network_summary(network));
+    if network["capped"] == true {
+        println!("The window ends 1d from now, the maximum.");
+    }
+    if network["closed"] == true {
+        println!("Connected machines have been disconnected.");
+    }
+    if network["mode"] == "remote" && network["reachable"] == false {
+        println!("Remote daemon is unreachable.");
+    }
+    if let Some(error) = network["error"]["code"].as_str() {
+        println!("Diagnostic: {error}");
+    }
+    if let Some(error) = network["last_error"].as_str() {
+        println!("Last listener error: {}", escape_status_text(error));
+    }
+    if let Some(saved) = network["restores_on_start"].as_object() {
+        println!(
+            "The daemon is stopped; it reopens the window on {} when it next starts.",
+            saved.get("bind").and_then(Value::as_str).unwrap_or("")
+        );
+    }
+    if let Some(fingerprint) = network["fingerprint"].as_str() {
+        println!("Certificate fingerprint (SHA-256): {fingerprint}");
+    }
+    if let (Some(token), None) = (network["token"].as_str(), network["join_code"].as_str()) {
+        println!("Access token: {token}");
+    }
+    if let Some(code) = network["join_code"].as_str() {
+        println!("On the other machine, run tala network connect and paste this join code:");
+        println!("  {code}");
+        let others: Vec<_> = network["urls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .skip(1)
+            .filter_map(Value::as_str)
+            .collect();
+        if !others.is_empty() {
+            println!(
+                "If that address is unreachable from the other machine, add --url with one of: {}",
+                others.join(", ")
+            );
+        }
+    }
+    if let Some(warning) = network["warning"].as_str() {
+        println!("{warning}");
+    }
+    if let Some(next) = network["next"].as_str() {
+        println!("Next: {next}");
+    }
+}
+
 fn shell_quote_selector_path(path: &str) -> String {
     #[cfg(windows)]
     {
@@ -1289,6 +1676,7 @@ fn shell_quote_selector_path(path: &str) -> String {
 }
 
 pub async fn run(cli: Cli) -> Result<Outcome> {
+    let human = cli.text();
     let status_selector = matches!(
         cli.command.as_ref(),
         Some(Commands::Status { message: None })
@@ -1302,6 +1690,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                 | Commands::Status { message: None }
                 | Commands::Stop
                 | Commands::Daemon
+                | Commands::Network { .. }
         )
     );
     let selected = if uses_identity {
@@ -1310,7 +1699,6 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
         None
     };
     let selected = selected.as_deref();
-    let human = cli.human;
     let Some(command) = cli.command else {
         return Ok(done(
             client::call(Operation::Attention, Some(client::credential(selected)?)).await?,
@@ -1429,12 +1817,15 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             )
             .await?
         }
-        Commands::ListProjects {
-            stale,
-            closed,
-            all,
-            after,
-            limit,
+        Commands::Project {
+            command:
+                ProjectCommand::List {
+                    stale,
+                    closed,
+                    all,
+                    after,
+                    limit,
+                },
         } => {
             client::call(
                 Operation::ListProjects {
@@ -1447,10 +1838,12 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             )
             .await?
         }
-        Commands::CloseProject => {
-            client::call(Operation::CloseProject, Some(client::credential(selected)?)).await?
-        }
-        Commands::ReopenProject => {
+        Commands::Project {
+            command: ProjectCommand::Close,
+        } => client::call(Operation::CloseProject, Some(client::credential(selected)?)).await?,
+        Commands::Project {
+            command: ProjectCommand::Reopen,
+        } => {
             client::call(
                 Operation::ReopenProject,
                 Some(client::credential(selected)?),
@@ -1478,8 +1871,16 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                     "protocol_version": PROTOCOL_VERSION,
                     "error": e,
                 }),
+                Err(e) if e.code == "NETWORK_AUTH" => json!({
+                    "running": true,
+                    "reachable": true,
+                    "authorized": false,
+                    "protocol_version": PROTOCOL_VERSION,
+                    "error": e,
+                }),
                 Err(e) => return Err(e),
             };
+            add_status_network(&mut status).await?;
             status["home"] = json!(store::home());
             status["database"] = json!(store::home().join("tala.sqlite3"));
             status["legacy_files"] = json!(["sessions.json", "messages.json"]
@@ -1506,6 +1907,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             status
         }
         Commands::Stop => client::stop_daemon().await?,
+        Commands::Network { command } => network_command(command).await?,
         Commands::Whoami => {
             client::call(Operation::Whoami, Some(client::credential(selected)?)).await?
         }
@@ -1539,7 +1941,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                 .as_deref()
                 .map(|path| context(Some(path)).map(|ctx| ctx.project))
                 .transpose()?;
-            let (_, generation) = client::begin_wait().await?;
+            let generation = client::begin_wait().await?;
             let wait_started = Instant::now();
             let project_key = match explicit_project_key {
                 Some(project) => project,
@@ -1899,6 +2301,8 @@ pub fn render(data: &Value, attention: Option<&Value>) {
         print!("{content}");
     } else if data["identity_context"].is_object() && data["database"].is_string() {
         render_status(data);
+    } else if data["network"].is_object() {
+        render_network(&data["network"]);
     } else if data["events"].is_array() {
         render_wait(data);
     } else if data["incoming_requests"].is_array() {
@@ -2217,6 +2621,9 @@ fn render_status(data: &Value) {
     if let Some(error_code) = context["error_code"].as_str() {
         println!("Context error: {error_code}");
     }
+    if data["network"].is_object() {
+        println!("Network: {}", network_summary(&data["network"]));
+    }
     if let Some(home) = data["home"].as_str() {
         println!("Tala home: {}", escape_status_text(home));
     }
@@ -2287,12 +2694,12 @@ fn render_projects(data: &Value, projects: &[Value]) {
     let closed = data["hidden"]["closed"].as_u64().unwrap_or(0);
     if stale > 0 {
         println!(
-            "{stale} stale project(s) hidden. Include with: tala list-projects --stale (or --all)."
+            "{stale} stale project(s) hidden. Include with: tala project list --stale (or --all)."
         );
     }
     if closed > 0 {
         println!(
-            "{closed} closed project(s) hidden. Include with: tala list-projects --closed (or --all)."
+            "{closed} closed project(s) hidden. Include with: tala project list --closed (or --all)."
         );
     }
     if data["has_more"] == true {
@@ -2380,6 +2787,23 @@ fn render_message(v: &Value) {
     }
     if let Some(id) = v["superseded_by"].as_u64() {
         println!("  Superseded by message {id}; use that message as the current instruction.");
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+    fn text(args: &[&str]) -> bool {
+        args_request_text(args.iter().map(std::ffi::OsString::from))
+    }
+    #[test]
+    fn raw_arguments_select_text_before_separator() {
+        assert!(text(&["tala", "--format=text", "bogus"]));
+        assert!(text(&["tala", "--format", "text"]));
+        assert!(!text(&["tala", "--human"]));
+        assert!(!text(&["tala", "--format=json"]));
+        assert!(!text(&["tala", "send", "--", "--format=text"]));
+        assert!(!text(&["tala"]));
     }
 }
 

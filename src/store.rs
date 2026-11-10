@@ -847,6 +847,13 @@ COMMIT;")?;
                 json!({"running":true,"protocol_version":PROTOCOL_VERSION,"agents":tx.query_row("SELECT count(*) FROM agents",[],|r|r.get::<_,u64>(0))?,"messages":tx.query_row("SELECT count(*) FROM messages",[],|r|r.get::<_,u64>(0))?})
             }
             Operation::Stop => json!({"stopped":true}),
+            Operation::NetworkOpen { .. }
+            | Operation::NetworkExtend { .. }
+            | Operation::NetworkClose
+            | Operation::NetworkRotateToken
+            | Operation::NetworkStatus => {
+                return Err(invalid("Network operations are handled by the daemon"))
+            }
         };
         let attention = match identity {
             Some(id) if !matches!(rpc.operation, Operation::Attention) => ambient(&tx, id)?,

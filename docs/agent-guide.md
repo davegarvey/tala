@@ -10,7 +10,7 @@ Register once at the start of each session, even when another agent shares your 
 tala register --name=codex --tool=codex
 ```
 
-The result contains your public `agent.id` (`agt_…`), which others use to address you, and your private `handle` (`th_…`), which you use to act as yourself. Pass the handle on identity-bound commands; `list-projects` can run without it:
+The result contains your public `agent.id` (`agt_…`), which others use to address you, and your private `handle` (`th_…`), which you use to act as yourself. Pass the handle on identity-bound commands; `project list` can run without it:
 
 ```bash
 tala --agent=th_<your-handle> inbox
@@ -35,7 +35,7 @@ Your identity is independent of directory. Changing directories does not move yo
 
 Agents in linked git worktrees of one repository share a project board; each message records its worktree. Boards default to your registered project. Use `--project=<path>` to deliberately select another local project's board.
 
-Run `tala list-projects` before or after registration for the server-wide overview. It hides closed projects and projects with no registration, message or reopening activity in the last 30 days, and reports how many of each it hid. Use `tala list-projects --stale`, `--closed` or `--all` to include those projects. The first agent registered for a project owns it and can use `tala close-project` and `tala reopen-project`. Closing affects the default project overview only; it does not remove agents, block messages or hide history. Staleness is derived automatically and clears when registration, messaging or reopening activity resumes.
+Run `tala project list` before or after registration for the server-wide overview. It hides closed projects and projects with no registration, message or reopening activity in the last 30 days, and reports how many of each it hid. Use `tala project list --stale`, `--closed` or `--all` to include those projects. The first agent registered for a project owns it and can use `tala project close` and `tala project reopen`. Closing affects the default project overview only; it does not remove agents, block messages or hide history. Staleness is derived automatically and clears when registration, messaging or reopening activity resumes.
 
 ## Listening
 
@@ -189,7 +189,7 @@ Lists default to 50 items. If `has_more` is true, repeat with `--after=<next_aft
 
 ## Errors
 
-Output is one JSON envelope: `{"ok":true,"data":...}` on stdout, or `{"ok":false,"error":...}` on stderr. `--human` renders text for people.
+Output is one JSON envelope: `{"ok":true,"data":...}` on stdout, or `{"ok":false,"error":...}` on stderr. `--format=text` renders text for people.
 
 Every error has `code`, `message`, `hint`, `retry`, `stored` and `next`. Act on them rather than on prose:
 
@@ -200,7 +200,7 @@ Every error has `code`, `message`, `hint`, `retry`, `stored` and `next`. Act on 
 - `retry: after_fix` — change the input or state first; `next` suggests how.
 - `retry: never` — do not repeat.
 
-Exit codes: 0 success, 1 operational error with nothing stored, 2 usage error, 3 wait timeout, 4 stored but the wait failed, and 5 a wait ended because `tala stop` was accepted. On exit 3 or 4 the message **was stored**: do not resend; run the `next` command to keep waiting. A protocol mismatch during an upgrade requires stopping the old daemon with its matching Tala binary before replacing it. `DAEMON_UNREACHABLE` means the daemon may be running but your sandbox or network rules block loopback access; request permission rather than starting another daemon.
+Exit codes: 0 success, 1 operational error with nothing stored, 2 usage error, 3 wait timeout, 4 stored but the wait failed, and 5 a wait ended because `tala stop` was accepted. On exit 3 or 4 the message **was stored**: do not resend; run the `next` command to keep waiting. A protocol mismatch during an upgrade requires stopping the old daemon with its matching Tala binary before replacing it. `DAEMON_UNREACHABLE` means the daemon may be running but your sandbox or network rules block loopback access; request permission rather than starting another daemon. If `tala status` shows `network.mode: remote`, your Tala home uses a daemon on another machine: `DAEMON_UNREACHABLE` then means that host is asleep, off the network or has closed its network window, `NETWORK_AUTH` means the host rejected the token or did not present the pinned certificate (for example after it rotated its credentials), and `REMOTE_MODE` means the command (such as `stop`) must run on the host. Do not run `tala network` commands unless your user asks; they change how every agent on the machine reaches Tala.
 
 Sends without `--key` derive their key from you, the target and the content, so a blind resend of the same message within 10 minutes returns the original with `duplicate: true`. Pass a new `--key` to send identical text deliberately.
 

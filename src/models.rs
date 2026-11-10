@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Every error code with its retry class, meaning and default next command.
 /// Retry classes: `safe` (repeat as is), `same_key` (repeat with the same
@@ -96,6 +96,24 @@ pub const ERRORS: &[(&str, Retry, &str, Option<&str>)] = &[
         "DAEMON_IDENTITY",
         Retry::AfterFix,
         "Request reached a different daemon instance",
+        Some("tala status"),
+    ),
+    (
+        "NETWORK_AUTH",
+        Retry::AfterFix,
+        "Network access token was rejected, or the host did not present the pinned certificate",
+        Some("tala status"),
+    ),
+    (
+        "NETWORK_CONFIG",
+        Retry::AfterFix,
+        "Network access configuration is invalid or conflicts with this home",
+        Some("tala status"),
+    ),
+    (
+        "REMOTE_MODE",
+        Retry::Never,
+        "Operation is unavailable over the network or in a home connected to a remote daemon",
         Some("tala status"),
     ),
     (
@@ -230,8 +248,8 @@ Pass the returned private handle with --agent=<handle> or TALA_AGENT. For a prot
 Guide: tala guide [listening|requests|identity|worktrees|errors] (start with tala guide listening).\n\
 Background loop: run tala wait; fetch with its next.inbox/next.board commands, then restart with next.listen_again. tala init writes project instructions.\n\
 Then: tala (what needs attention); tala agents; tala send --to=<id> --request 'Review this'; tala inbox; tala reply <id> 'Done'\n\
-Projects: tala list-projects [--stale|--closed|--all] (no registration required); owner lifecycle: tala close-project / tala reopen-project\n\
-Output is one JSON envelope; --human renders text.\n\n\
+Projects: tala project list [--stale|--closed|--all] (no registration required); owner lifecycle: tala project close / tala project reopen\n\
+Output is one JSON envelope by default; --format=text renders text for people.\n\n\
 Exit codes: 0 success, 1 operational error (nothing stored), 2 usage error, 3 wait timeout, 4 stored but wait failed (do not resend), 5 wait stopped by tala stop.\n\n\
 Error codes (retry class: safe | same_key | after_fix | never):\n",
     );
@@ -492,6 +510,34 @@ pub enum Operation {
     },
     Status,
     Stop,
+    /// Open (or move) the network window. Loopback only.
+    NetworkOpen {
+        bind: String,
+        seconds: u64,
+    },
+    /// Add time to the open window. Loopback only.
+    NetworkExtend {
+        seconds: u64,
+    },
+    /// Close the window now. Loopback only.
+    NetworkClose,
+    /// Replace the access token; the open window keeps running. Loopback only.
+    NetworkRotateToken,
+    /// Report the window. Loopback only.
+    NetworkStatus,
+}
+impl Operation {
+    /// Operations the daemon handles itself rather than the store.
+    pub fn is_network_management(&self) -> bool {
+        matches!(
+            self,
+            Self::NetworkOpen { .. }
+                | Self::NetworkExtend { .. }
+                | Self::NetworkClose
+                | Self::NetworkRotateToken
+                | Self::NetworkStatus
+        )
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonInfo {
@@ -517,7 +563,10 @@ mod tests {
             include_str!("integration.rs"),
             include_str!("main.rs"),
             include_str!("models.rs"),
+            include_str!("listener.rs"),
+            include_str!("network.rs"),
             include_str!("store.rs"),
+            include_str!("tls.rs"),
         ];
         let mut found = 0;
         for source in sources {

@@ -6,17 +6,18 @@ mod client;
 mod daemon;
 mod integration;
 mod lifecycle;
+mod listener;
 mod models;
+mod network;
 mod store;
+mod tls;
 #[tokio::main]
 async fn main() {
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    let human = std::env::args_os()
-        .take_while(|a| a != "--")
-        .any(|a| a == "--human");
+    let human = cli::args_request_text(std::env::args_os());
     let cli = match cli::Cli::try_parse() {
         Ok(c) => c,
         Err(e) => {
@@ -43,7 +44,7 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let human = cli.human;
+    let human = cli.text();
     let is_daemon = matches!(cli.command, Some(cli::Commands::Daemon));
     match cli::run(cli).await {
         Ok(result) => {

@@ -15,9 +15,22 @@ Pre-commit hooks require `cargo fmt --check` and clippy with `-D warnings`.
 ## CLI design
 
 When creating or modifying CLI tools, follow the [Command Line Interface Guidelines](https://clig.dev/):
-`verb-noun` subcommands, consistent flags (`--help`, `--version`), `=` for flag values,
-meaningful exit codes, stderr for logs/stdout for data, and `--` to separate options
-from positional arguments.
+consistent flags (`--help`, `--version`), `=` for flag values, meaningful exit codes,
+stderr for logs/stdout for data, and `--` to separate options from positional arguments.
+
+Command structure:
+
+- Messaging commands that agents run constantly stay flat, top-level verbs:
+  `send`, `inbox`, `reply`, `wait`, `post`, `board`, `history` and similar.
+- Commands for one area that people run occasionally go in a `noun verb` group:
+  `tala project list|close|reopen`, `tala network open|close|...`. Add new set-up
+  or administration commands to an existing group, or a new noun group, rather
+  than to the top level.
+- `status` and `stop` stay top-level because they cover the whole system.
+- Output format is chosen with `--format=json|text`; JSON is the default. Do not add
+  format-specific flags.
+- Prefer one clean command surface over compatibility aliases. A breaking CLI change
+  uses a `feat!:` commit or a `BREAKING CHANGE:` footer so the release is a major version.
 
 ## Commits
 

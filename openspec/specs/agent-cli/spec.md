@@ -5,32 +5,34 @@ Defines agent cli for reliable local collaboration between distinct coding agent
 ## Requirements
 
 ### Requirement: Complete clean command surface
-The system SHALL expose init, register, update-purpose, rename, unregister, whoami, agents, list-projects, close-project, reopen-project, send, inbox, wait, reply, post, board, history, search, pending, resolve, handoff, guide, status and stop, and SHALL return the attention summary when run with no subcommand. Retired session commands and aliases SHALL be absent.
+The system SHALL expose init, register, update-purpose, rename, unregister, whoami, agents, project (with list, close and reopen), send, inbox, wait, reply, post, board, history, search, pending, resolve, handoff, guide, status, stop, network (with open, extend, close, rotate-token, status, connect and disconnect), and SHALL return the attention summary when run with no subcommand. Retired session commands and aliases, including `list-projects`, `close-project`, `reopen-project`, `enable-network`, `disable-network`, `connect-remote` and `disconnect-remote`, SHALL be absent.
 
 #### Scenario: Clean help
 - **WHEN** an agent runs --help
 - **THEN** the new surface is listed and use/session/check/listen are absent
 - **AND** rename is listed
+- **AND** network commands appear only under `tala network`
 - **AND** help points agents to `tala guide listening`
+- **AND** project commands appear only under `tala project`
 
 #### Scenario: Bare invocation
 - **WHEN** an agent with a selected identity runs `tala` with no subcommand
 - **THEN** the attention summary is returned rather than help text
 
 #### Scenario: Project list defaults
-- **WHEN** an agent runs `tala list-projects`
+- **WHEN** an agent runs `tala project list`
 - **THEN** the result includes open, non-stale projects and reports hidden stale and closed project counts with commands to include them
 
 #### Scenario: Project list overrides
-- **WHEN** an agent runs `tala list-projects --stale`, `--closed` or `--all`
+- **WHEN** an agent runs `tala project list --stale`, `--closed` or `--all`
 - **THEN** the result includes the requested project states and identifies each project's open/closed state, stale status and last activity
 
 #### Scenario: Project owner changes lifecycle
-- **WHEN** a project owner runs `tala close-project` or `tala reopen-project`
+- **WHEN** a project owner runs `tala project close` or `tala project reopen`
 - **THEN** the command changes the lifecycle of the selected project and reports the result
 
 #### Scenario: Read the complete guide
-- **WHEN** an agent runs `tala guide` without `--human`
+- **WHEN** an agent runs `tala guide` with the default JSON format
 - **THEN** Tala returns the complete bundled guide as the `content` string in the standard JSON success envelope and reports the available topics
 - **AND** the command does not require a selected identity or running daemon
 
@@ -39,7 +41,7 @@ The system SHALL expose init, register, update-purpose, rename, unregister, whoa
 - **THEN** Tala returns the requested topic content and its topic slug in the standard JSON success envelope
 
 #### Scenario: Human-readable guide
-- **WHEN** an agent runs `tala guide [topic] --human`
+- **WHEN** an agent runs `tala guide [topic] --format=text`
 - **THEN** Tala prints the matching Markdown content without a JSON envelope
 
 #### Scenario: Unknown guide topic
@@ -69,7 +71,7 @@ The CLI SHALL accept optional purpose at registration and expose an identity-bou
 - **THEN** each returned agent record includes `purpose` and `purpose_updated_at`, using null when no purpose is set
 
 #### Scenario: Human purpose is safe and bounded
-- **WHEN** an agent runs `whoami --human` or `agents --human`
+- **WHEN** an agent runs `whoami --format=text` or `agents --format=text`
 - **THEN** Tala prints a readable identity or listing and displays a purpose of at most 80 Unicode scalar values
 - **AND** any control characters in stored purpose text are escaped
 
@@ -82,19 +84,27 @@ The CLI SHALL accept optional purpose at registration and expose an identity-bou
 - **THEN** the display name changes without changing purpose
 
 ### Requirement: Input and output contract
-Send, reply, post and handoff SHALL accept exactly one positional text, message-file, stdin or ordered typed parts input; piped stdin SHALL work implicitly. Direct `send` SHALL accept `--supersedes=<message-id>` to amend an earlier eligible message. JSON message output SHALL expose nullable `supersedes` and `superseded_by` relationships; human output SHALL identify when a message supersedes or has been superseded by another message. Output SHALL default to one JSON envelope with ok and data or error, including usage failures; `--human` SHALL select text rendering and `--json` SHALL be accepted without effect and hidden from help. List output SHALL default to 50 items, cap at 500, and support incremental reads.
+Send, reply, post and handoff SHALL accept exactly one positional text, message-file, stdin or ordered typed parts input; piped stdin SHALL work implicitly. Direct `send` SHALL accept `--supersedes=<message-id>` to amend an earlier eligible message. JSON message output SHALL expose nullable `supersedes` and `superseded_by` relationships; human output SHALL identify when a message supersedes or has been superseded by another message. Output SHALL default to one JSON envelope with ok and data or error, including usage failures. The global `--format=json|text` option SHALL select the rendering, with `json` as the default. No other output-selection flags SHALL exist. List output SHALL default to 50 items, cap at 500, and support incremental reads.
 
 #### Scenario: Invalid JSON input
 - **WHEN** an invocation has conflicting content sources
 - **THEN** exit is 2 and stderr contains a parseable structured error
 
 #### Scenario: JSON without a flag
-- **WHEN** an agent runs `tala inbox` without `--json` or `--human`
+- **WHEN** an agent runs `tala inbox` without `--format`
 - **THEN** stdout is a single parseable JSON envelope
 
+#### Scenario: Text rendering on request
+- **WHEN** an agent runs `tala --format text inbox`
+- **THEN** stdout is the same text rendering as `--format=text`
+
 #### Scenario: Human rendering on request
-- **WHEN** an agent runs `tala inbox --human`
-- **THEN** stdout is the text rendering
+- **WHEN** an agent runs `tala inbox --format=text`
+- **THEN** stdout is the text rendering, and `--human` or `--json` is rejected as a usage error
+
+#### Scenario: Conflicting format selection
+- **WHEN** an agent passes an unknown value such as `--format=yaml`
+- **THEN** exit is 2 with a structured usage error
 
 #### Scenario: Send superseding message
 - **WHEN** an agent runs `tala send --to=<recipient> --supersedes=<message-id> <text>`
@@ -102,7 +112,7 @@ Send, reply, post and handoff SHALL accept exactly one positional text, message-
 - **AND** the predecessor's `superseded_by` identifies the new message
 
 #### Scenario: Superseding message in human output
-- **WHEN** an agent renders an amended message or its predecessor with `--human`
+- **WHEN** an agent renders an amended message or its predecessor with `--format=text`
 - **THEN** output states which message supersedes which
 
 ### Requirement: Agent integration
@@ -168,14 +178,14 @@ The CLI SHALL exit 0 on success, 1 on operational error with nothing stored, 2 o
 - **AND** the command does not suggest resending the request
 
 ### Requirement: Project discovery without identity
-The `list-projects` command SHALL allow read-only project discovery without a selected agent identity. Supplying a valid identity SHALL remain optional and preserve the authenticated response behavior.
+The `project list` command SHALL allow read-only project discovery without a selected agent identity. Supplying a valid identity SHALL remain optional and preserve the authenticated response behavior.
 
 #### Scenario: List projects before registration
-- **WHEN** a user runs `tala list-projects` without `--agent` or `TALA_AGENT`
+- **WHEN** a user runs `tala project list` without `--agent` or `TALA_AGENT`
 - **THEN** Tala returns the server-wide project list with the normal filters, pagination, and hidden-project counts
 
 #### Scenario: Authenticated project listing
-- **WHEN** a registered agent runs `tala list-projects` with its selected identity
+- **WHEN** a registered agent runs `tala project list` with its selected identity
 - **THEN** Tala returns the same project listing and the agent's response includes its normal ambient attention summary
 
 ### Requirement: Unified background wait
@@ -225,12 +235,12 @@ The command SHALL accept separate inbox and board ID cursors, return event IDs a
 - **THEN** it exits 3 with no events and exact continuation commands using the unchanged cursors
 
 ### Requirement: Rename command
-The CLI SHALL expose `tala rename --name=<new-name>` to rename the selected identity. It SHALL use the selected private handle, return the updated public agent record with the previous name and a `changed` flag, and SHALL provide a human-readable confirmation under `--human`. The command SHALL reject a blank name. It SHALL not issue or change a private handle.
+The CLI SHALL expose `tala rename --name=<new-name>` to rename the selected identity. It SHALL use the selected private handle, return the updated public agent record with the previous name and a `changed` flag, and SHALL provide a human-readable confirmation under `--format=text`. The command SHALL reject a blank name. It SHALL not issue or change a private handle.
 
 #### Scenario: Rename command output
 - **WHEN** an agent runs `tala rename --name=<new-name>` with a selected identity
 - **THEN** the JSON response reports the same public agent ID, the new name, previous name, and `changed:true`
-- **AND** `--human` confirms the rename without exposing a private handle
+- **AND** `--format=text` confirms the rename without exposing a private handle
 
 #### Scenario: Rename requires identity
 - **WHEN** an agent runs `tala rename` without selecting an identity
@@ -240,11 +250,11 @@ The CLI SHALL expose `tala rename --name=<new-name>` to rename the selected iden
 Human-readable output for direct sends and direct replies SHALL describe recipient presence as a point-in-time observation. When the observation says the recipient was not listening, output SHALL state that the message remains queued.
 
 #### Scenario: Direct message recipient is not listening
-- **WHEN** a direct send or direct reply is rendered with `--human` and `recipient_presence.listening` is false
+- **WHEN** a direct send or direct reply is rendered with `--format=text` and `recipient_presence.listening` is false
 - **THEN** output says the recipient was not listening and the message remains queued
 
 #### Scenario: Blocking send includes recipient observation
-- **WHEN** a direct `send --wait` result is rendered with `--human`
+- **WHEN** a direct `send --wait` result is rendered with `--format=text`
 - **THEN** output includes the observation from the stored send result, including when the correlated reply wait times out
 
 ### Requirement: Status reports selected identity context
@@ -269,11 +279,16 @@ Human-readable output for direct sends and direct replies SHALL describe recipie
 - **THEN** it reports the persisted identity, registered project root, and board latest ID from the local snapshot
 - **AND** the daemon's stopped/stale/incompatible state remains separately visible in daemon diagnostics
 
+#### Scenario: Status in remote mode
+- **WHEN** status runs with a valid selector in a home connected to a remote daemon
+- **THEN** it reports the public agent ID with `unavailable_reason` of `remote_daemon`, because identity rows live in the host's database
+- **AND** it does not read or create a local database
+
 ### Requirement: Status output is consistent across formats
 Status SHALL report selector, identity, project, and board high-water context consistently in JSON and human-readable output.
 
 #### Scenario: Human status shows context and availability
-- **WHEN** status runs with `--human`
+- **WHEN** status runs with `--format=text`
 - **THEN** it labels the selector source, identity ID/name, registered project root, and board latest ID when available
 - **AND** it clearly explains when identity context or the board high-water mark is unavailable
 
@@ -309,5 +324,5 @@ Thread-list JSON SHALL return rows with public thread summary fields and paging 
 - **THEN** each row includes thread ID, conversational participants, separate handoff-only recipients, last message ID and time, message count, unread and fresh/stale pending counts, kind, relevant project, and a bounded excerpt
 
 #### Scenario: Human thread-list parity
-- **WHEN** an agent runs `tala history --human` without a thread ID
+- **WHEN** an agent runs `tala history --format=text` without a thread ID
 - **THEN** Tala prints the same thread rows and summary values in a compact escaped table

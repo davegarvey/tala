@@ -21,6 +21,7 @@ name = "tala"
 path = "src/main.rs"
 
 [dev-dependencies]
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
 tempfile = "3"
 
 [dependencies]
@@ -35,6 +36,9 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 fs2 = "0.4"
 sha2 = "0.10"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

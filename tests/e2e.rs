@@ -42,8 +42,7 @@ impl Harness {
         c.env("TALA_HOME", &self.home)
             .env_remove("TALA_AGENT")
             .env_remove("TALA_AGENT_FILE")
-            .current_dir(dir)
-            .arg("--json");
+            .current_dir(dir);
         if let Some(agent) = agent {
             c.arg(format!("--agent={}", agent.handle));
         }
@@ -171,7 +170,7 @@ fn guide_is_available_without_identity_or_daemon_in_json_and_human_modes() {
         .unwrap();
     assert!(!reference_loop.contains("eval "));
     assert!(!reference_loop.contains("message-id="));
-    let human = h.raw(&h.a, None, &["guide", "identity", "--human"]);
+    let human = h.raw(&h.a, None, &["guide", "identity", "--format=text"]);
     assert!(human.status.success());
     let human = String::from_utf8(human.stdout).unwrap();
     assert!(human.starts_with("## Identity\n"));
@@ -189,7 +188,12 @@ fn register_human_output_points_to_listening_guide() {
     let output = h.raw(
         &h.a,
         None,
-        &["register", "--name=fixture", "--tool=fixture", "--human"],
+        &[
+            "register",
+            "--name=fixture",
+            "--tool=fixture",
+            "--format=text",
+        ],
     );
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -356,11 +360,11 @@ fn purpose_update_and_clear_preserve_last_seen_identity_and_history() {
         Some(&selector),
         &["update-purpose", "--purpose=handles deployments"],
     );
-    let whoami = h.raw(&h.a, Some(&selector), &["whoami", "--human"]);
+    let whoami = h.raw(&h.a, Some(&selector), &["whoami", "--format=text"]);
     assert!(whoami.status.success());
     let whoami = String::from_utf8(whoami.stdout).unwrap();
     assert!(whoami.contains("Purpose: handles deployments"));
-    let agents = h.raw(&h.a, Some(&selector), &["agents", "--human"]);
+    let agents = h.raw(&h.a, Some(&selector), &["agents", "--format=text"]);
     assert!(agents.status.success());
     let agents = String::from_utf8(agents.stdout).unwrap();
     assert!(agents.contains("Purpose: handles deployments"));
@@ -500,7 +504,7 @@ fn superseding_messages_remain_visible_without_leaving_old_requests_pending() {
 
     let output = h
         .command(&h.a, Some(&recipient), &[])
-        .arg("--human")
+        .arg("--format=text")
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -510,7 +514,7 @@ fn superseding_messages_remain_visible_without_leaving_old_requests_pending() {
 
     let history = h
         .command(&h.a, Some(&recipient), &["history", &thread_id])
-        .arg("--human")
+        .arg("--format=text")
         .output()
         .unwrap();
     assert!(history.status.success());
@@ -543,7 +547,7 @@ fn human_send_explains_that_an_unlistened_message_stays_queued() {
             Some(&sender),
             &["send", "--to", &recipient.id, "--request", "Please review"],
         )
-        .arg("--human")
+        .arg("--format=text")
         .output()
         .unwrap();
     assert!(
@@ -569,7 +573,7 @@ fn human_reply_explains_that_an_unlistened_message_stays_queued() {
             Some(&recipient),
             &["reply", &message_id, "Review complete"],
         )
-        .arg("--human")
+        .arg("--format=text")
         .output()
         .unwrap();
     assert!(
@@ -591,30 +595,35 @@ fn project_list_hides_closed_projects_and_owner_can_reopen() {
     let project_a = std::fs::canonicalize(&h.a).unwrap().display().to_string();
     let project_b = std::fs::canonicalize(&h.b).unwrap().display().to_string();
 
-    let initial = h.ok(&h.a, Some(&owner), &["list-projects"]);
+    let initial = h.ok(&h.a, Some(&owner), &["project", "list"]);
     assert_eq!(initial["projects"].as_array().unwrap().len(), 2);
     assert_eq!(initial["projects"][0]["project"], project_a);
     assert_eq!(initial["projects"][0]["owner_id"], owner.id);
     assert_eq!(initial["projects"][1]["project"], project_b);
     assert_eq!(initial["projects"][1]["owner_id"], other.id);
 
-    let closed = h.ok(&h.a, Some(&owner), &["close-project"]);
+    let closed = h.ok(&h.a, Some(&owner), &["project", "close"]);
     assert_eq!(closed["closed"], true);
     assert_eq!(closed["changed"], true);
-    let default = h.ok(&h.a, Some(&owner), &["list-projects"]);
+    let default = h.ok(&h.a, Some(&owner), &["project", "list"]);
     assert_eq!(default["projects"].as_array().unwrap().len(), 1);
     assert_eq!(default["projects"][0]["project"], project_b);
     assert_eq!(default["hidden"]["closed"], 1);
 
-    let error = h.error(&h.a, Some(&peer), &["close-project"], "NOT_PROJECT_OWNER");
+    let error = h.error(
+        &h.a,
+        Some(&peer),
+        &["project", "close"],
+        "NOT_PROJECT_OWNER",
+    );
     assert_eq!(error["error"]["retry"], "never");
-    let with_closed = h.ok(&h.a, Some(&owner), &["list-projects", "--closed"]);
+    let with_closed = h.ok(&h.a, Some(&owner), &["project", "list", "--closed"]);
     assert_eq!(with_closed["projects"].as_array().unwrap().len(), 2);
     assert_eq!(with_closed["projects"][0]["closed"], true);
 
-    let reopened = h.ok(&h.a, Some(&owner), &["reopen-project"]);
+    let reopened = h.ok(&h.a, Some(&owner), &["project", "reopen"]);
     assert_eq!(reopened["closed"], false);
-    let all = h.ok(&h.a, Some(&owner), &["list-projects", "--all"]);
+    let all = h.ok(&h.a, Some(&owner), &["project", "list", "--all"]);
     assert_eq!(all["projects"].as_array().unwrap().len(), 2);
 }
 
@@ -622,7 +631,7 @@ fn project_list_hides_closed_projects_and_owner_can_reopen() {
 fn project_list_works_without_identity_and_keeps_authenticated_attention() {
     let h = Harness::new();
 
-    let empty = h.raw(&h.a, None, &["list-projects"]);
+    let empty = h.raw(&h.a, None, &["project", "list"]);
     assert!(
         empty.status.success(),
         "{}",
@@ -635,11 +644,11 @@ fn project_list_works_without_identity_and_keeps_authenticated_attention() {
 
     let owner = h.register(&h.a, "owner");
     let peer = h.register(&h.b, "peer");
-    let listed = h.ok(&h.a, None, &["list-projects"]);
+    let listed = h.ok(&h.a, None, &["project", "list"]);
     assert_eq!(listed["projects"].as_array().unwrap().len(), 2);
 
     h.send(&peer, &owner.id, "Review this project");
-    let authenticated = h.raw(&h.a, Some(&owner), &["list-projects"]);
+    let authenticated = h.raw(&h.a, Some(&owner), &["project", "list"]);
     assert!(authenticated.status.success());
     let authenticated: Value = serde_json::from_slice(&authenticated.stdout).unwrap();
     assert_eq!(authenticated["ok"], true);
@@ -822,7 +831,11 @@ fn rename_preserves_identity_threads_and_duplicate_name_behavior() {
     assert_eq!(no_op["agent"]["id"], target.id);
     assert_eq!(no_op["changed"], false);
     assert_eq!(no_op["previous_name"], "codex");
-    let human = h.raw(&h.a, Some(&target), &["rename", "--name=codex", "--human"]);
+    let human = h.raw(
+        &h.a,
+        Some(&target),
+        &["rename", "--name=codex", "--format=text"],
+    );
     assert!(human.status.success());
     assert!(String::from_utf8_lossy(&human.stdout).contains("already named codex"));
     h.error(
@@ -1050,7 +1063,7 @@ fn send_wait_timeout_human_output_has_safe_recovery_guidance() {
             "--wait",
             "--timeout=1",
             "question",
-            "--human",
+            "--format=text",
         ],
     );
     assert_eq!(o.status.code(), Some(3));
@@ -1232,7 +1245,7 @@ fn history_list_uses_narrow_visibility_and_reports_summary_fields() {
 
     let history = h.ok(&h.a, Some(&a), &["history", &board_thread]);
     assert_eq!(history["messages"].as_array().unwrap().len(), 2);
-    let human = h.raw(&h.a, Some(&a), &["history", "--human"]);
+    let human = h.raw(&h.a, Some(&a), &["history", "--format=text"]);
     assert!(human.status.success());
     let human = String::from_utf8(human.stdout).unwrap();
     assert!(human.contains("THREAD | LAST ID | MESSAGES"));
@@ -1752,7 +1765,7 @@ fn status_reports_identity_context_for_each_selector_without_exposing_secrets() 
     assert!(!conflict_text.contains("th_private-conflicting-value"));
     assert!(!conflict_text.contains(selector_path.to_str().unwrap()));
 
-    let human = h.raw(&h.b, Some(&identity), &["status", "--human"]);
+    let human = h.raw(&h.b, Some(&identity), &["status", "--format=text"]);
     assert!(
         human.status.success(),
         "{}",
@@ -2996,9 +3009,12 @@ fn help_lists_exit_codes_and_every_error_code() {
         "RECIPIENT_NOT_FOUND",
         "NOT_PROJECT_OWNER",
         "same_key",
-        "list-projects",
-        "close-project",
-        "reopen-project",
+        "project",
+        "list",
+        "project",
+        "close",
+        "project",
+        "reopen",
         "--stale",
         "--closed",
         "--all",
@@ -3284,7 +3300,7 @@ fn saved_selector_file_selects_identity_without_exposing_handle() {
     let human = h
         .command(&h.a, None, &["register", "--name=human", "--tool=fixture"])
         .arg(format!("--save-handle-to={}", human_path.display()))
-        .arg("--human")
+        .arg("--format=text")
         .output()
         .unwrap();
     assert!(
@@ -3617,17 +3633,17 @@ fn json_is_the_default_and_human_renders_text() {
     let o = plain(&["inbox", "--peek"]);
     let v: Value = serde_json::from_slice(&o.stdout).unwrap();
     assert_eq!(v["ok"], true);
-    let o = plain(&["inbox", "--peek", "--human"]);
+    let o = plain(&["inbox", "--peek", "--format=text"]);
     let text = String::from_utf8(o.stdout).unwrap();
     assert!(text.contains("rendered") && text.contains("ago"), "{text}");
     assert!(text.contains("Attention: 1 unread"), "{text}");
-    let o = plain(&["--human"]);
+    let o = plain(&["--format=text"]);
     let text = String::from_utf8(o.stdout).unwrap();
     assert!(
         text.contains("1 requests to you") && text.contains("Next: tala inbox"),
         "{text}"
     );
-    let o = plain(&["send", "--to=missing", "x", "--human"]);
+    let o = plain(&["send", "--to=missing", "x", "--format=text"]);
     assert!(String::from_utf8(o.stderr)
         .unwrap()
         .contains("Next: tala agents"));
@@ -3892,4 +3908,466 @@ fn board_wait_returns_only_new_messages() {
     let all = h.ok(&h.a, Some(&b), &["board", "--wait", "--after=1"]);
     assert_eq!(all["messages"][0]["parts"][0]["text"], "new plan");
     assert_eq!(h.ok(&h.a, Some(&b), &["inbox"])["messages"], json!([]));
+}
+
+/// Runs `tala network connect`, piping the join code on stdin.
+fn connect_remote(h: &Harness, code: &str, url: Option<&str>) -> Output {
+    let url_arg = url.map(|u| format!("--url={u}"));
+    let mut args = vec!["network", "connect"];
+    if let Some(arg) = url_arg.as_deref() {
+        args.push(arg);
+    }
+    let mut child = h
+        .command(&h.b, None, &args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{code}\n").as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+fn error_code(output: &Output) -> String {
+    let v: Value = serde_json::from_slice(&output.stderr)
+        .unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&output.stderr)));
+    v["error"]["code"].as_str().unwrap_or("").to_owned()
+}
+
+/// Sends one raw request over plain TCP and returns whatever comes back.
+fn raw_http(address: &str, request: &str) -> String {
+    use std::io::Read;
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let _ = stream.write_all(request.as_bytes());
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response);
+    String::from_utf8_lossy(&response).into_owned()
+}
+
+/// Test-only verifier that accepts any server, for probing the listener's
+/// own behaviour. The CLI never uses this; it pins the certificate.
+#[derive(Debug)]
+struct AcceptAnyServer;
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyServer {
+    fn verify_server_cert(
+        &self,
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &[rustls::pki_types::CertificateDer<'_>],
+        _: &rustls::pki_types::ServerName<'_>,
+        _: &[u8],
+        _: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+/// Sends one raw HTTP request over TLS to the network listener.
+fn tls_request(address: &str, request: &str) -> String {
+    use std::io::Read;
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .dangerous()
+    .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAnyServer))
+    .with_no_client_auth();
+    let name = rustls::pki_types::ServerName::try_from("tala").unwrap();
+    let connection = rustls::ClientConnection::new(std::sync::Arc::new(config), name).unwrap();
+    let socket = std::net::TcpStream::connect(address).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut stream = rustls::StreamOwned::new(connection, socket);
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response);
+    String::from_utf8_lossy(&response).into_owned()
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn network(h: &Harness, args: &[&str]) -> Value {
+    let mut full = vec!["network"];
+    full.extend_from_slice(args);
+    h.ok(&h.b, None, &full)["network"].clone()
+}
+
+fn rpc_over_network(address: &str, token: &str, op: &str) -> String {
+    let body = format!(
+        r#"{{"protocol_version":10,"request_id":"net-{op}","credential":null,"operation":{{"op":"{op}","bind":"127.0.0.1:0","seconds":60}}}}"#
+    );
+    tls_request(
+        address,
+        &format!(
+            "POST /rpc HTTP/1.1\r\nHost: tala\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+}
+
+fn from_hex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn network_window_shares_daemon_without_restart() {
+    let host = Harness::new();
+    let client = Harness::new();
+    let host_agent = host.register(&host.a, "host-agent");
+    let instance = host.ok(&host.a, None, &["status"])["instance"].clone();
+    // A local wait spans opening the window: the daemon does not restart.
+    let local_wait = host
+        .command(&host.a, Some(&host_agent), &["wait", "--timeout=4"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let opened = network(&host, &["open", "--bind=127.0.0.1:0", "--for=1h"]);
+    assert_eq!(opened["open"], true);
+    assert!(opened["remaining_seconds"].as_i64().unwrap() > 3500);
+    let address = opened["address"].as_str().unwrap().to_owned();
+    let token = opened["token"].as_str().unwrap().to_owned();
+    let fingerprint = opened["fingerprint"].as_str().unwrap().to_owned();
+    let code = opened["join_code"].as_str().unwrap().to_owned();
+    assert_eq!(code, format!("tala://{token}@{address}#{fingerprint}"));
+    let url = format!("https://{address}");
+    assert_eq!(host.ok(&host.a, None, &["status"])["instance"], instance);
+
+    // A pinned fingerprint that does not match is rejected before saving.
+    let wrong = code.replace(&fingerprint, &"0".repeat(64));
+    let rejected = connect_remote(&client, &wrong, None);
+    assert_eq!(error_code(&rejected), "NETWORK_AUTH");
+    assert!(!client.home.join("remote.json").exists());
+    // Plain HTTP gets no HTTP response from the TLS listener.
+    let plain = raw_http(
+        &address,
+        &format!(
+            "GET /health HTTP/1.1
+Host: {address}
+Connection: close
+
+"
+        ),
+    );
+    assert!(!plain.contains("HTTP/1.1 "), "{plain}");
+
+    let connected = connect_remote(&client, &code, None);
+    assert!(
+        connected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&connected.stderr)
+    );
+    let laptop_agent = client.register(&client.b, "laptop-agent");
+    assert!(!client.home.join("daemon.json").exists());
+    let sent = client.ok(
+        &client.b,
+        Some(&laptop_agent),
+        &[
+            "send",
+            "--to",
+            &host_agent.id,
+            "--request",
+            "Hello from the laptop",
+        ],
+    );
+    let mid = id(&sent);
+    assert_eq!(
+        host.ok(&host.a, Some(&host_agent), &["inbox"])["messages"][0]["id"],
+        sent["message"]["id"]
+    );
+    host.ok(&host.a, Some(&host_agent), &["reply", &mid, "Hello back"]);
+    assert_eq!(
+        client.ok(&client.b, Some(&laptop_agent), &["inbox"])["messages"][0]["reply_to"],
+        sent["message"]["id"]
+    );
+    let waited = client.raw(&client.b, Some(&laptop_agent), &["wait", "--timeout=1"]);
+    assert_eq!(waited.status.code(), Some(3));
+    let local_wait = local_wait.wait_with_output().unwrap();
+    assert!(
+        matches!(local_wait.status.code(), Some(0) | Some(3)),
+        "{}",
+        String::from_utf8_lossy(&local_wait.stderr)
+    );
+
+    // Status reports the window without the token unless asked.
+    let status = host.ok(&host.a, None, &["status"]);
+    assert_eq!(status["network"]["mode"], "local");
+    assert_eq!(status["network"]["address"], address);
+    assert!(!status.to_string().contains(&token));
+    assert_eq!(status["network"]["fingerprint"], fingerprint);
+    let plain_status = network(&host, &["status"]);
+    assert!(plain_status["token"].is_null() && plain_status["join_code"].is_null());
+    assert_eq!(
+        network(&host, &["status", "--show-token"])["join_code"],
+        code
+    );
+    let client_status = client.ok(&client.b, None, &["status"]);
+    assert_eq!(client_status["network"]["mode"], "remote");
+    assert!(!client_status.to_string().contains(&token));
+    assert_eq!(network(&client, &["status"])["reachable"], true);
+
+    // Extending adds time; the deadline is capped at one day from now.
+    let before = network(&host, &["status"])["remaining_seconds"]
+        .as_i64()
+        .unwrap();
+    let extended = network(&host, &["extend", "--for=30m"]);
+    assert!(extended["remaining_seconds"].as_i64().unwrap() >= before + 1790);
+    assert_eq!(extended["capped"], false);
+    let capped = network(&host, &["extend", "--for=1d"]);
+    assert_eq!(capped["capped"], true);
+    assert!(capped["remaining_seconds"].as_i64().unwrap() <= 86_400);
+    host.error(
+        &host.b,
+        None,
+        &["network", "extend", "--for=90"],
+        "USAGE_ERROR",
+    );
+
+    // Management and stop are refused over the network.
+    for op in ["network_open", "network_close", "stop"] {
+        let response = rpc_over_network(&address, &token, op);
+        assert!(response.contains("REMOTE_MODE"), "{op}: {response}");
+    }
+    let response = tls_request(
+        &address,
+        "GET /health HTTP/1.1\r\nHost: tala\r\nConnection: close\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+    assert!(!response.contains("instance"));
+    client.error(&client.b, None, &["stop"], "REMOTE_MODE");
+    client.error(&client.b, None, &["network", "open"], "REMOTE_MODE");
+    host.error(
+        &host.b,
+        None,
+        &["network", "connect", &format!("--url={url}")],
+        "NETWORK_CONFIG",
+    );
+
+    // Rotation replaces token and certificate without closing the window.
+    let rotated = network(&host, &["rotate-token"]);
+    assert_ne!(rotated["token"], token);
+    assert_ne!(rotated["fingerprint"], fingerprint);
+    assert_eq!(rotated["open"], true);
+    client.error(&client.b, Some(&laptop_agent), &["whoami"], "NETWORK_AUTH");
+    // --url overrides the code's address while keeping its token and pin.
+    let new_code = rotated["join_code"].as_str().unwrap();
+    let reconnected = connect_remote(&client, new_code, Some(&url));
+    assert!(
+        reconnected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reconnected.stderr)
+    );
+    client.ok(&client.b, Some(&laptop_agent), &["whoami"]);
+
+    // Closing disconnects remote clients; local agents carry on.
+    let closed = network(&host, &["close"]);
+    assert_eq!(closed["closed"], true);
+    assert_eq!(closed["open"], false);
+    client.error(
+        &client.b,
+        Some(&laptop_agent),
+        &["whoami"],
+        "DAEMON_UNREACHABLE",
+    );
+    host.ok(&host.a, Some(&host_agent), &["whoami"]);
+    assert_eq!(host.ok(&host.a, None, &["status"])["instance"], instance);
+
+    let local = network(&client, &["disconnect"]);
+    assert_eq!(local["changed"], true);
+    assert_eq!(
+        client.ok(&client.b, None, &["status"])["network"]["mode"],
+        "local"
+    );
+}
+
+#[test]
+fn network_window_expires_and_disconnects_clients() {
+    let host = Harness::new();
+    let client = Harness::new();
+    let opened = network(&host, &["open", "--bind=127.0.0.1:0", "--for=2s"]);
+    assert!(
+        connect_remote(&client, opened["join_code"].as_str().unwrap(), None)
+            .status
+            .success()
+    );
+    let agent = client.register(&client.b, "short-lived");
+    std::thread::sleep(Duration::from_millis(3500));
+    client.error(&client.b, Some(&agent), &["whoami"], "DAEMON_UNREACHABLE");
+    assert_eq!(network(&host, &["status"])["open"], false);
+    assert!(!host.home.join("network.json").exists());
+}
+
+#[test]
+fn network_window_survives_restart_until_expiry() {
+    let h = Harness::new();
+    let bind = format!("--bind=127.0.0.1:{}", free_port());
+    let opened = network(&h, &["open", &bind, "--for=1h"]);
+    h.ok(&h.a, None, &["stop"]);
+    let stopped = network(&h, &["status"]);
+    assert_eq!(stopped["open"], false);
+    assert_eq!(stopped["daemon_running"], false);
+    assert_eq!(
+        stopped["restores_on_start"]["bind"],
+        bind.trim_start_matches("--bind=")
+    );
+    // The next command starts the daemon, which reopens the same window.
+    h.register(&h.a, "restarter");
+    let restored = network(&h, &["status"]);
+    assert_eq!(restored["open"], true);
+    assert_eq!(restored["address"], opened["address"]);
+    assert!(restored["expires_at"].as_i64().unwrap() <= opened["expires_at"].as_i64().unwrap());
+}
+
+#[test]
+fn network_bind_failure_keeps_loopback_serving() {
+    let h = Harness::new();
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let bind = format!("--bind={}", occupied.local_addr().unwrap());
+    h.error(&h.b, None, &["network", "open", &bind], "NETWORK_CONFIG");
+    let agent = h.register(&h.a, "local-agent");
+    h.ok(&h.a, Some(&agent), &["whoami"]);
+    let status = network(&h, &["status"]);
+    assert_eq!(status["open"], false);
+    assert!(status["last_error"].is_string());
+    assert!(!h.home.join("network.json").exists());
+}
+
+#[test]
+fn remote_mode_reports_unreachable_without_starting_a_daemon() {
+    let h = Harness::new();
+    let unused = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("https://{}", unused.local_addr().unwrap());
+    drop(unused);
+    std::fs::create_dir_all(&h.home).unwrap();
+    std::fs::write(
+        h.home.join("remote.json"),
+        format!(
+            r#"{{"url":"{url}","token":"tnt_{}","fingerprint":"{}"}}"#,
+            "1".repeat(64),
+            "2".repeat(64)
+        ),
+    )
+    .unwrap();
+    h.error(
+        &h.a,
+        None,
+        &["register", "--name=x", "--tool=fixture"],
+        "DAEMON_UNREACHABLE",
+    );
+    let status = h.ok(&h.a, None, &["status"]);
+    assert_eq!(status["reachable"], false);
+    assert!(!h.home.join("daemon.json").exists());
+}
+
+#[test]
+fn format_option_selects_rendering() {
+    let h = Harness::new();
+    let agent = h.register(&h.a, "formatter");
+    let text = h.raw(&h.a, Some(&agent), &["whoami", "--format=text"]);
+    assert!(text.status.success());
+    assert!(serde_json::from_slice::<Value>(&text.stdout).is_err());
+    let spaced = h.raw(&h.a, Some(&agent), &["--format", "text", "whoami"]);
+    assert_eq!(text.stdout, spaced.stdout);
+    let json = h.raw(&h.a, Some(&agent), &["whoami", "--format=json"]);
+    let envelope: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(envelope["ok"], true);
+
+    // The former --human and --json aliases are removed.
+    h.error(&h.a, None, &["status", "--human"], "USAGE_ERROR");
+    h.error(&h.a, None, &["status", "--json"], "USAGE_ERROR");
+    let usage = h.raw(&h.a, None, &["--format=text", "no-such-command"]);
+    assert_eq!(usage.status.code(), Some(2));
+    assert!(serde_json::from_slice::<Value>(&usage.stderr).is_err());
+    h.error(&h.a, None, &["--format=yaml", "status"], "USAGE_ERROR");
+}
+
+/// A server holding the host's certificate but not its key must be rejected:
+/// pinning has to be backed by handshake signature verification.
+#[test]
+fn pinned_certificate_without_its_key_is_rejected() {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    let host = Harness::new();
+    let client = Harness::new();
+    let opened = network(&host, &["open", "--bind=127.0.0.1:0", "--for=5m"]);
+    let identity: Value =
+        serde_json::from_slice(&std::fs::read(host.home.join("network-identity.json")).unwrap())
+            .unwrap();
+    let cert = CertificateDer::from(from_hex(identity["cert"].as_str().unwrap()));
+    let impostor_key = rcgen::KeyPair::generate().unwrap();
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(impostor_key.serialize_der()));
+    let signer = rustls::crypto::ring::sign::any_supported_type(&key).unwrap();
+    // CertifiedKey::new skips the key/certificate consistency check on purpose.
+    let certified = std::sync::Arc::new(rustls::sign::CertifiedKey::new(vec![cert], signer));
+    #[derive(Debug)]
+    struct Fixed(std::sync::Arc<rustls::sign::CertifiedKey>);
+    impl rustls::server::ResolvesServerCert for Fixed {
+        fn resolve(
+            &self,
+            _: rustls::server::ClientHello<'_>,
+        ) -> Option<std::sync::Arc<rustls::sign::CertifiedKey>> {
+            Some(self.0.clone())
+        }
+    }
+    let config = std::sync::Arc::new(
+        rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_no_client_auth()
+        .with_cert_resolver(std::sync::Arc::new(Fixed(certified))),
+    );
+    let impostor = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let impostor_address = impostor.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for socket in impostor.incoming().flatten() {
+            let mut connection = rustls::ServerConnection::new(config.clone()).unwrap();
+            let mut socket = socket;
+            let _ = connection.complete_io(&mut socket);
+        }
+    });
+    let code = opened["join_code"].as_str().unwrap();
+    let output = connect_remote(&client, code, Some(&format!("https://{impostor_address}")));
+    assert_eq!(error_code(&output), "NETWORK_AUTH");
+    assert!(!client.home.join("remote.json").exists());
 }
