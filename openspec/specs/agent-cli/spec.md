@@ -16,11 +16,15 @@ Registration output and the identity guide SHALL clearly explain that the return
 - **THEN** it clearly distinguishes the private `th_` credential from public `agt_` addressing IDs
 
 ### Requirement: Complete clean command surface
-The system SHALL expose init, register, update-purpose, rename, unregister, whoami, agents, project (with list, close and reopen), send, inbox, wait, reply, accept, decline, post, board, history, search, pending, resolve, handoff, guide, status, stop, network (with open, extend, close, rotate-token, status, connect and disconnect), and SHALL return the attention summary when run with no subcommand. Retired session commands and aliases, including `list-projects`, `close-project`, `reopen-project`, `enable-network`, `disable-network`, `connect-remote` and `disconnect-remote`, SHALL be absent.
+The system SHALL expose init, register, update-purpose, rename, unregister, whoami, agents, project (with list, close and reopen), send, inbox, wait, reply, accept, decline, complete, post, board, history, search, pending, resolve, handoff, guide, status, stop, network (with open, extend, close, rotate-token, status, connect and disconnect), and SHALL return the attention summary when run with no subcommand. Retired session commands and aliases, including `list-projects`, `close-project`, `reopen-project`, `enable-network`, `disable-network`, `connect-remote` and `disconnect-remote`, SHALL be absent.
 
 #### Scenario: Accept or decline through the CLI
 - **WHEN** the recipient runs `tala accept <id>` or `tala decline <id>`
 - **THEN** Tala returns the recorded request decision and optional note or reason
+
+#### Scenario: Complete a request with a prior answer
+- **WHEN** the addressed recipient runs `tala complete <request-id> --answered-by=<message-id>` for a valid answer
+- **THEN** Tala records completion and returns the request with its linked answer
 
 #### Scenario: Clean help
 - **WHEN** an agent runs --help

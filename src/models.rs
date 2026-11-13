@@ -253,7 +253,7 @@ pub fn help_text() -> String {
 The th_ handle is a private credential; use public agt_ IDs to address agents. Pass your handle with --agent=<handle> or TALA_AGENT. For a protected file, use register --save-handle-to=<path>, then --agent-file=<path> or TALA_AGENT_FILE.\n\
 Guide: tala guide [listening|requests|identity|worktrees|errors] (start with tala guide listening).\n\
 Background loop: run tala wait; fetch with its next.inbox/next.board commands, then restart with next.listen_again. tala init writes project instructions.\n\
-Then: tala (what needs attention); tala agents; tala send --to=<id> --request 'Review this'; tala inbox; tala accept <id>; tala reply <id> 'Done'\n\
+Then: tala (what needs attention); tala agents; tala send --to=<id> --request 'Review this'; tala inbox; tala accept <id>; tala reply <id> 'Done'; tala complete <request-id> --answered-by=<message-id>\n\
 Projects: tala project list [--stale|--closed|--all] (no registration required); owner lifecycle: tala project close / tala project reopen\n\
 Output is one JSON envelope by default; --format=text renders text for people.\n\n\
 Exit codes: 0 success, 1 operational error (nothing stored), 2 usage error, 3 wait timeout, 4 stored but wait failed (do not resend), 5 wait stopped by tala stop.\n\n\
@@ -526,6 +526,10 @@ pub enum Operation {
     Decline {
         message: u64,
         reason: Option<String>,
+    },
+    CompleteRequest {
+        message: u64,
+        answered_by: u64,
     },
     Wait {
         project: String,

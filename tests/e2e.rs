@@ -537,6 +537,44 @@ fn superseding_messages_remain_visible_without_leaving_old_requests_pending() {
 }
 
 #[test]
+fn recipient_completes_request_with_separately_sent_message() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "sender");
+    let recipient = h.register(&h.b, "recipient");
+    let request = h.send(&sender, &recipient.id, "Please inspect the change");
+    let request_id = request["message"]["id"].as_u64().unwrap();
+    let answer = h.ok(
+        &h.b,
+        Some(&recipient),
+        &["send", "--to", &sender.id, "I reviewed it; looks good"],
+    );
+    let answer_id = answer["message"]["id"].as_u64().unwrap();
+    assert_ne!(
+        request["message"]["thread_id"],
+        answer["message"]["thread_id"]
+    );
+
+    let completed = h.ok(
+        &h.b,
+        Some(&recipient),
+        &[
+            "complete",
+            &request_id.to_string(),
+            "--answered-by",
+            &answer_id.to_string(),
+        ],
+    );
+    assert_eq!(completed["message"]["answered_by"], answer_id);
+    assert_eq!(completed["answer"]["id"], answer_id);
+    assert!(
+        h.ok(&h.b, Some(&recipient), &["pending", "--direction=incoming"])["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn human_send_explains_that_an_unlistened_message_stays_queued() {
     let h = Harness::new();
     let sender = h.register(&h.a, "sender");
@@ -2701,7 +2739,7 @@ fn acceptance_deadline_alerts_without_failing_request_and_delivery_overdue_wakes
 }
 
 #[test]
-fn decline_is_visible_in_pending_and_reply_before_acceptance_completes_request() {
+fn decline_leaves_pending_but_not_actionable_and_reply_before_acceptance_completes_request() {
     let h = Harness::new();
     let sender = h.register(&h.a, "sender");
     let recipient = h.register(&h.a, "recipient");
@@ -2723,7 +2761,11 @@ fn decline_is_visible_in_pending_and_reply_before_acceptance_completes_request()
         &["decline", &declined_id, "--reason=At capacity"],
     );
     let pending = h.ok(&h.a, Some(&sender), &["pending", "--direction=outgoing"]);
-    assert_eq!(pending["messages"][0]["acceptance_state"], "declined");
+    assert!(!pending["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|message| message["id"] == declined["message"]["id"]));
     let decline_wait = h.ok(
         &h.a,
         Some(&sender),

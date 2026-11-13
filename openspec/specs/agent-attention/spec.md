@@ -91,7 +91,7 @@ The attention summary, ambient attention, `pending`, and stale-request counts SH
 - **AND** inbox and history output identify the successor message
 
 ### Requirement: Pending request states
-Pending output SHALL distinguish active requests awaiting acceptance from accepted requests awaiting reply, and SHALL identify declined requests and expired acceptance deadlines without presenting expiry as execution failure.
+Pending output SHALL distinguish active requests awaiting acceptance from accepted requests awaiting reply, and SHALL identify overdue acceptance deadlines without presenting expiry as execution failure. Declined, answered, cancelled, and superseded requests SHALL not count as actionable pending work or attention. Inactive sender requests SHALL remain open and stale according to existing rules; inactivity alone SHALL NOT expire them.
 
 #### Scenario: Pending shows commitment status
 - **WHEN** a sender lists outgoing requests
@@ -100,6 +100,15 @@ Pending output SHALL distinguish active requests awaiting acceptance from accept
 #### Scenario: Deadline is overdue but work is not failed
 - **WHEN** an acceptance deadline has expired
 - **THEN** pending shows the overdue acceptance while retaining the request as open
+
+#### Scenario: Declined request leaves actionable attention
+- **WHEN** a recipient declines a request
+- **THEN** it no longer appears in incoming or outgoing pending requests, attention request lists, or stale-request counts
+- **AND** its recorded decision remains available in history
+
+#### Scenario: Inactive sender request remains open
+- **WHEN** a sender becomes inactive while its request is unanswered
+- **THEN** the request remains open and is marked stale rather than automatically expired
 
 ### Requirement: Receiver attention hints
 When an agent has unread direct messages or an open incoming request and is not currently listening, attention output SHALL include a concise hint to start or resume `tala wait`. Inactive presence SHALL be described only as an availability observation.

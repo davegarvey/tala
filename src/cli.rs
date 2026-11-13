@@ -274,6 +274,12 @@ pub enum Commands {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Complete an incoming request with an already-sent answer
+    Complete {
+        message: u64,
+        #[arg(long, required = true, value_name = "MESSAGE_ID")]
+        answered_by: u64,
+    },
     /// Publish an informational update to a project board
     Post {
         #[arg(long)]
@@ -2149,6 +2155,19 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
         Commands::Decline { message, reason } => {
             client::call(
                 Operation::Decline { message, reason },
+                Some(client::credential(selected)?),
+            )
+            .await?
+        }
+        Commands::Complete {
+            message,
+            answered_by,
+        } => {
+            client::call(
+                Operation::CompleteRequest {
+                    message,
+                    answered_by,
+                },
                 Some(client::credential(selected)?),
             )
             .await?
