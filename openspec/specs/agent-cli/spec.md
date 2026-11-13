@@ -4,12 +4,27 @@ Defines agent cli for reliable local collaboration between distinct coding agent
 
 ## Requirements
 
+### Requirement: Registration distinguishes private credentials from public addresses
+Registration output and the identity guide SHALL clearly explain that the returned `th_` handle is a private credential and that public `agt_` IDs are used to address agents.
+
+#### Scenario: Registration explains handle privacy
+- **WHEN** an agent registers and receives a private handle
+- **THEN** the human-readable output identifies it as a private credential and explains that public `agt_` IDs are used for addressing
+
+#### Scenario: Identity guide explains handle privacy
+- **WHEN** an agent reads the identity guide
+- **THEN** it clearly distinguishes the private `th_` credential from public `agt_` addressing IDs
+
 ### Requirement: Complete clean command surface
-The system SHALL expose init, register, update-purpose, rename, unregister, whoami, agents, project (with list, close and reopen), send, inbox, wait, reply, accept, decline, post, board, history, search, pending, resolve, handoff, guide, status, stop, network (with open, extend, close, rotate-token, status, connect and disconnect), and SHALL return the attention summary when run with no subcommand. Retired session commands and aliases, including `list-projects`, `close-project`, `reopen-project`, `enable-network`, `disable-network`, `connect-remote` and `disconnect-remote`, SHALL be absent.
+The system SHALL expose init, register, update-purpose, rename, unregister, whoami, agents, project (with list, close and reopen), send, inbox, wait, reply, accept, decline, complete, post, board, history, search, pending, resolve, handoff, guide, status, stop, network (with open, extend, close, rotate-token, status, connect and disconnect), and SHALL return the attention summary when run with no subcommand. Retired session commands and aliases, including `list-projects`, `close-project`, `reopen-project`, `enable-network`, `disable-network`, `connect-remote` and `disconnect-remote`, SHALL be absent.
 
 #### Scenario: Accept or decline through the CLI
 - **WHEN** the recipient runs `tala accept <id>` or `tala decline <id>`
 - **THEN** Tala returns the recorded request decision and optional note or reason
+
+#### Scenario: Complete a request with a prior answer
+- **WHEN** the addressed recipient runs `tala complete <request-id> --answered-by=<message-id>` for a valid answer
+- **THEN** Tala records completion and returns the request with its linked answer
 
 #### Scenario: Clean help
 - **WHEN** an agent runs --help
@@ -193,11 +208,11 @@ The `project list` command SHALL allow read-only project discovery without a sel
 - **THEN** Tala returns the same project listing and the agent's response includes its normal ambient attention summary
 
 ### Requirement: Unified background wait
-The CLI SHALL expose `tala wait` to monitor unread inbox messages, new messages on the selected project's board, and durable lifecycle or delivery events. Its timeout SHALL default to indefinite; finite `--timeout` SHALL remain available. Inbox and board reads SHALL not acknowledge messages. A new wait without `--board-after` SHALL use the project's atomic latest-message ID as its baseline. A wait SHALL bind to its lifecycle generation and SHALL exit 5 with `DAEMON_STOPPED` if an accepted stop advances that generation. The client SHALL block on a daemon-held wait request rather than periodically polling.
+The CLI SHALL expose `tala wait` to monitor unread inbox messages, new messages on the selected project's board, and durable lifecycle or delivery events. Its timeout SHALL default to indefinite; finite `--timeout` SHALL remain available. Inbox and board reads SHALL not acknowledge messages. A new wait without `--board-after` SHALL use the project's atomic latest-message ID as its baseline. A wait SHALL bind to its lifecycle generation and SHALL exit 5 with `DAEMON_STOPPED` if an accepted stop advances that generation. The client SHALL block on a daemon-held wait request rather than periodically polling. `--only=inbox` SHALL return only inbox notifications while leaving unrelated inbox messages available and preserving independent source cursors, including the caller's event cursor.
 
 #### Scenario: Long-running wait wakes on a durable event
 - **WHEN** a sender has an indefinite wait open and the daemon records acceptance, decline, deadline, or delivery-overdue
-- **THEN** the same wait returns promptly with that event
+- **THEN** the same unfiltered wait returns promptly with that event
 
 #### Scenario: Wait recovers notifications after disconnect
 - **WHEN** the client reconnects or restarts from its event cursor
@@ -221,8 +236,16 @@ The CLI SHALL expose `tala wait` to monitor unread inbox messages, new messages 
 - **WHEN** an accepted stop advances the waiter's captured lifecycle generation
 - **THEN** the wait exits 5 with `DAEMON_STOPPED` without recovering the daemon
 
+#### Scenario: Indefinite wait has no client deadline
+- **WHEN** an agent runs `tala wait` without `--timeout` or with `--timeout=0`
+- **THEN** the client remains blocked until an event or daemon stop
+
+#### Scenario: Inbox-only wait ignores other wakeups without consuming them
+- **WHEN** an agent runs `tala wait --only=inbox` and only a board or durable event occurs
+- **THEN** the wait remains open, later inbox messages are returned, and ignored durable events remain available from the original event cursor
+
 ### Requirement: Wait cursors and recovery
-The command SHALL accept separate inbox, board and durable event cursors, return event IDs and types without message bodies, and provide exact fetch and restart commands. It SHALL report whether any source has another page. Each cursor SHALL advance only to the last event included in its returned page. Replaying an older cursor MAY repeat events but SHALL NOT hide or acknowledge them.
+The command SHALL accept separate inbox, board and durable event cursors, return event IDs and types without message bodies, and provide exact fetch and restart commands. It SHALL report whether any source has another page. Each cursor SHALL advance only to the last event included in its returned page. Replaying an older cursor MAY repeat events but SHALL NOT hide or acknowledge them. The result SHALL expose `next_event_after` and use that advanced cursor in the continuation command.
 
 #### Scenario: Event cursor paginates without skipping
 - **WHEN** more durable events exist than fit in one wait response
@@ -249,7 +272,6 @@ The command SHALL accept separate inbox, board and durable event cursors, return
 #### Scenario: Finite wait timeout
 - **WHEN** `tala wait --timeout=N` receives no new event before its deadline
 - **THEN** it exits 3 with no events and exact continuation commands using the unchanged cursors
-
 
 ### Requirement: Rename command
 The CLI SHALL expose `tala rename --name=<new-name>` to rename the selected identity. It SHALL use the selected private handle, return the updated public agent record with the previous name and a `changed` flag, and SHALL provide a human-readable confirmation under `--format=text`. The command SHALL reject a blank name. It SHALL not issue or change a private handle.

@@ -4,6 +4,21 @@ Defines agent messaging for reliable local collaboration between distinct coding
 
 ## Requirements
 
+### Requirement: Private handles are excluded from message text
+The system SHALL reject message text containing a token in the generated private-handle format before storing or delivering it, without including the token in the error, and SHALL direct the sender to use a public agent ID for addressing.
+
+#### Scenario: Private handle in direct message
+- **WHEN** an agent sends a direct message or reply whose text contains a private handle
+- **THEN** Tala rejects the operation before persistence and returns an error that does not echo the handle and explains that `agt_` IDs are public addresses
+
+#### Scenario: Private handle in board post
+- **WHEN** an agent posts or replies to the board with text containing a private handle
+- **THEN** Tala rejects the operation before persistence and delivery with the same non-disclosing guidance
+
+#### Scenario: Public ID and ordinary text remain valid
+- **WHEN** message text contains a public `agt_` ID or ordinary text without a private handle
+- **THEN** Tala processes the message normally
+
 ### Requirement: Addressed durable messages
 The system SHALL require a known recipient for direct sends, attach sender context, return a globally unique message ID and thread ID, and distinguish stored, received, answered and cancelled states. Unknown recipients SHALL fail before storage. Outgoing messages SHALL identify the canonical working directory and Git worktree, branch and revision from which the command was issued when available. Changing directories SHALL NOT change the selected identity or project-board membership.
 
@@ -22,7 +37,7 @@ The system SHALL require a known recipient for direct sends, attach sender conte
 - **THEN** the message retains the registered project context and records no worktree, branch or revision
 
 ### Requirement: Replies and obligations
-The system SHALL route reply automatically to the original sender within its thread and permit replies only by the addressed recipient. Requests SHALL remain pending after receipt until explicitly replied to, cancelled by their sender, or superseded by a later direct message from that sender to the same recipient in the same thread. A follow-up request SHALL not settle another request. A recipient SHALL NOT reply to a superseded request; the error SHALL identify the superseding message. An explicit acceptance SHALL record a commitment separately from reply, and reply SHALL complete the request whether or not it was accepted.
+The system SHALL route reply automatically to the original sender within its thread and permit replies only by the addressed recipient. Requests SHALL remain pending after receipt until explicitly replied to, completed by their recipient with a linked answer, cancelled by their sender, or superseded by a later direct message from that sender to the same recipient in the same thread. A follow-up request SHALL not settle another request. A recipient SHALL NOT reply to a superseded request; the error SHALL identify the superseding message. An explicit acceptance SHALL record a commitment separately from reply, and reply SHALL complete the request whether or not it was accepted. A recipient MAY complete an active request by linking a newer ordinary direct message sent to the request sender; the answer may be in another thread.
 
 #### Scenario: Delivery does not imply acceptance
 - **WHEN** a recipient fetches a request without accepting it
@@ -31,6 +46,19 @@ The system SHALL route reply automatically to the original sender within its thr
 #### Scenario: Reply completes an unaccepted request
 - **WHEN** the addressed recipient replies before accepting
 - **THEN** the request is answered and no acceptance deadline alert is emitted afterward
+
+#### Scenario: Recipient links a separately sent answer
+- **WHEN** the addressed recipient completes an active request with a newer ordinary direct message addressed to the request sender
+- **THEN** the request records that message as its answer and is no longer pending
+- **AND** the answer remains in its original thread and completion is visible in durable history
+
+#### Scenario: Invalid linked answer is rejected
+- **WHEN** the linked message is not an ordinary direct message from the addressed recipient to the request sender, or its ID is not newer than the request
+- **THEN** completion fails without changing either message
+
+#### Scenario: One answer completes multiple requests
+- **WHEN** the recipient links one valid answer to multiple requests from the same sender
+- **THEN** each request is completed and retains the shared answer reference
 
 #### Scenario: Accepted request is superseded
 - **WHEN** a sender supersedes a request after the recipient accepted it

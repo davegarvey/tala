@@ -189,6 +189,36 @@ fn invalid(message: impl Into<String>) -> Failure {
         "Check tala --help and use explicit agent/message IDs.",
     )
 }
+/// Matches the complete shape accepted as a Tala private handle, without
+/// treating a longer identifier containing that shape as a credential.
+fn contains_private_handle(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.windows(35).enumerate().any(|(start, candidate)| {
+        if &candidate[..3] != b"th_" || !candidate[3..].iter().all(u8::is_ascii_hexdigit) {
+            return false;
+        }
+        let is_token_char = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        (start == 0 || !is_token_char(bytes[start - 1]))
+            && (start + 35 == bytes.len() || !is_token_char(bytes[start + 35]))
+    })
+}
+fn value_contains_private_handle(value: &Value) -> bool {
+    match value {
+        Value::String(text) => contains_private_handle(text),
+        Value::Array(values) => values.iter().any(value_contains_private_handle),
+        Value::Object(values) => values.iter().any(|(key, value)| {
+            contains_private_handle(key) || value_contains_private_handle(value)
+        }),
+        _ => false,
+    }
+}
+fn parts_contain_private_handle(parts: &[Part]) -> bool {
+    parts.iter().any(|part| match part {
+        Part::Text { text } => contains_private_handle(text),
+        Part::Data { value } => value_contains_private_handle(value),
+        Part::File { .. } => false,
+    })
+}
 fn is_bidi_formatting_control(c: char) -> bool {
     matches!(
         c as u32,
@@ -502,6 +532,7 @@ COMMIT;")?;
                 | Operation::Send { .. }
                 | Operation::Inbox { peek: false, .. }
                 | Operation::Resolve { .. }
+                | Operation::CompleteRequest { .. }
                 | Operation::CloseProject
                 | Operation::ReopenProject
                 | Operation::Unregister
@@ -515,7 +546,36 @@ COMMIT;")?;
                 [&rpc.request_id],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             ) {
-                Ok((old, response)) if old == canonical => return Ok((decode(&response)?, None)),
+                Ok((old, response)) if old == canonical => {
+                    let result = decode(&response)?;
+                    let attention = if matches!(rpc.operation, Operation::CompleteRequest { .. }) {
+                        let credential = rpc.credential.as_ref().ok_or_else(|| {
+                            Failure::new(
+                                "IDENTITY_REQUIRED",
+                                "Select your agent identity",
+                                "Run tala register, then pass its private handle with --agent or TALA_AGENT.",
+                            )
+                        })?;
+                        let token = tx
+                            .query_row(
+                                "SELECT token FROM agents WHERE id=?",
+                                [&credential.agent],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .optional()?;
+                        if token.as_deref() != Some(credential.token.as_str()) {
+                            return Err(Failure::new(
+                                "IDENTITY_ERROR",
+                                "Agent credential is unknown or invalid",
+                                "Register an agent and pass its private handle with --agent or TALA_AGENT.",
+                            ));
+                        }
+                        ambient(&tx, &credential.agent)?
+                    } else {
+                        None
+                    };
+                    return Ok((result, attention));
+                }
                 Ok(_) => return Err(invalid("Request ID reused for another operation")),
                 Err(rusqlite::Error::QueryReturnedNoRows) => {}
                 Err(e) => return Err(e.into()),
@@ -844,11 +904,7 @@ COMMIT;")?;
                 };
                 let cutoff = cutoff(STALE_AFTER);
                 let open = format!("{OPEN} AND {side}");
-                let list_condition = if direction == "incoming" {
-                    open.clone()
-                } else {
-                    format!("(({OPEN}) OR (messages.expects_reply=1 AND messages.acceptance_state='declined' AND messages.sender=?1)) AND {side}")
-                };
+                let list_condition = format!("{OPEN} AND {side}");
                 let selected = if *stale {
                     format!("{list_condition} AND {STALE}")
                 } else {
@@ -876,12 +932,16 @@ COMMIT;")?;
                 message: id,
                 reason,
             } => request_decision(&tx, require()?, *id, false, reason.as_deref())?,
+            Operation::CompleteRequest {
+                message: id,
+                answered_by,
+            } => complete_request(&tx, require()?, *id, *answered_by)?,
             Operation::Wait {
                 project,
                 inbox_after,
                 board_after,
                 event_after,
-                timeout: _,
+                ..
             } => {
                 let id = require()?;
                 tx.execute(
@@ -948,7 +1008,7 @@ pub const STALE_AFTER: u64 = 24 * 60 * 60;
 const AUTO_KEY_WINDOW: i64 = 10 * 60;
 /// Unread for agent ?1: direct messages and board replies delivered to it.
 const UNREAD: &str = "(messages.recipient=?1 AND messages.received_at IS NULL) OR messages.id IN (SELECT message FROM board_deliveries WHERE agent=?1 AND received_at IS NULL)";
-const OPEN: &str = "messages.expects_reply=1 AND messages.answered_by IS NULL AND messages.cancelled=0 AND NOT EXISTS(SELECT 1 FROM messages superseder WHERE superseder.supersedes=messages.id)";
+const OPEN: &str = "messages.expects_reply=1 AND messages.answered_by IS NULL AND messages.cancelled=0 AND messages.acceptance_state!='declined' AND NOT EXISTS(SELECT 1 FROM messages superseder WHERE superseder.supersedes=messages.id)";
 /// Stale for agent ?1 with cutoff ?2: too old, or the counterpart unregistered.
 const STALE: &str = "(messages.created_at < ?2 OR EXISTS(SELECT 1 FROM agents x WHERE x.id = CASE WHEN messages.recipient=?1 THEN messages.sender ELSE messages.recipient END AND x.active=0))";
 fn cutoff(stale_after: u64) -> i64 {
@@ -1576,7 +1636,22 @@ fn recipient_presence(tx: &Transaction<'_>, message_id: u64) -> Result<Option<Va
             listening
         }
     };
-    Ok(Some(json!({"listening": listening})))
+    let active: bool = tx.query_row(
+        "SELECT active FROM agents WHERE id=?",
+        [&recipient],
+        |row| row.get(0),
+    )?;
+    let currently_listening = recipient_is_listening(tx, &recipient)?;
+    let state = if !active {
+        "inactive"
+    } else if currently_listening {
+        "listening"
+    } else {
+        "not_listening"
+    };
+    Ok(Some(
+        json!({"listening": listening, "current_state": state}),
+    ))
 }
 fn send_result(tx: &Transaction<'_>, message_id: u64, duplicate: bool) -> Result<Value> {
     let mut result = json!({
@@ -1778,23 +1853,26 @@ fn process_due_events(tx: &Transaction<'_>, _agent: &str) -> Result<()> {
             record_event(tx, &sender, "acceptance_deadline_expired", id, None)?;
         }
     }
-    let mut due = tx.prepare("SELECT id,sender,recipient FROM messages WHERE recipient IS NOT NULL AND received_at IS NULL AND delivery_overdue_after IS NOT NULL AND created_at+delivery_overdue_after<=? AND delivery_overdue_at IS NULL")?;
+    let mut due = tx.prepare("SELECT m.id,m.sender,m.recipient,a.active FROM messages m JOIN agents a ON a.id=m.recipient WHERE m.recipient IS NOT NULL AND m.received_at IS NULL AND m.delivery_overdue_after IS NOT NULL AND m.created_at+m.delivery_overdue_after<=? AND m.delivery_overdue_at IS NULL")?;
     let rows = due
         .query_map([at], |r| {
             Ok((
                 r.get::<_, u64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, bool>(3)?,
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     drop(due);
-    for (id, sender, _recipient) in rows {
+    for (id, sender, _recipient, active) in rows {
         tx.execute(
             "UPDATE messages SET delivery_overdue_at=? WHERE id=? AND delivery_overdue_at IS NULL",
             params![at, id],
         )?;
-        record_event(tx, &sender, "delivery_overdue", id, None)?;
+        if active {
+            record_event(tx, &sender, "delivery_overdue", id, None)?;
+        }
     }
     Ok(())
 }
@@ -1891,6 +1969,59 @@ fn request_decision(
     }
     Ok(json!({"message":message(tx,id)?,"changed":true}))
 }
+
+fn complete_request(tx: &Transaction<'_>, actor: &str, id: u64, answer_id: u64) -> Result<Value> {
+    let request = message(tx, id)?;
+    if request.recipient.as_deref() != Some(actor) {
+        return Err(Failure::new(
+            "NOT_RECIPIENT",
+            "Only the addressed recipient can complete a request",
+            "Select the recipient identity that received the request.",
+        ));
+    }
+    if !request.expects_reply || request.cancelled || request.superseded_by.is_some() {
+        return Err(invalid("This request is no longer active"));
+    }
+    if let Some(existing) = request.answered_by {
+        if existing == answer_id {
+            return Ok(
+                json!({"message": request, "answer": message(tx, answer_id)?, "changed": false}),
+            );
+        }
+        return Err(invalid("Request is already answered by another message"));
+    }
+    if request.acceptance_state == "declined" {
+        return Err(invalid("A declined request cannot be completed"));
+    }
+    let answer = message(tx, answer_id)?;
+    if answer.sender != actor
+        || answer.recipient.as_deref() != Some(request.sender.as_str())
+        || answer.expects_reply
+        || !matches!(answer.kind.as_str(), "message" | "reply")
+        || answer.project.is_some()
+        || answer_id <= id
+    {
+        return Err(invalid(
+            "Answer must be a newer ordinary direct message from you to the request sender",
+        ));
+    }
+    let updated = tx.execute(
+        "UPDATE messages SET answered_by=? WHERE id=? AND expects_reply=1 AND answered_by IS NULL AND cancelled=0",
+        params![answer_id, id],
+    )?;
+    if updated != 1 {
+        return Err(invalid("Request is no longer active"));
+    }
+    tx.execute("DELETE FROM thread_open_requests WHERE message=?", [id])?;
+    record_event(
+        tx,
+        &request.sender,
+        "request_completed",
+        id,
+        Some(&answer_id.to_string()),
+    )?;
+    Ok(json!({"message": message(tx, id)?, "answer": answer, "changed": true}))
+}
 fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Value> {
     let Operation::Send {
         to,
@@ -1911,6 +2042,13 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
     };
     if parts.is_empty() || parts.iter().any(|p| !p.valid()) || key.trim().is_empty() {
         return Err(invalid("Nonempty parts and idempotency key are required"));
+    }
+    if parts_contain_private_handle(parts) {
+        return Err(Failure::new(
+            "PRIVATE_HANDLE_IN_MESSAGE",
+            "Message text contains a private Tala credential",
+            "Remove the credential. Use public agt_ agent IDs to address agents; keep th_ handles private.",
+        ));
     }
     if !["message", "reply", "post", "handoff"].contains(&kind.as_str()) {
         return Err(invalid("Unknown message kind"));
@@ -2236,6 +2374,23 @@ fn explicit_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn private_handle_match_requires_complete_bounded_generated_shape() {
+        let handle = format!("th_{}", "a".repeat(32));
+        assert!(contains_private_handle(&handle));
+        assert!(contains_private_handle(&format!("Please remove {handle}.")));
+        assert!(!contains_private_handle(&format!("x{handle}")));
+        assert!(!contains_private_handle(&format!("{handle}9")));
+        assert!(!contains_private_handle(
+            "th_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(!contains_private_handle(
+            "agt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(value_contains_private_handle(&serde_json::json!({
+            "nested": ["safe", {"body": handle}]
+        })));
+    }
     fn rpc(operation: Operation, c: Option<Credential>) -> Rpc {
         Rpc {
             protocol_version: PROTOCOL_VERSION,
@@ -2587,6 +2742,206 @@ mod tests {
             accept_within: None,
             delivery_overdue_after: None,
         }
+    }
+    #[test]
+    fn recipient_can_link_a_valid_separate_answer_and_declined_requests_leave_attention() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let sender = register(&mut store, "sender");
+        let recipient = register(&mut store, "recipient");
+        let other = register(&mut store, "other");
+        let mut older_op = send(&sender.agent, "older-answer");
+        if let Operation::Send { request, .. } = &mut older_op {
+            *request = false;
+        }
+        let older = store
+            .execute(&rpc(older_op, Some(recipient.clone())))
+            .unwrap();
+        let older_id = older["message"]["id"].as_u64().unwrap();
+        let request = store
+            .execute(&rpc(
+                send(&recipient.agent, "request"),
+                Some(sender.clone()),
+            ))
+            .unwrap();
+        let request_id = request["message"]["id"].as_u64().unwrap();
+
+        let mut answer_op = send(&sender.agent, "answer");
+        if let Operation::Send { request, .. } = &mut answer_op {
+            *request = false;
+        }
+        let answer = store
+            .execute(&rpc(answer_op, Some(recipient.clone())))
+            .unwrap();
+        let answer_id = answer["message"]["id"].as_u64().unwrap();
+
+        let mut wrong_direction = send(&other.agent, "wrong-direction");
+        if let Operation::Send { request, .. } = &mut wrong_direction {
+            *request = false;
+        }
+        let wrong_direction_id = store
+            .execute(&rpc(wrong_direction, Some(recipient.clone())))
+            .unwrap()["message"]["id"]
+            .as_u64()
+            .unwrap();
+        let mut request_as_answer = send(&sender.agent, "request-as-answer");
+        if let Operation::Send { kind, .. } = &mut request_as_answer {
+            *kind = "message".into();
+        }
+        let request_answer_id = store
+            .execute(&rpc(request_as_answer, Some(recipient.clone())))
+            .unwrap()["message"]["id"]
+            .as_u64()
+            .unwrap();
+        for invalid_answer in [older_id, wrong_direction_id, request_answer_id] {
+            let error = store
+                .execute(&rpc(
+                    Operation::CompleteRequest {
+                        message: request_id,
+                        answered_by: invalid_answer,
+                    },
+                    Some(recipient.clone()),
+                ))
+                .unwrap_err();
+            assert_eq!(error.code, "INVALID_OPERATION");
+        }
+
+        let unauthorized = store
+            .execute(&rpc(
+                Operation::CompleteRequest {
+                    message: request_id,
+                    answered_by: answer_id,
+                },
+                Some(sender.clone()),
+            ))
+            .unwrap_err();
+        assert_eq!(unauthorized.code, "NOT_RECIPIENT");
+
+        let completion_rpc = rpc(
+            Operation::CompleteRequest {
+                message: request_id,
+                answered_by: answer_id,
+            },
+            Some(recipient.clone()),
+        );
+        let (completed, _) = store.execute_with_attention(&completion_rpc).unwrap();
+        assert_eq!(completed["message"]["answered_by"], answer_id);
+        assert_ne!(
+            completed["answer"]["thread_id"],
+            request["message"]["thread_id"]
+        );
+        assert_eq!(completed["changed"], true);
+        let sibling_request = store
+            .execute(&rpc(
+                send(&recipient.agent, "sibling-request"),
+                Some(sender.clone()),
+            ))
+            .unwrap();
+        let (cached, cached_attention) = store.execute_with_attention(&completion_rpc).unwrap();
+        assert_eq!(cached["message"]["answered_by"], answer_id);
+        assert_eq!(
+            cached_attention.unwrap()["requests"][0]["id"],
+            sibling_request["message"]["id"]
+        );
+        let sibling_id = sibling_request["message"]["id"].as_u64().unwrap();
+        store
+            .execute(&rpc(
+                Operation::Decline {
+                    message: sibling_id,
+                    reason: None,
+                },
+                Some(recipient.clone()),
+            ))
+            .unwrap();
+        let repeated = store
+            .execute(&rpc(
+                Operation::CompleteRequest {
+                    message: request_id,
+                    answered_by: answer_id,
+                },
+                Some(recipient.clone()),
+            ))
+            .unwrap();
+        assert_eq!(repeated["changed"], false);
+        assert_eq!(repeated["message"]["answered_by"], answer_id);
+        let mut second_answer = send(&sender.agent, "second-answer");
+        if let Operation::Send { request, .. } = &mut second_answer {
+            *request = false;
+        }
+        let second_answer_id = store
+            .execute(&rpc(second_answer, Some(recipient.clone())))
+            .unwrap()["message"]["id"]
+            .as_u64()
+            .unwrap();
+        let changed_answer = store
+            .execute(&rpc(
+                Operation::CompleteRequest {
+                    message: request_id,
+                    answered_by: second_answer_id,
+                },
+                Some(recipient.clone()),
+            ))
+            .unwrap_err();
+        assert_eq!(changed_answer.code, "INVALID_OPERATION");
+        let pending_after_completion = store
+            .execute(&rpc(pending(false), Some(recipient.clone())))
+            .unwrap();
+        assert!(!pending_after_completion["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == request_id));
+
+        let declined = store
+            .execute(&rpc(
+                send(&recipient.agent, "declined"),
+                Some(sender.clone()),
+            ))
+            .unwrap();
+        let declined_id = declined["message"]["id"].as_u64().unwrap();
+        store
+            .execute(&rpc(
+                Operation::Decline {
+                    message: declined_id,
+                    reason: Some("not now".into()),
+                },
+                Some(recipient.clone()),
+            ))
+            .unwrap();
+        let all = store
+            .execute(&rpc(
+                Operation::Pending {
+                    direction: "all".into(),
+                    stale: false,
+                    after: 0,
+                    limit: 50,
+                },
+                Some(sender.clone()),
+            ))
+            .unwrap();
+        assert!(!all["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["id"] == declined_id));
+        let attention = store
+            .execute(&rpc(Operation::Attention, Some(sender.clone())))
+            .unwrap();
+        assert_eq!(attention["outgoing_requests"].as_array().unwrap().len(), 0);
+        let recipient_attention = store
+            .execute(&rpc(Operation::Attention, Some(recipient.clone())))
+            .unwrap();
+        assert_eq!(
+            recipient_attention["incoming_requests"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        let ambient = store
+            .execute(&rpc(Operation::Whoami, Some(recipient)))
+            .unwrap();
+        assert!(ambient["attention"].is_null());
     }
     fn age(store: &Store, id: u64, seconds: i64) {
         store
@@ -3416,6 +3771,54 @@ mod tests {
             *parts = vec![Part::Text { text: text.into() }];
         }
         op
+    }
+    #[test]
+    fn private_handles_are_rejected_for_direct_posts_and_replies_without_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let a = register(&mut store, "a");
+        let b = register(&mut store, "b");
+        let private = format!("th_{}", "b".repeat(32));
+        for mut operation in [send(&b.agent, "private-send"), post("placeholder")] {
+            if let Operation::Send { parts, .. } = &mut operation {
+                *parts = vec![Part::Text {
+                    text: format!("oops {private}"),
+                }];
+            }
+            let error = store.execute(&rpc(operation, Some(a.clone()))).unwrap_err();
+            assert_eq!(error.code, "PRIVATE_HANDLE_IN_MESSAGE");
+            assert!(!error.message.contains(&private));
+            assert!(error.hint.contains("agt_"));
+        }
+        let mut structured = send(&b.agent, "private-data");
+        if let Operation::Send { parts, .. } = &mut structured {
+            *parts = vec![Part::Data {
+                value: serde_json::json!({"nested": [{"body": private}]}),
+            }];
+        }
+        let error = store
+            .execute(&rpc(structured, Some(a.clone())))
+            .unwrap_err();
+        assert_eq!(error.code, "PRIVATE_HANDLE_IN_MESSAGE");
+        assert!(!error.to_string().contains(&private));
+        let sent = store
+            .execute(&rpc(send(&b.agent, "ordinary"), Some(a.clone())))
+            .unwrap();
+        let parent = sent["message"]["id"].as_u64().unwrap();
+        let error = store
+            .execute(&rpc(reply(parent, &private), Some(b.clone())))
+            .unwrap_err();
+        assert_eq!(error.code, "PRIVATE_HANDLE_IN_MESSAGE");
+        assert!(!error.to_string().contains(&private));
+        let count: u64 = store
+            .db
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "only the ordinary direct message should persist");
+        let public = store
+            .execute(&rpc(send(&b.agent, &a.agent), Some(a)))
+            .unwrap();
+        assert!(public["message"]["id"].as_u64().is_some());
     }
     fn reply(parent: u64, text: &str) -> Operation {
         let mut op = send("unused", &format!("reply-{parent}-{text}"));

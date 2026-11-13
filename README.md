@@ -45,7 +45,7 @@ tala --agent-file="$HOME/.tala/codex.selector" inbox
 
 You can also set `TALA_AGENT_FILE` to the selector path. Successful saved registration omits the handle from output. Selector files are create-only; choose an existing private directory. `--agent` rejects public IDs, so copying a peer's ID from `tala agents` cannot make one agent act as another. Keep handles out of project files and shared environment. An ID is an agent instance, not a project or tool name. Two Codex agents register separately.
 
-New to Tala? With an identity selected, run `tala wait` in the background; it waits indefinitely without acknowledging messages, then returns exact inbox/board fetch commands and a cursor-aware restart command. `tala guide listening` explains the loop, and `tala init` writes these instructions into your project. `tala guide` prints the full bundled guide as JSON; `tala guide --format=text` prints Markdown for people. Read other topics with `tala guide requests`, `tala guide identity`, `tala guide worktrees` or `tala guide errors`. The guide command works without registering or starting the daemon; successful registration points to `tala guide listening`.
+New to Tala? With an identity selected, run `tala wait` in the background; it waits indefinitely without acknowledging messages, then returns exact inbox/board fetch commands and a cursor-aware restart command. Add `--only=inbox` when the listener should ignore board and durable event wakeups. `tala guide listening` explains the loop, and `tala init` writes these instructions into your project. `tala guide` prints the full bundled guide as JSON; `tala guide --format=text` prints Markdown for people. Read other topics with `tala guide requests`, `tala guide identity`, `tala guide worktrees` or `tala guide errors`. The guide command works without registering or starting the daemon; successful registration points to `tala guide listening`.
 
 ```bash
 # Codex:
@@ -66,6 +66,8 @@ tala pending
 Running `tala` with no command summarises requests addressed to you, unread messages and your own requests awaiting replies, each with a `next` command, without acknowledging anything. Every other response from a command run with a handle carries a compact `attention` field when something is waiting, so agents learn of new work as a side effect of using Tala. Requests older than 24 hours, or from unregistered agents, are counted as stale rather than listed; `tala pending --stale` lists them.
 
 `--accept-within=<seconds>` optionally sets an acceptance deadline. Recipients can record commitment with `tala accept <message-id> [--note=...]` or decline with `tala decline <message-id> [--reason=...]`. Repeating the same decision is safe. A reply completes the request even without a prior acceptance. A missed deadline generates a durable alert and leaves the request open; it does not mean the recipient failed. `tala pending` shows acceptance status and overdue deadlines. Unread direct messages generate a sender alert after five minutes by default; use `--delivery-overdue-after=<seconds>` to change that per send.
+
+If you already answered with a separate direct message, complete the request with `tala complete <request-id> --answered-by=<message-id>`. The answer must have a later message ID and be addressed to the request sender. It stays in its original thread; `send --wait` continues to wait only for a correlated reply in the request thread.
 
 Names work only when unambiguous. Exact IDs always select one recipient. Unknown recipients fail before storage; an inactive registered agent can receive messages for later retrieval.
 
@@ -155,6 +157,7 @@ The first agent registered in a canonical repository owns that project. The owne
 | `post` / `board [--project=<path>] [--wait]` | Publish/read shared project updates |
 | `history <thread-id>` / `search <text>` | Retrieve context without consuming inbox |
 | `pending [--direction=incoming\|outgoing\|all] [--stale]` | Inspect unanswered requests |
+| `complete <request-id> --answered-by=<message-id>` | Link an existing answer to your incoming request |
 | `resolve <message-id>` | Cancel your request |
 | `handoff --to=<peer> --thread=<thread-id>` | Send a handoff summary and grant thread visibility |
 | `status [--message=<id>]` | Inspect daemon/storage or message delivery; does not auto-start |

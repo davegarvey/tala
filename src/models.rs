@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Every error code with its retry class, meaning and default next command.
 /// Retry classes: `safe` (repeat as is), `same_key` (repeat with the same
@@ -147,6 +147,12 @@ pub const ERRORS: &[(&str, Retry, &str, Option<&str>)] = &[
         Some("tala --help"),
     ),
     (
+        "PRIVATE_HANDLE_IN_MESSAGE",
+        Retry::AfterFix,
+        "Message text contains a private Tala credential",
+        Some("tala guide identity"),
+    ),
+    (
         "NOT_PROJECT_OWNER",
         Retry::Never,
         "Only the owning agent can change project lifecycle",
@@ -244,10 +250,10 @@ fn lookup(code: &str) -> Option<&'static ErrorEntry> {
 pub fn help_text() -> String {
     let mut text = String::from(
         "Start: tala register --name=codex --tool=codex\n\
-Pass the returned private handle with --agent=<handle> or TALA_AGENT. For a protected file, use register --save-handle-to=<path>, then --agent-file=<path> or TALA_AGENT_FILE.\n\
+The th_ handle is a private credential; use public agt_ IDs to address agents. Pass your handle with --agent=<handle> or TALA_AGENT. For a protected file, use register --save-handle-to=<path>, then --agent-file=<path> or TALA_AGENT_FILE.\n\
 Guide: tala guide [listening|requests|identity|worktrees|errors] (start with tala guide listening).\n\
 Background loop: run tala wait; fetch with its next.inbox/next.board commands, then restart with next.listen_again. tala init writes project instructions.\n\
-Then: tala (what needs attention); tala agents; tala send --to=<id> --request 'Review this'; tala inbox; tala accept <id>; tala reply <id> 'Done'\n\
+Then: tala (what needs attention); tala agents; tala send --to=<id> --request 'Review this'; tala inbox; tala accept <id>; tala reply <id> 'Done'; tala complete <request-id> --answered-by=<message-id>\n\
 Projects: tala project list [--stale|--closed|--all] (no registration required); owner lifecycle: tala project close / tala project reopen\n\
 Output is one JSON envelope by default; --format=text renders text for people.\n\n\
 Exit codes: 0 success, 1 operational error (nothing stored), 2 usage error, 3 wait timeout, 4 stored but wait failed (do not resend), 5 wait stopped by tala stop.\n\n\
@@ -521,12 +527,18 @@ pub enum Operation {
         message: u64,
         reason: Option<String>,
     },
+    CompleteRequest {
+        message: u64,
+        answered_by: u64,
+    },
     Wait {
         project: String,
         inbox_after: u64,
         board_after: Option<u64>,
         event_after: u64,
         timeout: u64,
+        #[serde(default)]
+        only_inbox: bool,
     },
     Attention,
     Resolve {
