@@ -941,7 +941,7 @@ COMMIT;")?;
                 inbox_after,
                 board_after,
                 event_after,
-                timeout: _,
+                ..
             } => {
                 let id = require()?;
                 tx.execute(
@@ -1636,7 +1636,22 @@ fn recipient_presence(tx: &Transaction<'_>, message_id: u64) -> Result<Option<Va
             listening
         }
     };
-    Ok(Some(json!({"listening": listening})))
+    let active: bool = tx.query_row(
+        "SELECT active FROM agents WHERE id=?",
+        [&recipient],
+        |row| row.get(0),
+    )?;
+    let currently_listening = recipient_is_listening(tx, &recipient)?;
+    let state = if !active {
+        "inactive"
+    } else if currently_listening {
+        "listening"
+    } else {
+        "not_listening"
+    };
+    Ok(Some(
+        json!({"listening": listening, "current_state": state}),
+    ))
 }
 fn send_result(tx: &Transaction<'_>, message_id: u64, duplicate: bool) -> Result<Value> {
     let mut result = json!({
@@ -1838,23 +1853,26 @@ fn process_due_events(tx: &Transaction<'_>, _agent: &str) -> Result<()> {
             record_event(tx, &sender, "acceptance_deadline_expired", id, None)?;
         }
     }
-    let mut due = tx.prepare("SELECT id,sender,recipient FROM messages WHERE recipient IS NOT NULL AND received_at IS NULL AND delivery_overdue_after IS NOT NULL AND created_at+delivery_overdue_after<=? AND delivery_overdue_at IS NULL")?;
+    let mut due = tx.prepare("SELECT m.id,m.sender,m.recipient,a.active FROM messages m JOIN agents a ON a.id=m.recipient WHERE m.recipient IS NOT NULL AND m.received_at IS NULL AND m.delivery_overdue_after IS NOT NULL AND m.created_at+m.delivery_overdue_after<=? AND m.delivery_overdue_at IS NULL")?;
     let rows = due
         .query_map([at], |r| {
             Ok((
                 r.get::<_, u64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, bool>(3)?,
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     drop(due);
-    for (id, sender, _recipient) in rows {
+    for (id, sender, _recipient, active) in rows {
         tx.execute(
             "UPDATE messages SET delivery_overdue_at=? WHERE id=? AND delivery_overdue_at IS NULL",
             params![at, id],
         )?;
-        record_event(tx, &sender, "delivery_overdue", id, None)?;
+        if active {
+            record_event(tx, &sender, "delivery_overdue", id, None)?;
+        }
     }
     Ok(())
 }

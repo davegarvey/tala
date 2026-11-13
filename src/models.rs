@@ -537,6 +537,8 @@ pub enum Operation {
         board_after: Option<u64>,
         event_after: u64,
         timeout: u64,
+        #[serde(default)]
+        only_inbox: bool,
     },
     Attention,
     Resolve {

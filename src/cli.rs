@@ -250,6 +250,8 @@ pub enum Commands {
             help = "Resume durable notifications after this event ID"
         )]
         event_after: u64,
+        #[arg(long, value_parser = ["inbox"], help = "Wake only for inbox messages")]
+        only: Option<String>,
     },
     /// Reply to a message ID; Tala supplies recipient and thread
     Reply {
@@ -924,9 +926,13 @@ fn wait_command(
     event_after: u64,
     timeout: u64,
     project: &str,
+    only_inbox: bool,
 ) -> String {
     let mut command = format!("tala wait --inbox-after={inbox_after} --timeout={timeout}");
     command.push_str(&format!(" --event-after={event_after}"));
+    if only_inbox {
+        command.push_str(" --only=inbox");
+    }
     if let Some(board_after) = board_after {
         command.push_str(&format!(" --board-after={board_after}"));
     }
@@ -950,6 +956,7 @@ struct WaitResultMeta {
     project: String,
     timeout: u64,
     timed_out: bool,
+    only_inbox: bool,
 }
 
 struct WaitLifecycle {
@@ -997,6 +1004,7 @@ fn wait_result(
         meta.event_after,
         meta.timeout,
         &meta.project,
+        meta.only_inbox,
     );
     let next = if events.is_empty() && durable.is_empty() {
         json!({"listen_again": listen_again})
@@ -1015,6 +1023,7 @@ fn wait_result(
             "board_after": meta.board_after,
             "board_has_more": meta.board_has_more,
             "event_after": meta.event_after,
+            "next_event_after": meta.event_after,
             "durable_events": durable,
             "timed_out": meta.timed_out,
             "next": next,
@@ -1045,6 +1054,7 @@ async fn wait_events(
     project: String,
     project_arg: Option<String>,
     timeout: u64,
+    only_inbox: bool,
     cursors: WaitCursors,
     lifecycle: WaitLifecycle,
 ) -> Result<Outcome> {
@@ -1056,7 +1066,11 @@ async fn wait_events(
     let generation = lifecycle.generation;
     // The daemon owns the actual wait deadline. Give the transport a small
     // margin so startup/HTTP overhead cannot beat its timeout response.
-    let transport_timeout = timeout.saturating_add(3);
+    let transport_timeout = if timeout == 0 {
+        0
+    } else {
+        timeout.saturating_add(3)
+    };
     let mut waiter = Waiter::from_start(transport_timeout, lifecycle.started);
     let board_cursor = board_after.unwrap_or(0);
     let resume = wait_command(
@@ -1065,6 +1079,7 @@ async fn wait_events(
         event_cursor,
         timeout,
         project_arg.as_deref().unwrap_or(""),
+        only_inbox,
     );
     loop {
         if waiter.expired() {
@@ -1082,6 +1097,7 @@ async fn wait_events(
                     project: project_arg.clone().unwrap_or_default(),
                     timeout,
                     timed_out: true,
+                    only_inbox,
                 },
             ));
         }
@@ -1091,6 +1107,7 @@ async fn wait_events(
             board_after,
             event_after: event_cursor,
             timeout,
+            only_inbox,
         };
         match waiter
             .attempt(client::call_bound(op, Some(credential.clone()), generation))
@@ -1111,6 +1128,7 @@ async fn wait_events(
                         project: project_arg.clone().unwrap_or_default(),
                         timeout,
                         timed_out: true,
+                        only_inbox,
                     },
                 ))
             }
@@ -1120,7 +1138,11 @@ async fn wait_events(
                     return Err(crate::lifecycle::stopped());
                 }
                 let inbox = data["inbox"].clone();
-                let board = data["board"].clone();
+                let board = if only_inbox {
+                    json!({"messages": [], "next_after": board_cursor, "has_more": false})
+                } else {
+                    data["board"].clone()
+                };
                 let mut events: BTreeMap<u64, (String, Vec<String>)> = BTreeMap::new();
                 for message in inbox["messages"].as_array().into_iter().flatten() {
                     if let Some(id) = message["id"].as_u64() {
@@ -1145,12 +1167,21 @@ async fn wait_events(
                         e.1.push("board".into());
                     }
                 }
-                let durable = data["durable_events"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
+                let durable = if only_inbox {
+                    Vec::new()
+                } else {
+                    data["durable_events"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                };
                 let inbox_after = inbox["next_after"].as_u64().unwrap_or(inbox_cursor);
                 let next_board = board["next_after"].as_u64().unwrap_or(board_cursor);
+                let returned_board_after = if only_inbox {
+                    board_after
+                } else {
+                    Some(next_board)
+                };
                 let next_event = data["event_after"].as_u64().unwrap_or(event_cursor);
                 if !events.is_empty() || !durable.is_empty() {
                     return Ok(wait_result(
@@ -1161,12 +1192,13 @@ async fn wait_events(
                             inbox_after,
                             inbox_has_more: inbox["has_more"] == true,
                             board_before: board_cursor,
-                            board_after: Some(next_board),
+                            board_after: returned_board_after,
                             board_has_more: board["has_more"] == true,
                             event_after: next_event,
                             project: project_arg.clone().unwrap_or_default(),
                             timeout,
                             timed_out: false,
+                            only_inbox,
                         },
                     ));
                 }
@@ -1178,12 +1210,13 @@ async fn wait_events(
                         inbox_after,
                         inbox_has_more: false,
                         board_before: board_cursor,
-                        board_after: Some(next_board),
+                        board_after: returned_board_after,
                         board_has_more: false,
                         event_after: next_event,
                         project: project_arg.clone().unwrap_or_default(),
                         timeout,
                         timed_out: data["timed_out"] == true,
+                        only_inbox,
                     },
                 ));
             }
@@ -1205,6 +1238,7 @@ async fn wait_events(
                         project: project_arg.clone().unwrap_or_default(),
                         timeout,
                         timed_out: true,
+                        only_inbox,
                     },
                 ),
                 resume,
@@ -1972,7 +2006,9 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             inbox_after,
             board_after,
             event_after,
+            only,
         } => {
+            let only_inbox = only.as_deref() == Some("inbox");
             let c = client::credential(selected)?;
             let explicit_project = project.is_some();
             let explicit_project_key = project
@@ -1988,7 +2024,12 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             let project_arg = explicit_project.then(|| project_key.clone());
             if human {
                 eprintln!(
-                    "Waiting for inbox and board activity ({}).",
+                    "Waiting for {} ({}).",
+                    if only_inbox {
+                        "inbox activity"
+                    } else {
+                        "inbox and board activity"
+                    },
                     if timeout == 0 {
                         "indefinitely".to_string()
                     } else {
@@ -2001,6 +2042,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                 project_key,
                 project_arg,
                 timeout,
+                only_inbox,
                 WaitCursors {
                     inbox: inbox_after,
                     board: board_after,
@@ -2516,6 +2558,17 @@ pub fn render(data: &Value, attention: Option<&Value>) {
         .as_bool()
         .or_else(|| data["sent"]["recipient_presence"]["listening"].as_bool());
     if let Some(listening) = recipient_listening {
+        let recipient_state = data["recipient_presence"]["current_state"]
+            .as_str()
+            .or_else(|| data["sent"]["recipient_presence"]["current_state"].as_str());
+        match recipient_state {
+            Some("inactive") => {
+                println!("Recipient is currently inactive. The message remains queued.")
+            }
+            Some("listening") => println!("Recipient is currently listening."),
+            Some("not_listening") => println!("Recipient is currently active but not listening."),
+            _ => {}
+        }
         if listening {
             println!("Recipient was listening when Tala accepted the message; this is a point-in-time observation.");
         } else {

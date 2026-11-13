@@ -178,11 +178,20 @@ async fn execute(s: AppState, payload: Payload) -> Reply {
 }
 
 async fn wait_rpc(s: AppState, mut request: Rpc) -> (StatusCode, Json<Envelope>) {
-    let Operation::Wait { timeout, .. } = &request.operation else {
-        unreachable!()
+    let (timeout, only_inbox) = match &request.operation {
+        Operation::Wait {
+            timeout,
+            only_inbox,
+            ..
+        } => (*timeout, *only_inbox),
+        _ => unreachable!(),
+    };
+    let original_event_after = match &request.operation {
+        Operation::Wait { event_after, .. } => *event_after,
+        _ => unreachable!(),
     };
     let deadline =
-        (*timeout != 0).then(|| tokio::time::Instant::now() + Duration::from_secs(*timeout));
+        (timeout != 0).then(|| tokio::time::Instant::now() + Duration::from_secs(timeout));
     let mut stop = s.stop.subscribe();
     loop {
         let store = s.store.clone();
@@ -201,17 +210,22 @@ async fn wait_rpc(s: AppState, mut request: Rpc) -> (StatusCode, Json<Envelope>)
         })
         .await;
         let snapshot = match result {
-            Ok(Ok((data, attention))) => {
+            Ok(Ok((mut data, attention))) => {
                 if data["inbox"]["messages"]
                     .as_array()
                     .is_some_and(|v| !v.is_empty())
-                    || data["board"]["messages"]
-                        .as_array()
-                        .is_some_and(|v| !v.is_empty())
-                    || data["durable_events"]
-                        .as_array()
-                        .is_some_and(|v| !v.is_empty())
+                    || (!only_inbox
+                        && data["board"]["messages"]
+                            .as_array()
+                            .is_some_and(|v| !v.is_empty()))
+                    || (!only_inbox
+                        && data["durable_events"]
+                            .as_array()
+                            .is_some_and(|v| !v.is_empty()))
                 {
+                    if only_inbox {
+                        data["event_after"] = json!(original_event_after);
+                    }
                     return (
                         StatusCode::OK,
                         Json(Envelope {
@@ -237,6 +251,9 @@ async fn wait_rpc(s: AppState, mut request: Rpc) -> (StatusCode, Json<Envelope>)
         if let Some(deadline) = deadline {
             if tokio::time::Instant::now() >= deadline {
                 let mut data = snapshot;
+                if only_inbox {
+                    data["event_after"] = json!(original_event_after);
+                }
                 data["timed_out"] = json!(true);
                 return (StatusCode::OK, Json(Envelope::success(data)));
             }
@@ -249,17 +266,20 @@ async fn wait_rpc(s: AppState, mut request: Rpc) -> (StatusCode, Json<Envelope>)
             inbox_after,
             board_after,
             event_after,
+            only_inbox,
             ..
         } = &mut request.operation
         {
             *inbox_after = snapshot["inbox"]["next_after"]
                 .as_u64()
                 .unwrap_or(*inbox_after);
-            *board_after = Some(
-                snapshot["board"]["next_after"]
-                    .as_u64()
-                    .unwrap_or(board_after.unwrap_or(0)),
-            );
+            if !*only_inbox {
+                *board_after = Some(
+                    snapshot["board"]["next_after"]
+                        .as_u64()
+                        .unwrap_or(board_after.unwrap_or(0)),
+                );
+            }
             *event_after = snapshot["event_after"].as_u64().unwrap_or(*event_after);
         }
     }

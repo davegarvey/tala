@@ -2137,6 +2137,180 @@ fn inbox_wait_wakes_and_infinite_wait_can_be_interrupted() {
 }
 
 #[test]
+fn wait_timeout_zero_survives_client_recovery_margin() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "infinite-sender");
+    let recipient = h.register(&h.a, "infinite-recipient");
+    let mut waiter = h
+        .command(&h.a, Some(&recipient), &["wait", "--timeout=0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_listening(&h, &recipient, Duration::from_secs(4));
+    std::thread::sleep(Duration::from_millis(3300));
+    assert!(
+        waiter.try_wait().unwrap().is_none(),
+        "indefinite wait returned after the client margin"
+    );
+    h.send(&sender, &recipient, "wake after margin");
+    let output = wait_child(
+        waiter,
+        Duration::from_secs(4),
+        "indefinite wait after client margin",
+    );
+    assert!(output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["events"][0]["type"], "direct_request");
+}
+
+#[test]
+fn inbox_only_wait_ignores_overdue_wakeup_until_timeout() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "filtered-sender");
+    let recipient = h.register(&h.a, "filtered-recipient");
+    h.ok(
+        &h.a,
+        Some(&sender),
+        &[
+            "send",
+            "--to",
+            &recipient.id,
+            "--delivery-overdue-after=1",
+            "queued",
+        ],
+    );
+    let started = std::time::Instant::now();
+    let output = h
+        .command(
+            &h.a,
+            Some(&sender),
+            &["wait", "--only=inbox", "--event-after=0", "--timeout=2"],
+        )
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert!(started.elapsed() >= Duration::from_millis(1800));
+    assert!(started.elapsed() < Duration::from_millis(3500));
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["events"], json!([]));
+    assert_eq!(
+        result["data"]["next_event_after"],
+        result["data"]["event_after"]
+    );
+    assert!(result["data"]["next"]["listen_again"]
+        .as_str()
+        .unwrap()
+        .contains("--only=inbox"));
+}
+
+#[test]
+fn inbox_only_wait_returns_later_inbox_without_consuming_it() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "inbox-filter-sender");
+    let recipient = h.register(&h.a, "inbox-filter-recipient");
+    h.ok(
+        &h.a,
+        Some(&sender),
+        &[
+            "send",
+            "--to",
+            &recipient.id,
+            "--delivery-overdue-after=1",
+            "queued",
+        ],
+    );
+    let mut waiter = h
+        .command(
+            &h.a,
+            Some(&sender),
+            &["wait", "--only=inbox", "--timeout=5"],
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_listening(&h, &sender, Duration::from_secs(2));
+    std::thread::sleep(Duration::from_millis(1300));
+    assert!(
+        waiter.try_wait().unwrap().is_none(),
+        "overdue event woke inbox-only wait"
+    );
+    let incoming = h.send(&recipient, &sender, "inbox wake");
+    let output = wait_child(waiter, Duration::from_secs(3), "inbox-only wait");
+    assert!(output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["events"].as_array().unwrap().len(), 1);
+    assert_eq!(result["data"]["events"][0]["sources"], json!(["inbox"]));
+    assert_eq!(result["data"]["event_after"], 0);
+    assert_eq!(result["data"]["next_event_after"], 0);
+    assert!(result["data"]["next"]["listen_again"]
+        .as_str()
+        .unwrap()
+        .contains("--only=inbox"));
+    let unread = h.ok(&h.a, Some(&sender), &["inbox", "--peek"]);
+    assert!(unread["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["id"] == incoming["message"]["id"]));
+    let unfiltered = h.ok(
+        &h.a,
+        Some(&sender),
+        &["wait", "--event-after=0", "--timeout=1"],
+    );
+    assert!(unfiltered["durable_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["type"] == "delivery_overdue"));
+}
+
+#[test]
+fn inactive_recipient_does_not_generate_overdue_event() {
+    let h = Harness::new();
+    let sender = h.register(&h.a, "inactive-sender");
+    let recipient = h.register(&h.a, "inactive-recipient");
+    let sent = h.ok(
+        &h.a,
+        Some(&sender),
+        &[
+            "send",
+            "--to",
+            &recipient.id,
+            "--delivery-overdue-after=1",
+            "queued",
+        ],
+    );
+    assert_eq!(sent["recipient_presence"]["current_state"], "not_listening");
+    h.ok(&h.a, Some(&recipient), &["unregister"]);
+    let sent_while_inactive = h.ok(
+        &h.a,
+        Some(&sender),
+        &["send", "--to", &recipient.id, "inactive message"],
+    );
+    assert_eq!(
+        sent_while_inactive["recipient_presence"]["current_state"],
+        "inactive"
+    );
+    let output = h
+        .command(
+            &h.a,
+            Some(&sender),
+            &["wait", "--event-after=0", "--timeout=2"],
+        )
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let message = h.ok(
+        &h.a,
+        Some(&sender),
+        &["status", &format!("--message={}", id(&sent))],
+    );
+    assert!(message["message"]["delivery_overdue_at"].is_number());
+}
+
+#[test]
 fn stop_ends_active_wait_without_restarting_the_daemon() {
     let h = Harness::new();
     let a = h.register(&h.a, "stop-wait");
@@ -2731,6 +2905,25 @@ fn acceptance_deadline_alerts_without_failing_request_and_delivery_overdue_wakes
         .collect();
     assert!(types.contains(&"acceptance_deadline_expired"), "{types:?}");
     assert!(types.contains(&"delivery_overdue"), "{types:?}");
+    assert_eq!(
+        types
+            .iter()
+            .filter(|event_type| **event_type == "delivery_overdue")
+            .count(),
+        1,
+        "a message emits one overdue event"
+    );
+    assert_eq!(
+        result["data"]["next_event_after"],
+        result["data"]["event_after"]
+    );
+    assert!(result["data"]["next"]["listen_again"]
+        .as_str()
+        .unwrap()
+        .contains(&format!(
+            "--event-after={}",
+            result["data"]["next_event_after"]
+        )));
     let pending = h.ok(&h.a, Some(&sender), &["pending", "--direction=outgoing"]);
     assert_eq!(pending["messages"][0]["id"], request["message"]["id"]);
     assert!(pending["messages"][0]["acceptance_expired_at"].is_number());
