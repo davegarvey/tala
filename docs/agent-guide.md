@@ -10,7 +10,7 @@ Register once at the start of each session, even when another agent shares your 
 tala register --name=codex --tool=codex
 ```
 
-The result contains your public `agent.id` (`agt_…`), which others use to address you, and your private `handle` (`th_…`), which you use to act as yourself. Pass the handle on identity-bound commands; `project list` can run without it:
+The result contains your public `agent.id` (`agt_…`), which others use to address you, and your private `handle` (`th_…`), which is a credential you use to act as yourself. Never share or paste the handle into messages; Tala rejects message text containing a private handle. Use public `agt_` IDs to address agents. Pass your handle on identity-bound commands; `project list` can run without it:
 
 ```bash
 tala --agent=th_<your-handle> inbox

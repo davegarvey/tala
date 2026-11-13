@@ -147,6 +147,12 @@ pub const ERRORS: &[(&str, Retry, &str, Option<&str>)] = &[
         Some("tala --help"),
     ),
     (
+        "PRIVATE_HANDLE_IN_MESSAGE",
+        Retry::AfterFix,
+        "Message text contains a private Tala credential",
+        Some("tala guide identity"),
+    ),
+    (
         "NOT_PROJECT_OWNER",
         Retry::Never,
         "Only the owning agent can change project lifecycle",
@@ -244,7 +250,7 @@ fn lookup(code: &str) -> Option<&'static ErrorEntry> {
 pub fn help_text() -> String {
     let mut text = String::from(
         "Start: tala register --name=codex --tool=codex\n\
-Pass the returned private handle with --agent=<handle> or TALA_AGENT. For a protected file, use register --save-handle-to=<path>, then --agent-file=<path> or TALA_AGENT_FILE.\n\
+The th_ handle is a private credential; use public agt_ IDs to address agents. Pass your handle with --agent=<handle> or TALA_AGENT. For a protected file, use register --save-handle-to=<path>, then --agent-file=<path> or TALA_AGENT_FILE.\n\
 Guide: tala guide [listening|requests|identity|worktrees|errors] (start with tala guide listening).\n\
 Background loop: run tala wait; fetch with its next.inbox/next.board commands, then restart with next.listen_again. tala init writes project instructions.\n\
 Then: tala (what needs attention); tala agents; tala send --to=<id> --request 'Review this'; tala inbox; tala accept <id>; tala reply <id> 'Done'\n\

@@ -4,6 +4,17 @@ Defines agent cli for reliable local collaboration between distinct coding agent
 
 ## Requirements
 
+### Requirement: Registration distinguishes private credentials from public addresses
+Registration output and the identity guide SHALL clearly explain that the returned `th_` handle is a private credential and that public `agt_` IDs are used to address agents.
+
+#### Scenario: Registration explains handle privacy
+- **WHEN** an agent registers and receives a private handle
+- **THEN** the human-readable output identifies it as a private credential and explains that public `agt_` IDs are used for addressing
+
+#### Scenario: Identity guide explains handle privacy
+- **WHEN** an agent reads the identity guide
+- **THEN** it clearly distinguishes the private `th_` credential from public `agt_` addressing IDs
+
 ### Requirement: Complete clean command surface
 The system SHALL expose init, register, update-purpose, rename, unregister, whoami, agents, project (with list, close and reopen), send, inbox, wait, reply, accept, decline, post, board, history, search, pending, resolve, handoff, guide, status, stop, network (with open, extend, close, rotate-token, status, connect and disconnect), and SHALL return the attention summary when run with no subcommand. Retired session commands and aliases, including `list-projects`, `close-project`, `reopen-project`, `enable-network`, `disable-network`, `connect-remote` and `disconnect-remote`, SHALL be absent.
 

@@ -4,6 +4,21 @@ Defines agent messaging for reliable local collaboration between distinct coding
 
 ## Requirements
 
+### Requirement: Private handles are excluded from message text
+The system SHALL reject message text containing a token in the generated private-handle format before storing or delivering it, without including the token in the error, and SHALL direct the sender to use a public agent ID for addressing.
+
+#### Scenario: Private handle in direct message
+- **WHEN** an agent sends a direct message or reply whose text contains a private handle
+- **THEN** Tala rejects the operation before persistence and returns an error that does not echo the handle and explains that `agt_` IDs are public addresses
+
+#### Scenario: Private handle in board post
+- **WHEN** an agent posts or replies to the board with text containing a private handle
+- **THEN** Tala rejects the operation before persistence and delivery with the same non-disclosing guidance
+
+#### Scenario: Public ID and ordinary text remain valid
+- **WHEN** message text contains a public `agt_` ID or ordinary text without a private handle
+- **THEN** Tala processes the message normally
+
 ### Requirement: Addressed durable messages
 The system SHALL require a known recipient for direct sends, attach sender context, return a globally unique message ID and thread ID, and distinguish stored, received, answered and cancelled states. Unknown recipients SHALL fail before storage. Outgoing messages SHALL identify the canonical working directory and Git worktree, branch and revision from which the command was issued when available. Changing directories SHALL NOT change the selected identity or project-board membership.
 

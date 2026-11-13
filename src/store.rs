@@ -189,6 +189,36 @@ fn invalid(message: impl Into<String>) -> Failure {
         "Check tala --help and use explicit agent/message IDs.",
     )
 }
+/// Matches the complete shape accepted as a Tala private handle, without
+/// treating a longer identifier containing that shape as a credential.
+fn contains_private_handle(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.windows(35).enumerate().any(|(start, candidate)| {
+        if &candidate[..3] != b"th_" || !candidate[3..].iter().all(u8::is_ascii_hexdigit) {
+            return false;
+        }
+        let is_token_char = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        (start == 0 || !is_token_char(bytes[start - 1]))
+            && (start + 35 == bytes.len() || !is_token_char(bytes[start + 35]))
+    })
+}
+fn value_contains_private_handle(value: &Value) -> bool {
+    match value {
+        Value::String(text) => contains_private_handle(text),
+        Value::Array(values) => values.iter().any(value_contains_private_handle),
+        Value::Object(values) => values.iter().any(|(key, value)| {
+            contains_private_handle(key) || value_contains_private_handle(value)
+        }),
+        _ => false,
+    }
+}
+fn parts_contain_private_handle(parts: &[Part]) -> bool {
+    parts.iter().any(|part| match part {
+        Part::Text { text } => contains_private_handle(text),
+        Part::Data { value } => value_contains_private_handle(value),
+        Part::File { .. } => false,
+    })
+}
 fn is_bidi_formatting_control(c: char) -> bool {
     matches!(
         c as u32,
@@ -1912,6 +1942,13 @@ fn send(tx: &Transaction<'_>, sender: &str, operation: &Operation) -> Result<Val
     if parts.is_empty() || parts.iter().any(|p| !p.valid()) || key.trim().is_empty() {
         return Err(invalid("Nonempty parts and idempotency key are required"));
     }
+    if parts_contain_private_handle(parts) {
+        return Err(Failure::new(
+            "PRIVATE_HANDLE_IN_MESSAGE",
+            "Message text contains a private Tala credential",
+            "Remove the credential. Use public agt_ agent IDs to address agents; keep th_ handles private.",
+        ));
+    }
     if !["message", "reply", "post", "handoff"].contains(&kind.as_str()) {
         return Err(invalid("Unknown message kind"));
     }
@@ -2236,6 +2273,23 @@ fn explicit_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn private_handle_match_requires_complete_bounded_generated_shape() {
+        let handle = format!("th_{}", "a".repeat(32));
+        assert!(contains_private_handle(&handle));
+        assert!(contains_private_handle(&format!("Please remove {handle}.")));
+        assert!(!contains_private_handle(&format!("x{handle}")));
+        assert!(!contains_private_handle(&format!("{handle}9")));
+        assert!(!contains_private_handle(
+            "th_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(!contains_private_handle(
+            "agt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(value_contains_private_handle(&serde_json::json!({
+            "nested": ["safe", {"body": handle}]
+        })));
+    }
     fn rpc(operation: Operation, c: Option<Credential>) -> Rpc {
         Rpc {
             protocol_version: PROTOCOL_VERSION,
@@ -3416,6 +3470,54 @@ mod tests {
             *parts = vec![Part::Text { text: text.into() }];
         }
         op
+    }
+    #[test]
+    fn private_handles_are_rejected_for_direct_posts_and_replies_without_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&temp.path().join("db")).unwrap();
+        let a = register(&mut store, "a");
+        let b = register(&mut store, "b");
+        let private = format!("th_{}", "b".repeat(32));
+        for mut operation in [send(&b.agent, "private-send"), post("placeholder")] {
+            if let Operation::Send { parts, .. } = &mut operation {
+                *parts = vec![Part::Text {
+                    text: format!("oops {private}"),
+                }];
+            }
+            let error = store.execute(&rpc(operation, Some(a.clone()))).unwrap_err();
+            assert_eq!(error.code, "PRIVATE_HANDLE_IN_MESSAGE");
+            assert!(!error.message.contains(&private));
+            assert!(error.hint.contains("agt_"));
+        }
+        let mut structured = send(&b.agent, "private-data");
+        if let Operation::Send { parts, .. } = &mut structured {
+            *parts = vec![Part::Data {
+                value: serde_json::json!({"nested": [{"body": private}]}),
+            }];
+        }
+        let error = store
+            .execute(&rpc(structured, Some(a.clone())))
+            .unwrap_err();
+        assert_eq!(error.code, "PRIVATE_HANDLE_IN_MESSAGE");
+        assert!(!error.to_string().contains(&private));
+        let sent = store
+            .execute(&rpc(send(&b.agent, "ordinary"), Some(a.clone())))
+            .unwrap();
+        let parent = sent["message"]["id"].as_u64().unwrap();
+        let error = store
+            .execute(&rpc(reply(parent, &private), Some(b.clone())))
+            .unwrap_err();
+        assert_eq!(error.code, "PRIVATE_HANDLE_IN_MESSAGE");
+        assert!(!error.to_string().contains(&private));
+        let count: u64 = store
+            .db
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "only the ordinary direct message should persist");
+        let public = store
+            .execute(&rpc(send(&b.agent, &a.agent), Some(a)))
+            .unwrap();
+        assert!(public["message"]["id"].as_u64().is_some());
     }
     fn reply(parent: u64, text: &str) -> Operation {
         let mut op = send("unused", &format!("reply-{parent}-{text}"));

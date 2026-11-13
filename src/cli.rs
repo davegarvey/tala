@@ -1825,6 +1825,8 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                 data["select"] = json!(format!("--agent={handle}"));
             }
             data["next"] = json!("tala guide listening");
+            data["credential_guidance"] =
+                json!("Keep th_ handles private. Use public agt_ IDs to address agents.");
             data
         }
         Commands::Guide { topic } => integration::guide(topic.as_deref())?,
@@ -2419,7 +2421,7 @@ pub fn render(data: &Value, attention: Option<&Value>) {
     } else if let Some(path) = data["selector_file"].as_str() {
         let quoted = shell_quote_selector_path(path);
         println!(
-            "Registered {} ({}). Private selector saved to {path}; pass --agent-file={quoted} on tala commands.",
+            "Registered {} ({}). Your private credential is saved in {path}; use public agt_ IDs to address agents. Pass --agent-file={quoted} on tala commands.",
             data["agent"]["id"].as_str().unwrap_or(""),
             data["agent"]["name"].as_str().unwrap_or("")
         );
@@ -2432,14 +2434,14 @@ pub fn render(data: &Value, attention: Option<&Value>) {
     } else if let Some(handle) = data["handle"].as_str() {
         if let Some(error) = data["selector_file_error"].as_str() {
             println!(
-                "Registered {} ({}), but selector-file save failed: {error}. Use --agent={handle} now and keep this private handle.",
+                "Registered {} ({}), but selector-file save failed: {error}. Use --agent={handle} now; this th_ value is a private credential. Use public agt_ IDs to address agents.",
                 data["agent"]["id"].as_str().unwrap_or(""),
                 data["agent"]["name"].as_str().unwrap_or("")
             );
             return;
         }
         println!(
-            "Registered {} ({}). Pass --agent={handle} on every tala command; keep the handle private.",
+            "Registered {} ({}). Pass --agent={handle} on tala commands; this th_ value is a private credential. Use public agt_ IDs to address agents.",
             data["agent"]["id"].as_str().unwrap_or(""),
             data["agent"]["name"].as_str().unwrap_or("")
         );
