@@ -4332,7 +4332,7 @@ fn network(h: &Harness, args: &[&str]) -> Value {
 
 fn rpc_over_network(address: &str, token: &str, op: &str) -> String {
     let body = format!(
-        r#"{{"protocol_version":11,"request_id":"net-{op}","credential":null,"operation":{{"op":"{op}","bind":"127.0.0.1:0","seconds":60}}}}"#
+        r#"{{"protocol_version":12,"request_id":"net-{op}","credential":null,"operation":{{"op":"{op}","bind":"127.0.0.1:0","seconds":60}}}}"#
     );
     tls_request(
         address,
