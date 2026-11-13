@@ -2978,7 +2978,7 @@ fn decline_leaves_pending_but_not_actionable_and_reply_before_acceptance_complet
             &recipient.id,
             "--request",
             "Please answer directly",
-            "--accept-within=1",
+            "--accept-within=3600",
         ],
     );
     let replied_id = id(&replied);
@@ -2988,7 +2988,15 @@ fn decline_leaves_pending_but_not_actionable_and_reply_before_acceptance_complet
         &["reply", &replied_id, "Here is the answer"],
     );
     let reply_id = reply["message"]["id"].as_u64().unwrap().to_string();
-    std::thread::sleep(Duration::from_millis(1200));
+    // Force the already-answered request's deadline into the past. This verifies
+    // that later deadline processing suppresses expiry after a timely reply,
+    // without relying on a one-second race between two CLI processes.
+    let db = rusqlite::Connection::open(h.home.join("tala.sqlite3")).unwrap();
+    db.execute(
+        "UPDATE messages SET accept_deadline=CAST(strftime('%s','now') AS INTEGER)-1 WHERE id=?1",
+        [replied["message"]["id"].as_i64().unwrap()],
+    )
+    .unwrap();
     let event_cursor = decline_wait["event_after"].as_u64().unwrap().to_string();
     let event_arg = format!("--event-after={event_cursor}");
     let inbox_arg = format!("--inbox-after={reply_id}");
@@ -2997,9 +3005,19 @@ fn decline_leaves_pending_but_not_actionable_and_reply_before_acceptance_complet
         Some(&sender),
         &["wait", &event_arg, &inbox_arg, "--timeout=1"],
     );
-    assert_eq!(after.status.code(), Some(3));
+    assert_eq!(
+        after.status.code(),
+        Some(3),
+        "unexpected wait outcome; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&after.stdout),
+        String::from_utf8_lossy(&after.stderr)
+    );
     let after: Value = serde_json::from_slice(&after.stdout).unwrap();
-    assert_eq!(after["data"]["durable_events"], json!([]));
+    assert_eq!(
+        after["data"]["durable_events"],
+        json!([]),
+        "answered request emitted a late lifecycle event: {after}"
+    );
 }
 
 #[test]
