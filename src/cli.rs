@@ -25,7 +25,7 @@ pub struct Cli {
         value_enum,
         value_name = "FORMAT",
         default_value_t = Format::Json,
-        help = "Output format: json (one envelope, for programs) or text (for people)"
+        help = "Output format: json (one envelope, for programs) or text (for people); guide defaults to text"
     )]
     pub format: Format,
     #[arg(
@@ -122,7 +122,7 @@ pub enum Commands {
     },
     /// Read the bundled agent guide, optionally for one topic
     Guide {
-        #[arg(value_parser = ["listening", "requests", "identity", "worktrees", "errors"])]
+        #[arg(value_parser = ["all", "listening", "requests", "identity", "worktrees", "errors", "harness"])]
         topic: Option<String>,
     },
     /// Mark your instance inactive; preserve inbox and history

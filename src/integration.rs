@@ -8,13 +8,17 @@ const GUIDE_TOPICS: &[(&str, &str)] = &[
     ("identity", "Identity"),
     ("worktrees", "Worktrees"),
     ("errors", "Errors"),
+    ("harness", "Harness"),
 ];
 
 pub fn guide(topic: Option<&str>) -> Result<Value> {
     let topics: Vec<_> = GUIDE_TOPICS.iter().map(|(slug, _)| *slug).collect();
     let Some(topic) = topic else {
-        return Ok(json!({"topic":"all","topics":topics,"content":GUIDE}));
+        return guide_content("quickstart", &topics);
     };
+    if topic == "all" {
+        return guide_content("all", &topics);
+    }
     let title = GUIDE_TOPICS
         .iter()
         .find(|(slug, _)| *slug == topic)
@@ -23,7 +27,7 @@ pub fn guide(topic: Option<&str>) -> Result<Value> {
             Failure::new(
                 "USAGE_ERROR",
                 format!("Unknown guide topic: {topic}"),
-                "Choose listening, requests, identity, worktrees or errors.",
+                "Choose all, listening, requests, identity, worktrees, errors or harness.",
             )
             .with_next("tala guide --help")
         })?;
@@ -44,6 +48,30 @@ pub fn guide(topic: Option<&str>) -> Result<Value> {
         .position(|line| line.starts_with("## "))
         .map_or(lines.len(), |offset| start + 1 + offset);
     let content = lines[start..end].join("\n") + "\n";
+    Ok(json!({"topic":topic,"topics":topics,"content":content}))
+}
+
+fn guide_content(topic: &str, topics: &[&str]) -> Result<Value> {
+    let content = if topic == "all" {
+        GUIDE.to_owned()
+    } else {
+        let lines: Vec<_> = GUIDE.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| *line == "## Quickstart")
+            .ok_or_else(|| {
+                Failure::new(
+                    "SERIALIZATION_ERROR",
+                    "Guide quickstart is missing",
+                    "Check the bundled guide.",
+                )
+            })?;
+        let end = lines[start + 1..]
+            .iter()
+            .position(|line| line.starts_with("## "))
+            .map_or(lines.len(), |offset| start + 1 + offset);
+        lines[start..end].join("\n") + "\n"
+    };
     Ok(json!({"topic":topic,"topics":topics,"content":content}))
 }
 
