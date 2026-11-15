@@ -17,7 +17,8 @@ async fn main() {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    let human = cli::args_request_text(std::env::args_os());
+    let raw_args: Vec<_> = std::env::args_os().collect();
+    let human = cli::args_request_text(raw_args.clone());
     let cli = match cli::Cli::try_parse() {
         Ok(c) => c,
         Err(e) => {
@@ -44,7 +45,12 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let human = cli.text();
+    let format_explicit = raw_args
+        .iter()
+        .any(|arg| arg == "--format" || arg.to_string_lossy().starts_with("--format="));
+    let guide_default =
+        matches!(&cli.command, Some(cli::Commands::Guide { .. })) && !format_explicit;
+    let human = cli.text() || guide_default;
     let is_daemon = matches!(cli.command, Some(cli::Commands::Daemon));
     match cli::run(cli).await {
         Ok(result) => {

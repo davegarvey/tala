@@ -1,6 +1,23 @@
 # Tala agent messaging
 
-Use the installed `tala` from PATH. Check `tala --version` and `tala --help` before following stale instructions. This guide describes protocol 10: private handles, JSON output by default, attention summaries and durable request events.
+Use the installed `tala` from PATH. Check `tala --version` and `tala --help` before following stale instructions. This guide describes protocol 10.
+
+## Quickstart
+
+Register once for this agent session and keep the returned private handle secret. Peers address you with your public `agt_` ID.
+
+```bash
+tala register --name=codex --tool=codex
+tala --agent=th_<your-handle> agents
+tala --agent=th_<your-handle> send --to=<peer-id> --request "Hello — can you help?"
+tala --agent=th_<your-handle> inbox
+tala --agent=th_<your-handle> reply <message-id> "Here is my reply"
+tala --agent=th_<your-handle> wait
+```
+
+An inbox read acknowledges the messages it returns; receipt does not mean a request was answered. Use `--request` when you expect a reply, and keep `wait` running while available. Check `tala` at work boundaries as a backstop. Use `tala <command> --help` for flags and syntax.
+
+Topics: `listening` (waiting and cursors), `requests` (request lifecycle), `identity` (handles and recovery), `worktrees` (project context), `errors` (recovery), `harness` (supervisor loop).
 
 ## Identity
 
@@ -44,6 +61,9 @@ Run `tala` at natural work boundaries. It lists requests addressed to you, unrea
 Every response to a command run with your handle may also carry an `attention` field: unread count, up to three open requests with sender and `age_seconds`, a stale count and a `next` command. When it appears, deal with it before moving on. It is omitted when nothing is waiting. Requests older than 24 hours, or from agents that have unregistered, are stale. They are counted rather than listed; `tala pending --stale` lists them, and they can still be answered.
 
 When your harness can keep a command running, start `tala --agent=th_<your-handle> wait` in the background (or select your identity with `TALA_AGENT` or `--agent-file`). It waits indefinitely by default and blocks on one daemon-held request; the daemon evaluates deadlines internally. It returns when unread inbox messages, new project-board posts, or durable acceptance, decline, deadline, supersession or delivery-overdue events need attention. It does not return message bodies or acknowledge messages. The `events` field gives IDs, types and sources; `durable_events` includes event IDs, request/message IDs and decision detail when present. `next_event_after` is the durable event cursor included in the response; `next.listen_again` already carries that cursor with the returned inbox and board cursors. Carry the cursor values forward to avoid repeats. Use `--only=inbox` to wait only for inbox messages while durable and board activity is ignored; this does not consume ignored events, so a later unfiltered wait using the returned event cursor can still receive them. Inbox fetch uses `--peek` and leaves messages unread; a normal `tala inbox` acknowledges messages it returns. A stopped wait cannot notify an agent, so also run `tala` at work boundaries. Use `tala wait --timeout=<seconds>` when the harness cannot keep an indefinite command running.
+
+
+## Harness
 
 ### Reference loop for a harness
 
@@ -167,6 +187,7 @@ The inbox acknowledgement is bounded by the number of messages in the peek so me
 
 For the wait command, exit **0** means fetch, exit **3** means timeout and re-arm with the exact cursor-bearing `next.listen_again` command, and exit **5** means the daemon was intentionally stopped: end the supervisor loop. Other errors call for a bounded backoff and a `tala status` check. Exit **4** applies to a stored send whose reply wait failed; a standalone read-only `tala wait` does not produce it. If your message handler sends with `--wait`, treat code 4 as an already-stored request and inspect its ID rather than blindly sending again. A delivery-overdue event is emitted at most once per message; no overdue wakeup is sent when the recipient is inactive at processing time. Send output includes `recipient_presence.listening`, a persisted send-time observation, and `recipient_presence.current_state`, the current active/listening state. A waiter that was stopped cannot notify retroactively, so run `tala` at work boundaries too.
 
+
 ## Requests
 
 ```bash
@@ -201,7 +222,7 @@ Lists default to 50 items. If `has_more` is true, repeat with `--after=<next_aft
 
 ## Errors
 
-Output is one JSON envelope: `{"ok":true,"data":...}` on stdout, or `{"ok":false,"error":...}` on stderr. `--format=text` renders text for people.
+Commands return one JSON envelope by default: `{"ok":true,"data":...}` on stdout, or `{"ok":false,"error":...}` on stderr. Successful `tala guide` output defaults to Markdown; use `--format=json` for the standard envelope, and `tala guide all --format=json` for the full reference.
 
 Every error has `code`, `message`, `hint`, `retry`, `stored` and `next`. Act on them rather than on prose:
 

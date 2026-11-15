@@ -31,7 +31,7 @@ The system SHALL expose init, register, update-purpose, rename, unregister, whoa
 - **THEN** the new surface is listed and use/session/check/listen are absent
 - **AND** rename is listed
 - **AND** network commands appear only under `tala network`
-- **AND** help points agents to `tala guide listening`
+- **AND** help points agents to `tala guide` for the quickstart
 - **AND** project commands appear only under `tala project`
 
 #### Scenario: Bare invocation
@@ -50,18 +50,30 @@ The system SHALL expose init, register, update-purpose, rename, unregister, whoa
 - **WHEN** a project owner runs `tala project close` or `tala project reopen`
 - **THEN** the command changes the lifecycle of the selected project and reports the result
 
+#### Scenario: Read the quickstart
+- **WHEN** an agent runs `tala guide` without a format option
+- **THEN** Tala prints plain Markdown of fewer than 2,000 Unicode characters covering registration, identity selection, peer discovery, send, inbox, reply and wait
+- **AND** it explains private handles versus public IDs, inbox acknowledgement, request replies, listening between work and checking `tala` at work boundaries
+- **AND** it lists available topics with one-line descriptions and points to command help for syntax details
+- **AND** it requires no selected identity or daemon and creates no state
+
 #### Scenario: Read the complete guide
-- **WHEN** an agent runs `tala guide` with the default JSON format
-- **THEN** Tala returns the complete bundled guide as the `content` string in the standard JSON success envelope and reports the available topics
-- **AND** the command does not require a selected identity or running daemon
+- **WHEN** an agent runs `tala guide all`
+- **THEN** Tala prints the quickstart and all reference topics as plain Markdown
 
 #### Scenario: Read a guide topic
-- **WHEN** an agent runs `tala guide listening`, `requests`, `identity`, `worktrees` or `errors`
-- **THEN** Tala returns the requested topic content and its topic slug in the standard JSON success envelope
+- **WHEN** an agent runs `tala guide listening`, `requests`, `identity`, `worktrees`, `errors` or `harness`
+- **THEN** Tala prints only the requested topic as plain Markdown
+- **AND** the harness supervisor recipe appears in `harness`, not `listening`
+
+#### Scenario: Explicit guide formats
+- **WHEN** an agent runs `tala guide [topic] --format=json`
+- **THEN** Tala returns the selected content, topic slug and available topics in the standard JSON success envelope
+- **AND** bare guide uses the slug `quickstart`, while `guide all` uses `all`
 
 #### Scenario: Human-readable guide
 - **WHEN** an agent runs `tala guide [topic] --format=text`
-- **THEN** Tala prints the matching Markdown content without a JSON envelope
+- **THEN** Tala prints the same Markdown content as the default rendering
 
 #### Scenario: Unknown guide topic
 - **WHEN** an agent runs `tala guide unknown`
@@ -103,7 +115,7 @@ The CLI SHALL accept optional purpose at registration and expose an identity-bou
 - **THEN** the display name changes without changing purpose
 
 ### Requirement: Input and output contract
-Send, reply, post and handoff SHALL accept exactly one positional text, message-file, stdin or ordered typed parts input; piped stdin SHALL work implicitly. Direct `send` SHALL accept `--supersedes=<message-id>` to amend an earlier eligible message. JSON message output SHALL expose nullable `supersedes` and `superseded_by` relationships; human output SHALL identify when a message supersedes or has been superseded by another message. Output SHALL default to one JSON envelope with ok and data or error, including usage failures. The global `--format=json|text` option SHALL select the rendering, with `json` as the default. No other output-selection flags SHALL exist. List output SHALL default to 50 items, cap at 500, and support incremental reads.
+Send, reply, post and handoff SHALL accept exactly one positional text, message-file, stdin or ordered typed parts input; piped stdin SHALL work implicitly. Direct `send` SHALL accept `--supersedes=<message-id>` to amend an earlier eligible message. JSON message output SHALL expose nullable `supersedes` and `superseded_by` relationships; human output SHALL identify when a message supersedes or has been superseded by another message. Except for successful guide output, output SHALL default to one JSON envelope with ok and data or error, including usage failures. The global `--format=json|text` option SHALL select the rendering, with `json` as the default except that successful `guide` output defaults to text. Explicit format selection SHALL override the guide default before or after its subcommand. Usage errors SHALL retain the existing JSON default unless text is explicitly requested. No other output-selection flags SHALL exist. List output SHALL default to 50 items, cap at 500, and support incremental reads.
 
 #### Scenario: Invalid JSON input
 - **WHEN** an invocation has conflicting content sources
@@ -133,6 +145,10 @@ Send, reply, post and handoff SHALL accept exactly one positional text, message-
 #### Scenario: Superseding message in human output
 - **WHEN** an agent renders an amended message or its predecessor with `--format=text`
 - **THEN** output states which message supersedes which
+
+#### Scenario: Guide format before subcommand
+- **WHEN** an agent runs `tala --format=json guide` or `tala --format=text guide all`
+- **THEN** the explicit format selects JSON or plain Markdown respectively
 
 ### Requirement: Agent integration
 Init SHALL generate versioned generic agent instructions and OpenCode integrations when present, preserve customized documents unless refresh is explicit, and support check and dry-run. Instructions SHALL require distinct per-session registration, keeping the private handle out of project files and shared environment, checking `tala` at work boundaries, CLI-only messaging and retention of user authorization boundaries. Init SHALL not install harness hooks or change harness configuration.
