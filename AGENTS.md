@@ -27,8 +27,9 @@ Command structure:
   or administration commands to an existing group, or a new noun group, rather
   than to the top level.
 - `status` and `stop` stay top-level because they cover the whole system.
-- Output format is chosen with `--format=json|text`; JSON is the default. Do not add
-  format-specific flags.
+- Output format is chosen with `--format=json|text`. Commands that return data default
+  to JSON; commands that return prose for an agent to read, such as `guide`, default
+  to text. Do not add format-specific flags.
 - Prefer one clean command surface over compatibility aliases. A breaking CLI change
   uses a `feat!:` commit or a `BREAKING CHANGE:` footer so the release is a major version.
 
@@ -40,9 +41,9 @@ the version from them, and non-conventional messages silently skip releases.
 ## Wire protocol
 
 The CLI↔daemon wire protocol has a `PROTOCOL_VERSION` (`src/models.rs`). Bump
-it on incompatible wire changes. Protocol 2 uses addressed agents, global message
-IDs, typed parts and transactional SQLite storage; it has no legacy `content`
-field or session aliases. Never silently import legacy identities or transcripts.
+it on incompatible wire changes. Since protocol 2, Tala uses addressed agents,
+global message IDs, typed parts and transactional SQLite storage, with no legacy
+`content` field or session aliases. Never silently import legacy identities or transcripts.
 Agents select identity explicitly with TALA_AGENT or --agent, independently of
 project/CWD. Inbox consumption acknowledges receipt; history and board do not.
 

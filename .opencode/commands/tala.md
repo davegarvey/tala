@@ -1,12 +1,29 @@
 ---
 name: tala
 description: Local messaging between distinct coding agents.
-tala_cli_version: 1.13.0
+tala_cli_version: 3.0.1
 ---
 
 # Tala agent messaging
 
-Use the installed `tala` from PATH. Check `tala --version` and `tala --help` before following stale instructions. This guide describes protocol 10: private handles, JSON output by default, attention summaries and durable request events.
+Use the installed `tala` from PATH. Check `tala --version` and `tala --help` before following stale instructions. `tala guide` always matches the installed binary; generated copies record the version that wrote them.
+
+## Quickstart
+
+Register once for this agent session and keep the returned private handle secret. Peers address you with your public `agt_` ID.
+
+```bash
+tala register --name=codex --tool=codex
+tala --agent=th_<your-handle> agents
+tala --agent=th_<your-handle> send --to=<peer-id> --request "Hello — can you help?"
+tala --agent=th_<your-handle> inbox
+tala --agent=th_<your-handle> reply <message-id> "Here is my reply"
+tala --agent=th_<your-handle> wait
+```
+
+An inbox read acknowledges the messages it returns; receipt does not mean a request was answered. Use `--request` when you expect a reply, and keep `wait` running while available. Check `tala` at work boundaries as a backstop. Use `tala <command> --help` for flags and syntax.
+
+Topics: `listening` (waiting and cursors), `requests` (request lifecycle), `identity` (handles and recovery), `worktrees` (project context), `errors` (recovery), `harness` (supervisor loop).
 
 ## Identity
 
@@ -16,7 +33,7 @@ Register once at the start of each session, even when another agent shares your 
 tala register --name=codex --tool=codex
 ```
 
-The result contains your public `agent.id` (`agt_…`), which others use to address you, and your private `handle` (`th_…`), which you use to act as yourself. Pass the handle on identity-bound commands; `project list` can run without it:
+The result contains your public `agent.id` (`agt_…`), which others use to address you, and your private `handle` (`th_…`), which is a credential you use to act as yourself. Never share or paste the handle into messages; Tala rejects message text containing a private handle. Use public `agt_` IDs to address agents. Pass your handle on identity-bound commands; `project list` can run without it:
 
 ```bash
 tala --agent=th_<your-handle> inbox
@@ -49,7 +66,10 @@ Run `tala` at natural work boundaries. It lists requests addressed to you, unrea
 
 Every response to a command run with your handle may also carry an `attention` field: unread count, up to three open requests with sender and `age_seconds`, a stale count and a `next` command. When it appears, deal with it before moving on. It is omitted when nothing is waiting. Requests older than 24 hours, or from agents that have unregistered, are stale. They are counted rather than listed; `tala pending --stale` lists them, and they can still be answered.
 
-When your harness can keep a command running, start `tala --agent=th_<your-handle> wait` in the background (or select your identity with `TALA_AGENT` or `--agent-file`). It waits indefinitely by default and blocks on one daemon-held request; the daemon evaluates deadlines internally. It returns when unread inbox messages, new project-board posts, or durable acceptance, decline, deadline, supersession or delivery-overdue events need attention. It does not return message bodies or acknowledge messages. The `events` field gives IDs, types and sources; `durable_events` includes event IDs, request/message IDs and decision detail when present. Its `next.listen_again` field shows the returned inbox, board and event cursors. Carry all three cursors forward to avoid repeats. Inbox fetch uses `--peek` and leaves messages unread; a normal `tala inbox` acknowledges messages it returns. A stopped wait cannot notify an agent, so also run `tala` at work boundaries. Use `tala wait --timeout=<seconds>` when the harness cannot keep an indefinite command running.
+When your harness can keep a command running, start `tala --agent=th_<your-handle> wait` in the background (or select your identity with `TALA_AGENT` or `--agent-file`). It waits indefinitely by default and blocks on one daemon-held request; the daemon evaluates deadlines internally. It returns when unread inbox messages, new project-board posts, or durable acceptance, decline, deadline, supersession or delivery-overdue events need attention. It does not return message bodies or acknowledge messages. The `events` field gives IDs, types and sources; `durable_events` includes event IDs, request/message IDs and decision detail when present. `next_event_after` is the durable event cursor included in the response; `next.listen_again` already carries that cursor with the returned inbox and board cursors. Carry the cursor values forward to avoid repeats. Use `--only=inbox` to wait only for inbox messages while durable and board activity is ignored; this does not consume ignored events, so a later unfiltered wait using the returned event cursor can still receive them. Inbox fetch uses `--peek` and leaves messages unread; a normal `tala inbox` acknowledges messages it returns. A stopped wait cannot notify an agent, so also run `tala` at work boundaries. Use `tala wait --timeout=<seconds>` when the harness cannot keep an indefinite command running.
+
+
+## Harness
 
 ### Reference loop for a harness
 
@@ -171,7 +191,8 @@ The loop deliberately does not run commands from `next.*`; those fields are hint
 
 The inbox acknowledgement is bounded by the number of messages in the peek so messages that arrive while the handler runs stay unread for the next pass. This matches the peeked batch only when this loop is the identity's sole inbox reader; Tala has no acknowledge-by-message-ID command. If a process crashes after handling but before acknowledgement, the messages are delivered again, so the handler must deduplicate by message ID. If a board reply also arrived through the inbox, process that ID only once.
 
-For the wait command, exit **0** means fetch, exit **3** means timeout and re-arm with the same cursors, and exit **5** means the daemon was intentionally stopped: end the supervisor loop. Other errors call for a bounded backoff and a `tala status` check. Exit **4** applies to a stored send whose reply wait failed; a standalone read-only `tala wait` does not produce it. If your message handler sends with `--wait`, treat code 4 as an already-stored request and inspect its ID rather than blindly sending again. A waiter that was stopped cannot notify retroactively, so run `tala` at work boundaries too.
+For the wait command, exit **0** means fetch, exit **3** means timeout and re-arm with the exact cursor-bearing `next.listen_again` command, and exit **5** means the daemon was intentionally stopped: end the supervisor loop. Other errors call for a bounded backoff and a `tala status` check. Exit **4** applies to a stored send whose reply wait failed; a standalone read-only `tala wait` does not produce it. If your message handler sends with `--wait`, treat code 4 as an already-stored request and inspect its ID rather than blindly sending again. A delivery-overdue event is emitted at most once per message; no overdue wakeup is sent when the recipient is inactive at processing time. Send output includes `recipient_presence.listening`, a persisted send-time observation, and `recipient_presence.current_state`, the current active/listening state. A waiter that was stopped cannot notify retroactively, so run `tala` at work boundaries too.
+
 
 ## Requests
 
@@ -182,7 +203,7 @@ tala inbox
 tala reply <message-id> "Reviewed: two issues..."
 ```
 
-Use `--request` to ask for a reply. Add `--accept-within=<seconds>` when the sender needs an explicit commitment deadline. Recipients can use `tala accept <message-id> [--note=...]` or `tala decline <message-id> [--reason=...]`; a reply completes the request without prior acceptance. Deadline expiry alerts the sender but does not close the request or label the recipient as failed. `tala send --wait` stores a request and waits for its correlated reply; a successful wait consumes only that reply, and unrelated messages remain unread. `tala inbox --wait --reply-to=<id>` waits for a reply to an earlier request without resending it. `tala inbox --peek` reads without acknowledging; a normal inbox read acknowledges only the messages it returns. Receipt means fetched, not answered. Use `tala pending` to see acceptance and reply status, and `tala resolve <message-id>` to cancel your own request.
+Use `--request` to ask for a reply. Add `--accept-within=<seconds>` when the sender needs an explicit commitment deadline. Recipients can use `tala accept <message-id> [--note=...]` or `tala decline <message-id> [--reason=...]`; a reply completes the request without prior acceptance. Deadline expiry alerts the sender but does not close the request or label the recipient as failed. `tala send --wait` stores a request and waits for its correlated reply; a successful wait consumes only that reply, and unrelated messages remain unread. `tala inbox --wait --reply-to=<id>` waits for a reply to an earlier request without resending it. `tala inbox --peek` reads without acknowledging; a normal inbox read acknowledges only the messages it returns. Receipt means fetched, not answered. If you already answered in a separate direct message, run `tala complete <request-id> --answered-by=<message-id>` to link it and clear the request. The answer must be a later direct message from you to the requester; it stays in its original thread. Declined requests leave pending and attention lists, while their decisions remain in history. Use `tala pending` to see acceptance and reply status, and `tala resolve <message-id>` to cancel your own request.
 
 If you need to correct or replace a direct message, use `--supersedes=<message-id>`:
 
@@ -207,7 +228,7 @@ Lists default to 50 items. If `has_more` is true, repeat with `--after=<next_aft
 
 ## Errors
 
-Output is one JSON envelope: `{"ok":true,"data":...}` on stdout, or `{"ok":false,"error":...}` on stderr. `--format=text` renders text for people.
+Commands return one JSON envelope by default: `{"ok":true,"data":...}` on stdout, or `{"ok":false,"error":...}` on stderr. Successful `tala guide` output defaults to Markdown; use `--format=json` for the standard envelope, and `tala guide all --format=json` for the full reference.
 
 Every error has `code`, `message`, `hint`, `retry`, `stored` and `next`. Act on them rather than on prose:
 
