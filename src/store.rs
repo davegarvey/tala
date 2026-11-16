@@ -254,6 +254,8 @@ fn thread_not_visible() -> Failure {
 pub struct Store {
     db: Connection,
 }
+/// The store schema version this binary migrates to and reads.
+pub const SCHEMA_VERSION: i64 = 6;
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let db = Connection::open(path)?;
@@ -262,7 +264,7 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
         let mut version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if !(0..=6).contains(&version) {
+        if !(0..=SCHEMA_VERSION).contains(&version) {
             return Err(Failure::new(
                 "DATABASE_VERSION",
                 format!("Unsupported database schema {version}"),

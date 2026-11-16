@@ -1981,6 +1981,10 @@ fn new_help_rejects_old_surface() {
     assert!(help.contains("start with tala guide)"));
     assert!(help.contains("Background loop: run tala wait"));
     assert!(help.contains("tala init writes project instructions"));
+    assert!(
+        help.lines().any(|l| l.trim_start().starts_with("ui ")),
+        "ui is a top-level command"
+    );
     for cmd in ["use", "session", "check", "listen", "discover"] {
         h.error(&h.a, None, &[cmd], "USAGE_ERROR");
     }
@@ -4910,4 +4914,132 @@ fn pinned_certificate_without_its_key_is_rejected() {
     let output = connect_remote(&client, code, Some(&format!("https://{impostor_address}")));
     assert_eq!(error_code(&output), "NETWORK_AUTH");
     assert!(!client.home.join("remote.json").exists());
+}
+
+/// Starts `tala ui --no-open` and returns the process with its reported URL.
+#[cfg(unix)]
+fn start_ui(h: &Harness, extra: &[&str]) -> (Child, String) {
+    use std::io::BufRead;
+    let mut args = vec!["ui", "--no-open"];
+    args.extend_from_slice(extra);
+    let mut child = h
+        .command(&h.a, None, &args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    (child, line.trim().to_string())
+}
+
+/// A minimal HTTP/1.1 GET against the viewer, returning status and body.
+fn viewer_get(port: u16, path: &str, token: Option<&str>) -> (u16, String) {
+    use std::io::Read;
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut request =
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
+    if let Some(token) = token {
+        request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+    (
+        head.split_whitespace().nth(1).unwrap().parse().unwrap(),
+        body.to_string(),
+    )
+}
+
+#[cfg(unix)]
+fn interrupt(mut child: Child) -> std::process::ExitStatus {
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    child.wait().unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn ui_serves_store_without_starting_daemon() {
+    let h = Harness::new();
+    let a = h.register(&h.a, "viewer-a");
+    let b = h.register(&h.b, "viewer-b");
+    h.send(&a, &b, "<script>alert(1)</script> please review");
+    h.ok(&h.a, None, &["stop"]);
+    assert_eq!(h.ok(&h.a, None, &["status"])["running"], false);
+
+    let (child, line) = start_ui(&h, &[]);
+    let out: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(out["ok"], true);
+    let url = out["data"]["url"].as_str().unwrap();
+    let port = out["data"]["port"].as_u64().unwrap() as u16;
+    assert!(url.starts_with(&format!("http://127.0.0.1:{port}/#t=")));
+    assert_eq!(out["data"]["home"], json!(h.home));
+    let token = url.split("#t=").nth(1).unwrap();
+
+    assert_eq!(viewer_get(port, "/api/head", None).0, 401);
+    let (status, body) = viewer_get(port, "/api/messages", Some(token));
+    assert_eq!(status, 200);
+    let page: Value = serde_json::from_str(&body).unwrap();
+    let message = &page["messages"][0];
+    assert_eq!(message["sender"], a.id);
+    assert_eq!(message["recipient"], b.id);
+    assert_eq!(message["state"], "open");
+    assert!(message["text"].as_str().unwrap().contains("<script>"));
+    let (status, body) = viewer_get(port, "/api/meta", Some(token));
+    assert_eq!(status, 200);
+    assert!(!body.contains(&a.handle) && !body.contains(&b.handle));
+    let (status, page) = viewer_get(port, "/", None);
+    assert_eq!(status, 200);
+    assert!(!page.contains("please review"));
+
+    assert_eq!(h.ok(&h.a, None, &["status"])["running"], false);
+    assert!(interrupt(child).success());
+}
+
+#[cfg(unix)]
+#[test]
+fn ui_text_format_prints_the_url() {
+    let h = Harness::new();
+    h.register(&h.a, "viewer-text");
+    let (child, line) = start_ui(&h, &["--format=text"]);
+    assert!(line.starts_with("http://127.0.0.1:"), "{line}");
+    assert!(line.contains("/#t="));
+    assert!(interrupt(child).success());
+}
+
+#[test]
+fn ui_refuses_unusable_homes() {
+    let h = Harness::new();
+    let missing = h.error(&h.a, None, &["ui", "--no-open"], "VIEWER_NO_STORE");
+    assert!(missing["error"]["hint"]
+        .as_str()
+        .unwrap()
+        .contains("tala register"));
+
+    h.register(&h.a, "viewer-version");
+    h.ok(&h.a, None, &["stop"]);
+    {
+        let db = rusqlite::Connection::open(h.home.join("tala.sqlite3")).unwrap();
+        db.execute_batch("PRAGMA user_version=5").unwrap();
+    }
+    h.error(&h.a, None, &["ui", "--no-open"], "DATABASE_VERSION");
+    {
+        let db = rusqlite::Connection::open(h.home.join("tala.sqlite3")).unwrap();
+        db.execute_batch("PRAGMA user_version=6").unwrap();
+    }
+
+    std::fs::write(
+        h.home.join("remote.json"),
+        r#"{"url":"https://192.0.2.1:7878","token":"t","fingerprint":"f"}"#,
+    )
+    .unwrap();
+    let remote = h.error(&h.a, None, &["ui", "--no-open"], "REMOTE_MODE");
+    assert!(remote["error"]["hint"].as_str().unwrap().contains("host"));
+    std::fs::remove_file(h.home.join("remote.json")).unwrap();
 }

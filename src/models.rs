@@ -225,6 +225,12 @@ pub const ERRORS: &[(&str, Retry, &str, Option<&str>)] = &[
         Some("tala status"),
     ),
     (
+        "VIEWER_NO_STORE",
+        Retry::AfterFix,
+        "tala ui found no store in this home",
+        Some("tala status"),
+    ),
+    (
         "SERIALIZATION_ERROR",
         Retry::Never,
         "Internal encoding failed",
@@ -606,6 +612,8 @@ mod tests {
             include_str!("network.rs"),
             include_str!("store.rs"),
             include_str!("tls.rs"),
+            include_str!("viewer/mod.rs"),
+            include_str!("viewer/query.rs"),
         ];
         let mut found = 0;
         for source in sources {

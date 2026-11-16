@@ -31,9 +31,9 @@ A throwaway prototype (Python server and a single HTML page) validated the views
 
 ### Module layout
 
-- A new `src/viewer.rs` holds the axum router, token and `Host` checks, and handlers.
-- A new `src/viewer/` directory holds `index.html`, embedded with `include_str!`.
-- Read queries live in `store.rs` beside `status_context_snapshot`, as a `ViewerReader` that owns one read-only connection per request. They never select `agents.token`, and a test asserts that no viewer query mentions the column.
+- `src/viewer/mod.rs` holds the axum router, token and `Host` checks, handlers and signal handling.
+- `src/viewer/query.rs` holds the read queries. Each request opens its own read-only connection. The queries never select `agents.token`, and a test asserts that the query source does not mention the column. Keeping them out of `store.rs`, which is already over 4,000 lines, keeps the viewer self-contained; `store.rs` exports only `SCHEMA_VERSION`.
+- `src/viewer/assets/` holds `index.html`, `app.js` and `app.css`, each embedded with `include_str!`. Separate files let the CSP forbid inline scripts.
 - `cli.rs` gains `Commands::Ui { port, no_open }` with the standard `--format`.
 
 ### Server-side shaping with bounded endpoints
@@ -42,7 +42,8 @@ The prototype sent the whole store to the page and derived everything in JavaScr
 
 | Endpoint | Returns |
 | --- | --- |
-| `GET /api/head` | A change token: max message id, max event id, receipt count, max `last_seen`, max `listening_until`. |
+| `GET /api/head` | A change marker: max message id, max event id, receipt count, resolved request count, max `last_seen`, max `listening_until` and agent count. |
+| `GET /api/meta` | Public agent fields, projects with messages, the home path and the global attention count. |
 | `GET /api/messages?before=&limit=&project=&agent=&q=` | A page of messages, newest first, each with derived state. The default limit is 200. |
 | `GET /api/threads?…` | Thread summaries, built from the existing `thread_summaries` table where possible. |
 | `GET /api/threads/{id}` | The full transcript. |
@@ -71,7 +72,7 @@ The page polls `/api/head` every two seconds and refetches the current view when
 - **Binding.** The server binds `127.0.0.1` only.
 - **Token.** It generates a random token of at least 122 bits per run from the operating system's random source, using the existing `uuid` v4 generator, and reports `http://127.0.0.1:<port>/#t=<token>`. The fragment is never sent in requests, so the token stays out of server and proxy logs and the `Referer` header. The page reads it and sends `Authorization: Bearer <token>` on each API call. The server compares it in constant time, reusing `network::token_matches`.
 - **Host header.** The server rejects requests whose `Host` is not `127.0.0.1:<port>` or `localhost:<port>`. This defeats DNS rebinding from a hostile web page.
-- **Response headers.** Every response sends `Content-Security-Policy: default-src 'self'` with inline script and style allowed, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store`.
+- **Response headers.** Every response sends a Content Security Policy that allows scripts and stylesheets only from the viewer itself and inline style attributes only (`style-src-attr 'unsafe-inline'`, for per-agent hues and bar widths). It also sends `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and `Cache-Control: no-store`.
 - **Unauthenticated page.** `index.html` needs no token and contains no data.
 
 ### Page
@@ -85,11 +86,11 @@ The prototype's page is the starting point: vanilla JavaScript, warm neutral pal
 
 - **Output.** JSON (the default) writes one envelope `{"ok":true,"data":{"url":…,"home":…,"port":…}}` to stdout as soon as the server is listening. `--format=text` writes the URL alone.
 - **Opening the browser.** The browser is opened with `open` on macOS, `xdg-open` on Linux and `cmd /C start` on Windows. A failure is logged to stderr and the server keeps running.
-- **Shutdown.** Ctrl-C shuts the server down gracefully with exit 0.
+- **Shutdown.** Ctrl-C or termination shuts the server down gracefully with exit 0. The signal handlers are registered before the URL is printed, so a signal sent as soon as the URL appears still exits cleanly.
 - **Refusals.**
   - In a remote-connected home (`client::remote()` returns `Some`), the command fails with `REMOTE_MODE`.
-  - A missing store gives `VIEWER_NO_STORE`.
-  - A schema mismatch gives `VIEWER_STORE_VERSION`.
+  - A missing store gives the new code `VIEWER_NO_STORE`.
+  - A schema mismatch gives the existing `DATABASE_VERSION`, whose meaning already covers it. The hint differs for an older store (run any messaging command so the daemon migrates it) and a newer one.
   - All three exit 1, consistent with the existing error envelope.
 
 ### Command name

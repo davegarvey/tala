@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Tala viewer</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="bar">
+      <div class="brand"><i></i>tala</div>
+      <nav id="tabs"></nav>
+      <div class="live off" id="live"><i></i><span>connecting</span></div>
+    </div>
+    <div class="tools">
+      <select id="fProject" aria-label="Project"><option value="">All projects</option></select>
+      <select id="fAgent" aria-label="Agent"><option value="">All agents</option></select>
+      <input id="fText" placeholder="Search messages" type="search" aria-label="Search messages">
+    </div>
+  </div>
+</header>
+<main class="wrap" id="main"></main>
+<script src="app.js"></script>
+</body>
+</html>
