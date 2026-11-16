@@ -176,14 +176,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn guide_returns_full_content_and_supported_topics() {
+    fn bare_guide_returns_quickstart_and_supported_topics() {
         let result = guide(None).unwrap();
-        assert_eq!(result["topic"], "all");
+        assert_eq!(result["topic"], "quickstart");
         assert_eq!(
             result["topics"],
-            json!(["listening", "requests", "identity", "worktrees", "errors"])
+            json!([
+                "listening",
+                "requests",
+                "identity",
+                "worktrees",
+                "errors",
+                "harness"
+            ])
         );
-        assert!(result["content"].as_str().unwrap().contains("## Listening"));
+        let content = result["content"].as_str().unwrap();
+        assert_eq!(content.lines().next(), Some("## Quickstart"));
+        assert!(!content.contains("## Listening"));
+    }
+
+    #[test]
+    fn guide_all_returns_full_content() {
+        let result = guide(Some("all")).unwrap();
+        assert_eq!(result["topic"], "all");
+        let content = result["content"].as_str().unwrap();
+        assert!(content.contains("## Quickstart"));
+        assert!(content.contains("## Listening"));
+        assert!(content.contains("## Harness"));
     }
 
     #[test]
