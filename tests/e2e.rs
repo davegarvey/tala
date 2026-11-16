@@ -4936,6 +4936,7 @@ fn start_ui(h: &Harness, extra: &[&str]) -> (Child, String) {
 }
 
 /// A minimal HTTP/1.1 GET against the viewer, returning status and body.
+#[cfg(unix)]
 fn viewer_get(port: u16, path: &str, token: Option<&str>) -> (u16, String) {
     use std::io::Read;
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
