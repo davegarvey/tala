@@ -11,10 +11,26 @@ use std::time::Duration;
 use tokio::sync::watch;
 #[derive(Clone)]
 pub struct AppState {
-    pub store: Arc<Mutex<Store>>,
+    /// The daemon takes the store on shutdown so SQLite closes its files before
+    /// the lifetime lock is released; later requests then fail cleanly.
+    pub store: Arc<Mutex<Option<Store>>>,
     pub info: DaemonInfo,
     pub stop: watch::Sender<bool>,
     pub network: crate::listener::Manager,
+}
+fn poisoned() -> Failure {
+    Failure::new(
+        "STORAGE_ERROR",
+        "Store lock poisoned",
+        "Inspect daemon.log and restart the daemon.",
+    )
+}
+fn closed() -> Failure {
+    Failure::new(
+        "DAEMON_STOPPING",
+        "The daemon is stopping and has closed its storage",
+        "Retry the command; a new daemon starts after the stop completes.",
+    )
 }
 type Payload = std::result::Result<Json<Rpc>, axum::extract::rejection::JsonRejection>;
 type Reply = (StatusCode, Json<Envelope>);
@@ -142,13 +158,9 @@ async fn execute(s: AppState, payload: Payload) -> Reply {
     let result = tokio::task::spawn_blocking(move || {
         store
             .lock()
-            .map_err(|_| {
-                Failure::new(
-                    "STORAGE_ERROR",
-                    "Store lock poisoned",
-                    "Inspect daemon.log and restart the daemon.",
-                )
-            })?
+            .map_err(|_| poisoned())?
+            .as_mut()
+            .ok_or_else(closed)?
             .execute_with_attention(&request)
     })
     .await;
@@ -197,16 +209,12 @@ async fn wait_rpc(s: AppState, mut request: Rpc) -> (StatusCode, Json<Envelope>)
         let store = s.store.clone();
         let rpc = request.clone();
         let result = tokio::task::spawn_blocking(move || {
-            store
-                .lock()
-                .map_err(|_| {
-                    Failure::new(
-                        "STORAGE_ERROR",
-                        "Store lock poisoned",
-                        "Inspect daemon.log and restart the daemon.",
-                    )
-                })
-                .and_then(|mut store| store.execute_with_attention(&rpc))
+            store.lock().map_err(|_| poisoned()).and_then(|mut store| {
+                store
+                    .as_mut()
+                    .ok_or_else(closed)?
+                    .execute_with_attention(&rpc)
+            })
         })
         .await;
         let snapshot = match result {
