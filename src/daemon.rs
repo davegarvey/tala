@@ -109,13 +109,14 @@ pub async fn run() -> Result<()> {
     )?;
     let (stop, mut rx) = watch::channel(false);
     let state = AppState {
-        store: Arc::new(Mutex::new(store)),
+        store: Arc::new(Mutex::new(Some(store))),
         info: info.clone(),
         stop,
         network: crate::listener::Manager::default(),
     };
     // Restores an unexpired network window; loopback service never depends on it.
     state.network.start(&state).await;
+    let storage = state.store.clone();
     let app = api::router(state);
     eprintln!(
         "Tala daemon {} started on localhost:{}",
@@ -130,6 +131,13 @@ pub async fn run() -> Result<()> {
         }
         #[cfg(not(unix))]{tokio::select!{_ = rx.changed()=>{}, _ = tokio::signal::ctrl_c()=>{}}}
     }).await;
+    // Stop treats the lifetime lock as proof that this instance has exited, so
+    // close SQLite before releasing it. Windows keeps a file in use while any
+    // handle is open, and background tasks may still hold the shared state.
+    match storage.lock() {
+        Ok(mut store) => drop(store.take()),
+        Err(poisoned) => drop(poisoned.into_inner().take()),
+    }
     if read_info().is_some_and(|i| i.instance == info.instance) {
         let _ = std::fs::remove_file(store::home().join("daemon.json"));
     }

@@ -44,7 +44,7 @@ The system SHALL reject incompatible wire versions before mutation, report statu
 - **THEN** the replacement returns the same stored message and deduplication key
 
 ### Requirement: Stop and startup are linearizable
-Daemon startup SHALL reserve the current lifecycle generation before attempting startup coordination and SHALL publish an instance only while that generation remains current. An accepted stop SHALL advance the generation, prevent earlier reservations from publishing afterward, target the instance active at stop acceptance, and report success only after that instance exits. No lifecycle or startup lock SHALL be held while waiting for shutdown.
+Daemon startup SHALL reserve the current lifecycle generation before attempting startup coordination and SHALL publish an instance only while that generation remains current. An accepted stop SHALL advance the generation, prevent earlier reservations from publishing afterward, target the instance active at stop acceptance, and report success only after that instance exits. An instance SHALL close its storage before it releases its lifetime lock, so release of that lock means the instance no longer holds the database open. No lifecycle or startup lock SHALL be held while waiting for shutdown.
 
 #### Scenario: Stop races with an unpublished start
 - **WHEN** a start reservation exists but has not published its daemon instance when stop is accepted
@@ -65,6 +65,11 @@ Daemon startup SHALL reserve the current lifecycle generation before attempting 
 - **WHEN** the target removes daemon metadata before releasing its lifetime lock
 - **THEN** stop-in-progress remains set until that lock is available
 - **AND** a new wait exits terminally while that state remains set
+
+#### Scenario: Stop releases storage
+- **WHEN** stop reports success for a targeted instance
+- **THEN** that instance has closed its database before releasing its lifetime lock
+- **AND** the database file can be moved or deleted on every supported platform
 
 ### Requirement: Stop generations preserve crash recovery
 The CLI SHALL distinguish accepted graceful stops from ungraceful daemon failures using a monotonically increasing per-home stop generation. A crash SHALL NOT advance the generation. A waiter SHALL recover through the existing startup coordination when its captured generation remains current, and SHALL NOT recover after the generation changes.
