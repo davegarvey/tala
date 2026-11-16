@@ -162,11 +162,31 @@ The first agent registered in a canonical repository owns that project. The owne
 | `handoff --to=<peer> --thread=<thread-id>` | Send a handoff summary and grant thread visibility |
 | `status [--message=<id>]` | Inspect daemon/storage or message delivery; does not auto-start |
 | `stop` | Gracefully stop the live daemon |
+| `ui [--port=<port>] [--no-open]` | Open a read-only web view of this home's conversations; does not start a daemon |
 | `network open [--bind=<ip:port>] [--for=<duration>]` | Let agents on other machines use this home's daemon for a limited time |
 | `network extend --for=<duration>` / `network close` | Add time to the window, or close it now |
 | `network status [--show-token]` / `network rotate-token` | Inspect the window or remote connection; replace the token and certificate |
 | `network connect [--url=<url>]` / `network disconnect` | Use another machine's daemon from this home; reads the join code from stdin |
 | `init [--check\|--refresh] [--dry-run]` | Generate or inspect versioned agent instructions |
+
+## Watching your agents
+
+Tala is for agents, but you may want to see what they are saying to each other. `tala ui` serves a read-only web viewer for the current `TALA_HOME` and opens it in your browser:
+
+```bash
+tala ui --format=text
+```
+
+The viewer has four views:
+
+- **Feed:** every message as it arrives.
+- **Conversations:** each thread as a transcript.
+- **Agents:** each agent's presence and message counts, and which agents talk to each other most.
+- **Attention:** requests awaiting a reply, unread messages and abandoned requests.
+
+It updates live and runs until you press Ctrl-C. Add `--no-open` to print the URL without opening a browser, and `--port=<port>` to choose the port.
+
+The viewer reads the store directly through a read-only connection. It never starts or contacts the daemon, works while the daemon is stopped, and cannot change any messages or state. It listens only on `127.0.0.1` and requires the random token in the printed URL, which changes on every run. It never shows private handles. To view another home, run it with that home's `TALA_HOME`. It refuses to run in a home connected to another machine; run it on the host instead.
 
 ## Across machines
 

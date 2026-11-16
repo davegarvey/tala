@@ -364,6 +364,18 @@ pub enum Commands {
     },
     /// Stop the live daemon gracefully; never signal a recorded PID
     Stop,
+    /// Serve a read-only web viewer of this home's conversations on loopback; does not start a daemon
+    Ui {
+        #[arg(
+            long,
+            value_name = "PORT",
+            default_value_t = 0,
+            help = "Loopback port to listen on; 0 picks a free port"
+        )]
+        port: u16,
+        #[arg(long, help = "Print the URL without opening a browser")]
+        no_open: bool,
+    },
     /// Share this home's daemon with other machines for a limited time, or use another machine's daemon
     Network {
         #[command(subcommand)]
@@ -1744,6 +1756,43 @@ fn shell_quote_selector_path(path: &str) -> String {
     }
 }
 
+/// Serves the read-only viewer until interrupted. Writes the URL to stdout
+/// itself, because the command keeps running after it is known.
+async fn ui(port: u16, no_open: bool, human: bool) -> Result<()> {
+    if client::remote()?.is_some() {
+        return Err(Failure::new(
+            "REMOTE_MODE",
+            "This home is connected to a remote daemon, so it has no local store to view",
+            "Run tala ui on the host machine.",
+        ));
+    }
+    let home = store::home();
+    let bound = crate::viewer::bind(home.clone(), port).await?;
+    let shutdown = crate::viewer::shutdown_signal()?;
+    let url = bound.url();
+    if human {
+        println!("{url}");
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string(&Envelope::success(
+                json!({"url": url, "home": home, "port": bound.port()})
+            ))
+            .expect("output serializes")
+        );
+    }
+    eprintln!(
+        "Serving a read-only view of {}. Press Ctrl-C to stop.",
+        home.display()
+    );
+    if !no_open {
+        if let Err(error) = crate::viewer::open_browser(&url) {
+            eprintln!("Could not open a browser ({error}); open the URL yourself.");
+        }
+    }
+    crate::viewer::serve(bound, shutdown).await
+}
+
 pub async fn run(cli: Cli) -> Result<Outcome> {
     let human = cli.text();
     let status_selector = matches!(
@@ -1758,6 +1807,7 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
                 | Commands::Register { .. }
                 | Commands::Status { message: None }
                 | Commands::Stop
+                | Commands::Ui { .. }
                 | Commands::Daemon
                 | Commands::Network { .. }
         )
@@ -1978,6 +2028,10 @@ pub async fn run(cli: Cli) -> Result<Outcome> {
             status
         }
         Commands::Stop => client::stop_daemon().await?,
+        Commands::Ui { port, no_open } => {
+            ui(port, no_open, human).await?;
+            return Ok(done(json!({"stopped": true})));
+        }
         Commands::Network { command } => network_command(command).await?,
         Commands::Whoami => {
             client::call(Operation::Whoami, Some(client::credential(selected)?)).await?

@@ -11,6 +11,7 @@ mod models;
 mod network;
 mod store;
 mod tls;
+mod viewer;
 #[tokio::main]
 async fn main() {
     #[cfg(unix)]
@@ -51,7 +52,11 @@ async fn main() {
     let guide_default =
         matches!(&cli.command, Some(cli::Commands::Guide { .. })) && !format_explicit;
     let human = cli.text() || guide_default;
-    let is_daemon = matches!(cli.command, Some(cli::Commands::Daemon));
+    // The daemon writes nothing, and ui writes its URL itself while it runs.
+    let is_daemon = matches!(
+        cli.command,
+        Some(cli::Commands::Daemon | cli::Commands::Ui { .. })
+    );
     match cli::run(cli).await {
         Ok(result) => {
             if !is_daemon {
