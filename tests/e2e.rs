@@ -136,29 +136,48 @@ fn wait_child(mut child: Child, timeout: Duration, label: &str) -> Output {
 #[test]
 fn guide_is_available_without_identity_or_daemon_in_json_and_human_modes() {
     let h = Harness::new();
-    let full = h.ok(&h.a, None, &["guide"]);
-    assert_eq!(full["topic"], "all");
+    let quickstart = h.raw(&h.a, None, &["guide"]);
+    assert!(quickstart.status.success());
+    let quickstart = String::from_utf8(quickstart.stdout).unwrap();
+    assert!(quickstart.starts_with("## Quickstart\n"));
+    assert!(quickstart.chars().count() < 2000);
+    let quickstart = h.ok(&h.a, None, &["guide", "--format=json"]);
+    assert_eq!(quickstart["topic"], "quickstart");
     assert_eq!(
-        full["topics"],
-        json!(["listening", "requests", "identity", "worktrees", "errors"])
+        quickstart["topics"],
+        json!([
+            "listening",
+            "requests",
+            "identity",
+            "worktrees",
+            "errors",
+            "harness"
+        ])
     );
-    let topic = h.ok(&h.a, None, &["guide", "listening"]);
+    let full = h.ok(&h.a, None, &["guide", "all", "--format=json"]);
+    assert_eq!(full["topic"], "all");
+    let full = full["content"].as_str().unwrap();
+    assert!(full.contains("## Quickstart") && full.contains("## Harness"));
+    let topic = h.ok(&h.a, None, &["guide", "listening", "--format=json"]);
     let listening = topic["content"].as_str().unwrap();
     assert!(listening.contains("tala wait"));
     assert!(listening.contains("--agent=th_<your-handle> wait"));
     assert!(listening.contains("does not return message bodies or acknowledge messages"));
     assert!(listening.contains("`events` field gives IDs, types and sources"));
     assert!(listening.contains("`next.listen_again`"));
-    assert!(listening.contains("--limit=\"$N\""));
-    assert!(listening.contains("requires Bash and Python 3"));
-    assert!(listening.contains("mv \"$tmp\" \"$path\""));
-    assert!(listening.contains("Keep one inbox reader per identity"));
-    assert!(listening.contains("does not run commands from `next.*`"));
-    assert!(listening.contains("exit **3** means timeout"));
-    assert!(listening.contains("exit **5** means the daemon was intentionally stopped"));
-    assert!(listening.contains("5) exit 0"));
-    assert!(listening.contains("a standalone read-only `tala wait` does not produce it"));
-    let reference_loop = listening
+    assert!(!listening.contains("### Reference loop for a harness"));
+    let topic = h.ok(&h.a, None, &["guide", "harness", "--format=json"]);
+    let harness = topic["content"].as_str().unwrap();
+    assert!(harness.contains("--limit=\"$N\""));
+    assert!(harness.contains("requires Bash and Python 3"));
+    assert!(harness.contains("mv \"$tmp\" \"$path\""));
+    assert!(harness.contains("Keep one inbox reader per identity"));
+    assert!(harness.contains("does not run commands from `next.*`"));
+    assert!(harness.contains("exit **3** means timeout"));
+    assert!(harness.contains("exit **5** means the daemon was intentionally stopped"));
+    assert!(harness.contains("5) exit 0"));
+    assert!(harness.contains("a standalone read-only `tala wait` does not produce it"));
+    let reference_loop = harness
         .split("### Reference loop for a harness\n")
         .nth(1)
         .unwrap()
@@ -1958,8 +1977,8 @@ fn new_help_rejects_old_surface() {
     for cmd in ["register", "rename", "inbox", "reply", "board", "handoff"] {
         assert!(help.contains(cmd));
     }
-    assert!(help.contains("tala guide [listening|requests|identity|worktrees|errors]"));
-    assert!(help.contains("start with tala guide listening"));
+    assert!(help.contains("tala guide [all|listening|requests|identity|worktrees|errors|harness]"));
+    assert!(help.contains("start with tala guide)"));
     assert!(help.contains("Background loop: run tala wait"));
     assert!(help.contains("tala init writes project instructions"));
     for cmd in ["use", "session", "check", "listen", "discover"] {
