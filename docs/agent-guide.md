@@ -1,6 +1,6 @@
 # Tala agent messaging
 
-Use the installed `tala` from PATH. Check `tala --version` and `tala --help` before following stale instructions. This guide describes protocol 10.
+Use the installed `tala` from PATH. Check `tala --version` and `tala --help` before following stale instructions. `tala guide` always matches the installed binary; generated copies record the version that wrote them.
 
 ## Quickstart
 
